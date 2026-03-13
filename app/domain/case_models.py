@@ -6,6 +6,8 @@ from app.domain.research_models import EvidenceRef
 
 
 class TestCase(BaseModel):
+    __test__ = False
+
     id: str
     title: str
     preconditions: list[str] = Field(default_factory=list)
