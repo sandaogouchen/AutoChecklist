@@ -2,6 +2,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.clients.llm import LLMClientConfig, OpenAICompatibleLLMClient
+from app.nodes.draft_writer import DraftCaseCollection
 
 
 class _StructuredResponse(BaseModel):
@@ -106,3 +107,19 @@ def test_llm_client_accepts_single_wrapper_object_response(monkeypatch) -> None:
     )
 
     assert response.status == "ok"
+
+
+def test_llm_client_accepts_top_level_list_for_single_list_field_model(monkeypatch) -> None:
+    client = _build_client(
+        monkeypatch,
+        content='[{"id":"TC-001","title":"Login succeeds","steps":["Open login"],"expected_results":["Dashboard shown"],"evidence_refs":[]}]',
+    )
+
+    response = client.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        response_model=DraftCaseCollection,
+    )
+
+    assert len(response.test_cases) == 1
+    assert response.test_cases[0].id == "TC-001"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, get_origin
 
 import httpx
 from pydantic import BaseModel, ValidationError, field_validator
@@ -117,9 +117,13 @@ def _parse_structured_response(content: str, response_model: type[ResponseModelT
     except ValidationError as original_error:
         payload = json.loads(normalized_content)
         unwrapped_payload = _unwrap_common_wrapper(payload)
-        if unwrapped_payload is payload:
+        if unwrapped_payload is not payload:
+            return response_model.model_validate(unwrapped_payload)
+
+        wrapped_payload = _wrap_top_level_list_for_single_list_field_model(payload, response_model)
+        if wrapped_payload is payload:
             raise original_error
-        return response_model.model_validate(unwrapped_payload)
+        return response_model.model_validate(wrapped_payload)
 
 
 def _normalize_json_content(content: str) -> str:
@@ -145,6 +149,24 @@ def _unwrap_common_wrapper(payload: Any) -> Any:
             return only_value
 
     return payload
+
+
+def _wrap_top_level_list_for_single_list_field_model(
+    payload: Any,
+    response_model: type[ResponseModelT],
+) -> Any:
+    if not isinstance(payload, list):
+        return payload
+
+    model_fields = response_model.model_fields
+    if len(model_fields) != 1:
+        return payload
+
+    field_name, field_info = next(iter(model_fields.items()))
+    if get_origin(field_info.annotation) is not list:
+        return payload
+
+    return {field_name: payload}
 
 
 def _resolve_chat_completions_url(base_url: str) -> str:

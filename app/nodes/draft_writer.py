@@ -36,7 +36,9 @@ def build_draft_writer_node(llm_client: LLMClient):
         response = llm_client.generate_structured(
             system_prompt=(
                 "You write concise manual QA test cases as structured JSON. "
-                "Always include ids, steps, expected_results, and evidence_refs."
+                'Return exactly one JSON object with top-level shape {"test_cases": [...]} '
+                "and never return a bare array. Each test case must include id, title, "
+                "steps, expected_results, and evidence_refs."
             ),
             user_prompt="\n\n".join(prompt_lines),
             response_model=DraftCaseCollection,
