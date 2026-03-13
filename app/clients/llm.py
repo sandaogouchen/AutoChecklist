@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Protocol, TypeVar
 
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
+CHAT_COMPLETIONS_PATH = "chat/completions"
+FENCED_JSON_PATTERN = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+COMMON_WRAPPER_KEYS = ("data", "result", "output", "response", "research_output", "document")
 
 
 class LLMClientConfig(BaseModel):
@@ -45,8 +50,8 @@ class OpenAICompatibleLLMClient:
         client: httpx.Client | None = None,
     ) -> None:
         self.config = config
+        self._chat_completions_url = _resolve_chat_completions_url(config.base_url)
         self._client = client or httpx.Client(
-            base_url=config.base_url.rstrip("/"),
             timeout=config.timeout_seconds,
             headers={
                 "Authorization": f"Bearer {config.api_key}",
@@ -74,12 +79,12 @@ class OpenAICompatibleLLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         }
-        response = self._client.post("/chat/completions", json=payload)
+        response = self._client.post(self._chat_completions_url, json=payload)
         response.raise_for_status()
 
         response_payload = response.json()
         content = _extract_message_content(response_payload)
-        return response_model.model_validate_json(content)
+        return _parse_structured_response(content, response_model)
 
 
 def _extract_message_content(payload: dict[str, Any]) -> str:
@@ -103,3 +108,47 @@ def _extract_message_content(payload: dict[str, Any]) -> str:
             return "".join(text_parts)
 
     raise ValueError("LLM response did not include structured text content")
+
+
+def _parse_structured_response(content: str, response_model: type[ResponseModelT]) -> ResponseModelT:
+    normalized_content = _normalize_json_content(content)
+    try:
+        return response_model.model_validate_json(normalized_content)
+    except ValidationError as original_error:
+        payload = json.loads(normalized_content)
+        unwrapped_payload = _unwrap_common_wrapper(payload)
+        if unwrapped_payload is payload:
+            raise original_error
+        return response_model.model_validate(unwrapped_payload)
+
+
+def _normalize_json_content(content: str) -> str:
+    stripped_content = content.strip()
+    fenced_match = FENCED_JSON_PATTERN.match(stripped_content)
+    if fenced_match:
+        return fenced_match.group(1).strip()
+    return stripped_content
+
+
+def _unwrap_common_wrapper(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    for key in COMMON_WRAPPER_KEYS:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+
+    if len(payload) == 1:
+        only_value = next(iter(payload.values()))
+        if isinstance(only_value, dict):
+            return only_value
+
+    return payload
+
+
+def _resolve_chat_completions_url(base_url: str) -> str:
+    normalized_base_url = base_url.strip().rstrip("/")
+    if normalized_base_url.endswith(f"/{CHAT_COMPLETIONS_PATH}"):
+        return normalized_base_url
+    return f"{normalized_base_url}/{CHAT_COMPLETIONS_PATH}"

@@ -48,3 +48,16 @@ class CaseGenerationRun(BaseModel):
     quality_report: QualityReport = Field(default_factory=QualityReport)
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: ErrorInfo | None = None
+
+
+class CaseGenerationRunResult(BaseModel):
+    run_id: str
+    status: Literal["pending", "running", "succeeded", "failed"]
+    result: CaseGenerationRun | None = None
+    error: ErrorInfo | None = None
+
+    @classmethod
+    def from_run(cls, run: CaseGenerationRun) -> "CaseGenerationRunResult":
+        if run.error is not None:
+            return cls(run_id=run.run_id, status=run.status, error=run.error)
+        return cls(run_id=run.run_id, status=run.status, result=run)

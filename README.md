@@ -23,6 +23,8 @@ Set the LLM environment variables in `.env`:
 - `LLM_TEMPERATURE`
 - `LLM_MAX_TOKENS`
 
+`LLM_BASE_URL` can be either a provider base URL such as `https://api.openai.com/v1` or a full endpoint such as `http://localhost:8317/v1/chat/completions/`.
+
 ## Run The API
 
 ```bash
@@ -48,6 +50,46 @@ curl -X POST http://127.0.0.1:8000/api/v1/case-generation/runs \
       "max_tokens": 1600
     }
   }'
+```
+
+Success responses return the run in a `result` wrapper:
+
+```json
+{
+  "run_id": "123",
+  "status": "succeeded",
+  "result": {
+    "run_id": "123",
+    "status": "succeeded",
+    "input": {
+      "file_path": "/absolute/path/to/prd.md",
+      "language": "zh-CN",
+      "model_config": {
+        "model": null,
+        "temperature": 0.2,
+        "max_tokens": 1600
+      },
+      "options": {
+        "include_intermediate_artifacts": false
+      }
+    },
+    "test_cases": []
+  }
+}
+```
+
+Failed runs return a compact error payload:
+
+```json
+{
+  "run_id": "123",
+  "status": "failed",
+  "error": {
+    "code": "ValidationError",
+    "message": "value must not be empty",
+    "detail": {}
+  }
+}
 ```
 
 Artifacts are written to `output/runs/<run_id>/` by default.
