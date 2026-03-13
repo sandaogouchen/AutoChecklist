@@ -35,7 +35,7 @@ def create_case_generation_run(
     payload: CaseGenerationRequest,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> CaseGenerationRunResult:
-    return CaseGenerationRunResult.from_run(workflow_service.create_run(payload))
+    return workflow_service.create_run(payload)
 
 
 @router.get(
@@ -48,6 +48,6 @@ def get_case_generation_run(
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> CaseGenerationRunResult:
     try:
-        return CaseGenerationRunResult.from_run(workflow_service.get_run(run_id))
+        return workflow_service.get_run(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc

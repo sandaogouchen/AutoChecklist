@@ -52,7 +52,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/case-generation/runs \
   }'
 ```
 
-Success responses return the run in a `result` wrapper:
+Success responses return a lightweight run summary in the `result` wrapper:
 
 ```json
 {
@@ -61,19 +61,31 @@ Success responses return the run in a `result` wrapper:
   "result": {
     "run_id": "123",
     "status": "succeeded",
-    "input": {
-      "file_path": "/absolute/path/to/prd.md",
-      "language": "zh-CN",
-      "model_config": {
-        "model": null,
-        "temperature": 0.2,
-        "max_tokens": 1600
-      },
-      "options": {
-        "include_intermediate_artifacts": false
-      }
+    "test_case_count": 1,
+    "warning_count": 0,
+    "artifacts": {
+      "request": "output/runs/123/request.json",
+      "parsed_document": "output/runs/123/parsed_document.json",
+      "research_output": "output/runs/123/research_output.json",
+      "test_cases": "output/runs/123/test_cases.json",
+      "test_cases_markdown": "output/runs/123/test_cases.md",
+      "quality_report": "output/runs/123/quality_report.json",
+      "run_result": "output/runs/123/run_result.json"
     },
-    "test_cases": []
+    "outputs": [
+      {
+        "key": "test_cases_markdown",
+        "path": "output/runs/123/test_cases.md",
+        "kind": "file",
+        "format": "markdown"
+      },
+      {
+        "key": "platform_delivery",
+        "path": "output/runs/123-platform.json",
+        "kind": "platform",
+        "format": "json"
+      }
+    ]
   }
 }
 ```
@@ -92,7 +104,13 @@ Failed runs return a compact error payload:
 }
 ```
 
-Artifacts are written to `output/runs/<run_id>/` by default.
+Artifacts are written only for successful runs to `output/runs/<run_id>/` by default.
+
+Contract notes:
+
+- Failed runs do not create an output directory.
+- `GET /api/v1/case-generation/runs/{run_id}` is guaranteed across process restarts only for successful runs, because only successful summaries are persisted to disk.
+- The platform delivery step currently writes a local JSON adapter output. A real platform publisher can replace it without changing the output subgraph contract.
 
 ## Run Tests
 

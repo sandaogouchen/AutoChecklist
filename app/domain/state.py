@@ -5,6 +5,7 @@ from typing import TypedDict
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.document_models import ParsedDocument
+from app.domain.output_models import OutputArtifact, OutputBundle, OutputSummary
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 
 
@@ -21,7 +22,10 @@ class GlobalState(TypedDict, total=False):
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
     quality_report: QualityReport
+    output_bundle: OutputBundle
+    output_summary: OutputSummary
     artifacts: dict[str, str]
+    outputs: list[OutputArtifact]
     error: ErrorInfo
 
 

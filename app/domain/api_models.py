@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.document_models import ParsedDocument
+from app.domain.output_models import OutputSummary
 from app.domain.research_models import ResearchOutput
 
 
@@ -53,11 +54,21 @@ class CaseGenerationRun(BaseModel):
 class CaseGenerationRunResult(BaseModel):
     run_id: str
     status: Literal["pending", "running", "succeeded", "failed"]
-    result: CaseGenerationRun | None = None
+    result: OutputSummary | None = None
     error: ErrorInfo | None = None
 
     @classmethod
     def from_run(cls, run: CaseGenerationRun) -> "CaseGenerationRunResult":
         if run.error is not None:
             return cls(run_id=run.run_id, status=run.status, error=run.error)
-        return cls(run_id=run.run_id, status=run.status, result=run)
+        return cls(
+            run_id=run.run_id,
+            status=run.status,
+            result=OutputSummary(
+                run_id=run.run_id,
+                status="succeeded",
+                test_case_count=len(run.test_cases),
+                warning_count=len(run.quality_report.warnings),
+                artifacts=run.artifacts,
+            ),
+        )

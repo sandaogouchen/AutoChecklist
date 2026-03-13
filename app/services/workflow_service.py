@@ -4,9 +4,9 @@ from uuid import uuid4
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
 from app.config.settings import Settings
-from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun, ErrorInfo
-from app.domain.case_models import QualityReport, TestCase
+from app.domain.api_models import CaseGenerationRequest, CaseGenerationRunResult, ErrorInfo
 from app.graphs.main_workflow import build_workflow
+from app.nodes.output_platform_writer import LocalPlatformPublisher, PlatformPublisher
 from app.repositories.run_repository import FileRunRepository
 
 
@@ -16,16 +16,17 @@ class WorkflowService:
         settings: Settings,
         repository: FileRunRepository | None = None,
         llm_client: LLMClient | None = None,
+        platform_publisher: PlatformPublisher | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
         self._llm_client = llm_client
+        self._platform_publisher = platform_publisher or LocalPlatformPublisher(self.repository.root_dir)
         self._workflow = None
-        self._run_registry: dict[str, CaseGenerationRun] = {}
+        self._run_registry: dict[str, CaseGenerationRunResult] = {}
 
-    def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
+    def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRunResult:
         run_id = uuid4().hex
-        self.repository.save(run_id, request.model_dump(mode="json", by_alias=True), "request.json")
         try:
             result = self._get_workflow().invoke(
                 {
@@ -36,40 +37,38 @@ class WorkflowService:
                     "model_config": request.llm_config,
                 }
             )
-            run = CaseGenerationRun(
+            run = CaseGenerationRunResult(
                 run_id=run_id,
                 status="succeeded",
-                input=request,
-                parsed_document=result.get("parsed_document"),
-                research_summary=result.get("research_output"),
-                test_cases=result.get("test_cases", []),
-                quality_report=result.get("quality_report", QualityReport()),
+                result=result["output_summary"],
             )
         except Exception as exc:
-            run = CaseGenerationRun(
+            run = CaseGenerationRunResult(
                 run_id=run_id,
                 status="failed",
-                input=request,
                 error=ErrorInfo(code=exc.__class__.__name__, message=str(exc)),
             )
 
-        run = self._persist_run_artifacts(run)
         self._run_registry[run_id] = run
         return run
 
-    def get_run(self, run_id: str) -> CaseGenerationRun:
+    def get_run(self, run_id: str) -> CaseGenerationRunResult:
         cached_run = self._run_registry.get(run_id)
         if cached_run is not None:
             return cached_run
 
         run_payload = self.repository.load(run_id, "run_result.json")
-        run = CaseGenerationRun.model_validate(run_payload)
+        run = CaseGenerationRunResult.model_validate(run_payload)
         self._run_registry[run_id] = run
         return run
 
     def _get_workflow(self):
         if self._workflow is None:
-            self._workflow = build_workflow(self._get_llm_client())
+            self._workflow = build_workflow(
+                self._get_llm_client(),
+                repository=self.repository,
+                platform_publisher=self._platform_publisher,
+            )
         return self._workflow
 
     def _get_llm_client(self) -> LLMClient:
@@ -84,80 +83,3 @@ class WorkflowService:
             )
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client
-
-    def _persist_run_artifacts(self, run: CaseGenerationRun) -> CaseGenerationRun:
-        artifacts: dict[str, str] = {}
-        run_id = run.run_id
-
-        if run.parsed_document is not None:
-            artifacts["parsed_document"] = str(
-                self.repository.save(
-                    run_id,
-                    run.parsed_document.model_dump(mode="json"),
-                    "parsed_document.json",
-                )
-            )
-        if run.research_summary is not None:
-            artifacts["research_output"] = str(
-                self.repository.save(
-                    run_id,
-                    run.research_summary.model_dump(mode="json"),
-                    "research_output.json",
-                )
-            )
-        artifacts["test_cases"] = str(
-            self.repository.save(
-                run_id,
-                [case.model_dump(mode="json") for case in run.test_cases],
-                "test_cases.json",
-            )
-        )
-        artifacts["test_cases_markdown"] = str(
-            self.repository.save_text(
-                run_id,
-                "test_cases.md",
-                _render_test_cases_markdown(run.test_cases),
-            )
-        )
-        artifacts["quality_report"] = str(
-            self.repository.save(
-                run_id,
-                run.quality_report.model_dump(mode="json"),
-                "quality_report.json",
-            )
-        )
-
-        run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
-        run_result_path = self.repository.save(
-            run_id,
-            run_with_artifacts.model_dump(mode="json", by_alias=True),
-            "run_result.json",
-        )
-        artifacts["run_result"] = str(run_result_path)
-        final_run = run_with_artifacts.model_copy(update={"artifacts": artifacts})
-        self.repository.save(
-            run_id,
-            final_run.model_dump(mode="json", by_alias=True),
-            "run_result.json",
-        )
-        return final_run
-
-
-def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    if not test_cases:
-        return "# Generated Test Cases\n\nNo test cases were generated.\n"
-
-    lines = ["# Generated Test Cases", ""]
-    for test_case in test_cases:
-        lines.append(f"## {test_case.id} {test_case.title}")
-        lines.append("")
-        lines.append("### Preconditions")
-        lines.extend([f"- {item}" for item in test_case.preconditions] or ["- None"])
-        lines.append("")
-        lines.append("### Steps")
-        lines.extend([f"{index}. {step}" for index, step in enumerate(test_case.steps, start=1)] or ["1. None"])
-        lines.append("")
-        lines.append("### Expected Results")
-        lines.extend([f"- {item}" for item in test_case.expected_results] or ["- None"])
-        lines.append("")
-    return "\n".join(lines).strip() + "\n"
