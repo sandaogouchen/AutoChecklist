@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from pydantic import BaseModel
 
@@ -23,6 +24,7 @@ class _FakeResponse:
 class _RecordingHttpxClient:
     instances: list["_RecordingHttpxClient"] = []
     next_content = '{"status":"ok"}'
+    next_post_outcomes: list[object] = []
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -31,12 +33,18 @@ class _RecordingHttpxClient:
 
     def post(self, url: str, json: dict[str, object]) -> _FakeResponse:
         self.post_calls.append((url, json))
+        if self.__class__.next_post_outcomes:
+            outcome = self.__class__.next_post_outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
         return _FakeResponse(self.__class__.next_content)
 
 
 def _build_client(monkeypatch, *, base_url: str = "https://example.com/v1", content: str = '{"status":"ok"}') -> OpenAICompatibleLLMClient:
     _RecordingHttpxClient.instances.clear()
     _RecordingHttpxClient.next_content = content
+    _RecordingHttpxClient.next_post_outcomes = []
     monkeypatch.setattr("app.clients.llm.httpx.Client", _RecordingHttpxClient)
     return OpenAICompatibleLLMClient(
         LLMClientConfig(
@@ -123,3 +131,56 @@ def test_llm_client_accepts_top_level_list_for_single_list_field_model(monkeypat
 
     assert len(response.test_cases) == 1
     assert response.test_cases[0].id == "TC-001"
+
+
+def test_llm_client_coerces_string_evidence_refs_into_objects(monkeypatch) -> None:
+    client = _build_client(
+        monkeypatch,
+        content='{"test_cases":[{"id":"TC-001","title":"Login succeeds","steps":["Open login"],"expected_results":["Dashboard shown"],"evidence_refs":["prd (1-105): Successful login redirects to the dashboard."]}]}',
+    )
+
+    response = client.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        response_model=DraftCaseCollection,
+    )
+
+    assert len(response.test_cases[0].evidence_refs) == 1
+    assert response.test_cases[0].evidence_refs[0].section_title == "prd"
+    assert response.test_cases[0].evidence_refs[0].line_start == 1
+    assert response.test_cases[0].evidence_refs[0].line_end == 105
+
+
+def test_llm_client_retries_read_timeout_and_returns_success(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    _RecordingHttpxClient.next_post_outcomes = [
+        httpx.ReadTimeout("timed out"),
+        _FakeResponse('{"status":"ok"}'),
+    ]
+
+    response = client.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        response_model=_StructuredResponse,
+    )
+
+    assert response.status == "ok"
+    assert len(_RecordingHttpxClient.instances[0].post_calls) == 2
+
+
+def test_llm_client_raises_after_exhausting_read_timeout_retries(monkeypatch) -> None:
+    client = _build_client(monkeypatch)
+    _RecordingHttpxClient.next_post_outcomes = [
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadTimeout("timed out"),
+    ]
+
+    with pytest.raises(httpx.ReadTimeout):
+        client.generate_structured(
+            system_prompt="system",
+            user_prompt="user",
+            response_model=_StructuredResponse,
+        )
+
+    assert len(_RecordingHttpxClient.instances[0].post_calls) == 3

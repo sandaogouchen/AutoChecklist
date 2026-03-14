@@ -136,3 +136,48 @@ def test_platform_writer_uses_local_adapter_until_real_platform_exists(
 
     assert result["outputs"][-1].kind == "platform"
     assert (tmp_path / "run-1-platform.json").exists()
+
+
+def test_output_bundle_serializes_fact_rooted_checklists(
+    request_fixture: CaseGenerationRequest,
+    parsed_document_fixture: ParsedDocument,
+    research_output_fixture: ResearchOutput,
+    test_case_fixture: TestCase,
+    quality_report_fixture: QualityReport,
+) -> None:
+    child_case = test_case_fixture.model_copy(
+        update={
+            "id": "TC-001-01",
+            "fact_id": "FACT-001",
+            "node_type": "check",
+            "title": "Persist selected optimize goal",
+            "parent": "TC-001",
+            "root": "TC-001",
+            "children": [],
+        }
+    )
+    root_case = test_case_fixture.model_copy(
+        update={
+            "id": "TC-001",
+            "fact_id": "FACT-001",
+            "node_type": "root",
+            "root": "TC-001",
+            "children": [child_case],
+        }
+    )
+
+    bundle = OutputBundle.from_state(
+        run_id="run-1",
+        request=request_fixture,
+        parsed_document=parsed_document_fixture,
+        research_output=research_output_fixture,
+        test_cases=[root_case],
+        quality_report=quality_report_fixture,
+    )
+
+    serialized_cases = bundle.file_payloads["test_cases.json"].content
+
+    assert serialized_cases[0]["children"][0]["parent"] == "TC-001"
+    markdown = bundle.file_payloads["test_cases.md"].content
+    assert "Branch: main" in markdown
+    assert "Persist selected optimize goal" in markdown

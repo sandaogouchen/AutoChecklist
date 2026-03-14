@@ -1,3 +1,5 @@
+import json
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -30,6 +32,37 @@ def test_create_run_returns_generated_cases(tmp_path, fake_llm_client) -> None:
     assert "test_cases" not in payload["result"]
     assert payload["result"]["test_case_count"] == 1
     assert "run_result" in payload["result"]["artifacts"]
+
+
+def test_create_run_accepts_raw_json_body_without_content_type_and_logs_in_chinese(
+    tmp_path,
+    fake_llm_client,
+    caplog,
+) -> None:
+    settings = Settings(output_dir=str(tmp_path))
+    service = WorkflowService(
+        settings=settings,
+        repository=FileRunRepository(tmp_path),
+        llm_client=fake_llm_client,
+    )
+    client = TestClient(create_app(settings=settings, workflow_service=service))
+    request_payload = {
+        "file_path": str(Path("tests/fixtures/sample_prd.md").resolve()),
+        "language": "zh-CN",
+        "options": {"include_intermediate_artifacts": False},
+    }
+
+    caplog.set_level(logging.INFO)
+    response = client.post(
+        "/api/v1/case-generation/runs",
+        content=json.dumps(request_payload, ensure_ascii=False),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "succeeded"
+    assert "收到创建运行请求" in caplog.text
+    assert "检测到原始 JSON 字符串请求体" in caplog.text
 
 
 def test_get_run_returns_saved_result(tmp_path, fake_llm_client) -> None:

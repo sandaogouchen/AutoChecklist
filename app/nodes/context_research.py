@@ -11,7 +11,9 @@ def build_context_research_node(llm_client: LLMClient):
         response = llm_client.generate_structured(
             system_prompt=(
                 "You extract testing-relevant product context from PRD documents. "
-                "Return concise structured JSON."
+                "Return concise structured JSON. Include a `facts` array where each fact captures one "
+                "verifiable change point from the PRD with `id`, `summary`, `change_type`, "
+                "`requirement`, `branch_hint`, and structured `evidence_refs`."
             ),
             user_prompt=(
                 f"Language: {state.get('language', 'zh-CN')}\n"

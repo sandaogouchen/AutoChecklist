@@ -6,9 +6,28 @@ from app.domain.state import GlobalState
 
 def scenario_planner_node(state: GlobalState) -> GlobalState:
     research_output = state["research_output"]
-    scenario_titles = _collect_scenario_titles(research_output)
+    planned_scenarios = _collect_planned_scenarios(research_output)
+    return {"planned_scenarios": planned_scenarios}
+
+
+def _collect_planned_scenarios(research_output: ResearchOutput) -> list[PlannedScenario]:
     constraints = "; ".join(research_output.constraints[:2])
-    planned_scenarios = [
+    if research_output.facts:
+        return [
+            PlannedScenario(
+                title=fact.summary.strip(),
+                fact_id=fact.id.strip(),
+                category="functional",
+                risk="high" if fact.branch_hint.strip() and fact.branch_hint.strip() != "main" else "medium",
+                rationale=fact.requirement.strip() or constraints or "Derived from document research output.",
+                branch_hint=fact.branch_hint.strip() or "main",
+            )
+            for fact in research_output.facts
+            if fact.summary.strip()
+        ]
+
+    scenario_titles = _collect_scenario_titles(research_output)
+    return [
         PlannedScenario(
             title=title,
             category="functional",
@@ -17,7 +36,6 @@ def scenario_planner_node(state: GlobalState) -> GlobalState:
         )
         for title in scenario_titles
     ]
-    return {"planned_scenarios": planned_scenarios}
 
 
 def _collect_scenario_titles(research_output: ResearchOutput) -> list[str]:

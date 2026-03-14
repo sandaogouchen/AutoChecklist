@@ -11,6 +11,7 @@ ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 CHAT_COMPLETIONS_PATH = "chat/completions"
 FENCED_JSON_PATTERN = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 COMMON_WRAPPER_KEYS = ("data", "result", "output", "response", "research_output", "document")
+READ_TIMEOUT_RETRY_ATTEMPTS = 2
 
 
 class LLMClientConfig(BaseModel):
@@ -79,12 +80,22 @@ class OpenAICompatibleLLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         }
-        response = self._client.post(self._chat_completions_url, json=payload)
+        response = self._post_with_read_timeout_retries(payload)
         response.raise_for_status()
 
         response_payload = response.json()
         content = _extract_message_content(response_payload)
         return _parse_structured_response(content, response_model)
+
+    def _post_with_read_timeout_retries(self, payload: dict[str, Any]) -> httpx.Response:
+        for attempt in range(READ_TIMEOUT_RETRY_ATTEMPTS + 1):
+            try:
+                return self._client.post(self._chat_completions_url, json=payload)
+            except httpx.ReadTimeout:
+                if attempt == READ_TIMEOUT_RETRY_ATTEMPTS:
+                    raise
+
+        raise RuntimeError("unreachable")
 
 
 def _extract_message_content(payload: dict[str, Any]) -> str:

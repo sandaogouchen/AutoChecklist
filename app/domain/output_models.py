@@ -96,15 +96,31 @@ def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
 
     lines = ["# Generated Test Cases", ""]
     for test_case in test_cases:
-        lines.append(f"## {test_case.id} {test_case.title}")
-        lines.append("")
-        lines.append("### Preconditions")
-        lines.extend([f"- {item}" for item in test_case.preconditions] or ["- None"])
-        lines.append("")
-        lines.append("### Steps")
-        lines.extend([f"{index}. {step}" for index, step in enumerate(test_case.steps, start=1)] or ["1. None"])
-        lines.append("")
-        lines.append("### Expected Results")
-        lines.extend([f"- {item}" for item in test_case.expected_results] or ["- None"])
-        lines.append("")
+        _render_test_case_node(test_case, lines, depth=0)
     return "\n".join(lines).strip() + "\n"
+
+
+def _render_test_case_node(test_case: TestCase, lines: list[str], *, depth: int) -> None:
+    heading_level = min(depth + 2, 6)
+    heading_prefix = "#" * heading_level
+    lines.append(f"{heading_prefix} {test_case.id} {test_case.title}")
+    lines.append("")
+    lines.append(f"- Branch: {test_case.branch or 'main'}")
+    if test_case.fact_id:
+        lines.append(f"- Fact ID: {test_case.fact_id}")
+    if test_case.parent:
+        lines.append(f"- Parent: {test_case.parent}")
+    if test_case.root:
+        lines.append(f"- Root: {test_case.root}")
+    lines.append("")
+    lines.append(f"{'#' * min(heading_level + 1, 6)} Preconditions")
+    lines.extend([f"- {item}" for item in test_case.preconditions] or ["- None"])
+    lines.append("")
+    lines.append(f"{'#' * min(heading_level + 1, 6)} Steps")
+    lines.extend([f"{index}. {step}" for index, step in enumerate(test_case.steps, start=1)] or ["1. None"])
+    lines.append("")
+    lines.append(f"{'#' * min(heading_level + 1, 6)} Expected Results")
+    lines.extend([f"- {item}" for item in test_case.expected_results] or ["- None"])
+    lines.append("")
+    for child in test_case.children:
+        _render_test_case_node(child, lines, depth=depth + 1)
