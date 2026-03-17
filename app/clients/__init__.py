@@ -1,1 +1,1 @@
-"""Client integrations for external services."""
+"""LLM 客户端子包。"""

@@ -1,1 +1,5 @@
-"""Workflow nodes for AutoChecklist."""
+"""工作流节点子包。
+
+每个模块对应工作流图中的一个处理节点，
+节点签名统一为：接收 State → 返回 State 增量更新。
+"""
