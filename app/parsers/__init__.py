@@ -1,1 +1,1 @@
-"""Document parser package."""
+"""文档解析器子包。"""

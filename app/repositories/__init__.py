@@ -1,1 +1,1 @@
-"""Repositories for local persistence."""
+"""运行记录持久化子包。"""
