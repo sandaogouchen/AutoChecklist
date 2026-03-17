@@ -17,13 +17,16 @@ from app.domain.case_models import QualityReport, TestCase
 from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
+from app.domain.run_state import EvaluationReport, RunState
 
 
 class GlobalState(TypedDict, total=False):
     """主工作流全局状态。
 
-    贯穿 input_parser → context_research → case_generation → reflection
-    四个阶段，每个节点读取所需字段并写回产出字段。
+    新增字段：
+    - run_state: 运行状态对象，记录迭代进度和评估结果
+    - evaluation_report: 最新的结构化评估报告
+    - iteration_index: 当前迭代轮次
     """
 
     run_id: str
@@ -43,13 +46,14 @@ class GlobalState(TypedDict, total=False):
     artifacts: dict[str, str]
     error: ErrorInfo
 
+    # ---- 迭代评估回路新增字段 ----
+    run_state: RunState
+    evaluation_report: EvaluationReport
+    iteration_index: int
+
 
 class CaseGenState(TypedDict, total=False):
-    """用例生成子图状态。
-
-    仅包含子图内部流转所需的字段，与 GlobalState 解耦，
-    通过主工作流中的桥接节点完成状态映射。
-    """
+    """用例生成子图状态。"""
 
     language: str
     parsed_document: ParsedDocument

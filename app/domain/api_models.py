@@ -4,6 +4,8 @@
 - 请求模型（``CaseGenerationRequest``）
 - 运行结果模型（``CaseGenerationRun``）
 - 辅助模型（模型配置覆盖、运行选项、错误信息）
+
+新增迭代评估回路相关的轻量摘要字段。
 """
 
 from __future__ import annotations
@@ -18,11 +20,7 @@ from app.domain.research_models import ResearchOutput
 
 
 class ModelConfigOverride(BaseModel):
-    """LLM 调用参数覆盖。
-
-    允许在单次请求中临时覆盖全局 LLM 配置（模型名、温度、最大 token 数）。
-    值为 None 时沿用全局默认值。
-    """
+    """LLM 调用参数覆盖。"""
 
     model: str | None = None
     temperature: float | None = None
@@ -36,20 +34,29 @@ class RunOptions(BaseModel):
 
 
 class ErrorInfo(BaseModel):
-    """错误信息载体，用于在运行失败时向调用方返回结构化的错误描述。"""
+    """错误信息载体。"""
 
     code: str
     message: str
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
-class CaseGenerationRequest(BaseModel):
-    """用例生成请求。
+class IterationSummary(BaseModel):
+    """迭代摘要信息。
 
-    ``file_path`` 指向待分析的 PRD 文档（Markdown 格式），
-    ``language`` 控制生成用例的语言。
-    ``llm_config`` 支持在请求级别覆盖 LLM 参数。
+    作为 CaseGenerationRun 的轻量字段，
+    对外展示迭代回路的关键状态，不暴露完整中间过程。
     """
+
+    iteration_count: int = 0
+    last_evaluation_score: float = 0.0
+    had_retries: bool = False
+    final_stage: str = ""
+    retry_reasons: list[str] = Field(default_factory=list)
+
+
+class CaseGenerationRequest(BaseModel):
+    """用例生成请求。"""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -66,15 +73,12 @@ class CaseGenerationRequest(BaseModel):
 class CaseGenerationRun(BaseModel):
     """一次用例生成任务的完整运行结果。
 
-    包含输入参数、中间产物（解析文档、研究摘要）、最终用例列表、
-    质量报告以及持久化产物路径映射。
-
-    ``checkpoint_count`` 是新增的轻量字段，表示本次运行生成的 checkpoint 数量，
-    避免将 checkpoints 全量内嵌到响应体中。
+    新增字段：
+    - iteration_summary: 迭代摘要，展示轮次、分数、是否发生回流等
     """
 
     run_id: str
-    status: Literal["pending", "running", "succeeded", "failed"]
+    status: Literal["pending", "running", "evaluating", "retrying", "succeeded", "failed"]
     input: CaseGenerationRequest
     parsed_document: ParsedDocument | None = None
     research_summary: ResearchOutput | None = None
@@ -83,3 +87,4 @@ class CaseGenerationRun(BaseModel):
     checkpoint_count: int = 0
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: ErrorInfo | None = None
+    iteration_summary: IterationSummary = Field(default_factory=IterationSummary)
