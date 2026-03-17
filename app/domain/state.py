@@ -14,6 +14,7 @@ from typing import TypedDict
 
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
+from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 
@@ -33,6 +34,8 @@ class GlobalState(TypedDict, total=False):
     parsed_document: ParsedDocument
     research_output: ResearchOutput
     planned_scenarios: list[PlannedScenario]
+    checkpoints: list[Checkpoint]
+    checkpoint_coverage: list[CheckpointCoverage]
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
@@ -52,6 +55,8 @@ class CaseGenState(TypedDict, total=False):
     parsed_document: ParsedDocument
     research_output: ResearchOutput
     planned_scenarios: list[PlannedScenario]
+    checkpoints: list[Checkpoint]
+    checkpoint_coverage: list[CheckpointCoverage]
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]

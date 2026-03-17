@@ -2,7 +2,7 @@
 
 作为 API 层与工作流引擎之间的协调者，负责：
 - 创建运行任务并执行 LangGraph 工作流
-- 持久化运行产物（JSON + Markdown）
+- 持久化运行产物（JSON + Markdown），包括 checkpoint 工件
 - 查询历史运行结果
 """
 
@@ -68,6 +68,11 @@ class WorkflowService:
                     "model_config": request.llm_config,
                 }
             )
+
+            # 计算 checkpoint 数量（轻量字段）
+            checkpoints = result.get("checkpoints", [])
+            checkpoint_count = len(checkpoints)
+
             run = CaseGenerationRun(
                 run_id=run_id,
                 status="succeeded",
@@ -76,8 +81,10 @@ class WorkflowService:
                 research_summary=result.get("research_output"),
                 test_cases=result.get("test_cases", []),
                 quality_report=result.get("quality_report", QualityReport()),
+                checkpoint_count=checkpoint_count,
             )
         except Exception as exc:
+            result = {}
             run = CaseGenerationRun(
                 run_id=run_id,
                 status="failed",
@@ -86,7 +93,7 @@ class WorkflowService:
             )
 
         # 持久化所有产物并更新缓存
-        run = self._persist_run_artifacts(run)
+        run = self._persist_run_artifacts(run, result)
         self._run_registry[run_id] = run
         return run
 
@@ -131,12 +138,16 @@ class WorkflowService:
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client
 
-    def _persist_run_artifacts(self, run: CaseGenerationRun) -> CaseGenerationRun:
+    def _persist_run_artifacts(
+        self, run: CaseGenerationRun, workflow_result: dict | None = None
+    ) -> CaseGenerationRun:
         """将运行结果的各项产物持久化到文件系统。
 
         产物包括：
         - parsed_document.json  — 解析后的文档结构
         - research_output.json  — 上下文研究输出
+        - checkpoints.json      — 检查点列表（新增）
+        - checkpoint_coverage.json — 检查点覆盖状态（新增）
         - test_cases.json       — 测试用例（JSON 格式）
         - test_cases.md         — 测试用例（Markdown 可读格式）
         - quality_report.json   — 质量报告
@@ -147,6 +158,7 @@ class WorkflowService:
         """
         artifacts: dict[str, str] = {}
         run_id = run.run_id
+        wf = workflow_result or {}
 
         if run.parsed_document is not None:
             artifacts["parsed_document"] = str(
@@ -162,6 +174,28 @@ class WorkflowService:
                     run_id,
                     run.research_summary.model_dump(mode="json"),
                     "research_output.json",
+                )
+            )
+
+        # 新增：持久化 checkpoints 工件
+        checkpoints = wf.get("checkpoints", [])
+        if checkpoints:
+            artifacts["checkpoints"] = str(
+                self.repository.save(
+                    run_id,
+                    [cp.model_dump(mode="json") for cp in checkpoints],
+                    "checkpoints.json",
+                )
+            )
+
+        # 新增：持久化 checkpoint 覆盖状态
+        checkpoint_coverage = wf.get("checkpoint_coverage", [])
+        if checkpoint_coverage:
+            artifacts["checkpoint_coverage"] = str(
+                self.repository.save(
+                    run_id,
+                    [cc.model_dump(mode="json") for cc in checkpoint_coverage],
+                    "checkpoint_coverage.json",
                 )
             )
 
@@ -209,7 +243,7 @@ class WorkflowService:
 def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
     """将测试用例列表渲染为人类可读的 Markdown 文档。
 
-    输出格式：每个用例包含标题、前置条件、操作步骤和预期结果四个部分。
+    输出格式：每个用例包含标题、Checkpoint 关联、前置条件、操作步骤和预期结果。
     """
     if not test_cases:
         return "# Generated Test Cases\n\nNo test cases were generated.\n"
@@ -218,6 +252,12 @@ def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
     for test_case in test_cases:
         lines.append(f"## {test_case.id} {test_case.title}")
         lines.append("")
+
+        # 新增：显示关联的 checkpoint
+        if test_case.checkpoint_id:
+            lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
+            lines.append("")
+
         lines.append("### Preconditions")
         lines.extend(
             [f"- {item}" for item in test_case.preconditions] or ["- None"]

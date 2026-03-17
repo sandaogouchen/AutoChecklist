@@ -53,3 +53,47 @@ def test_get_run_returns_saved_result(tmp_path, fake_llm_client) -> None:
     assert get_response.status_code == 200
     assert get_response.json()["run_id"] == run_id
     assert "run_result" in get_response.json()["artifacts"]
+
+
+def test_create_run_includes_checkpoint_count(tmp_path, fake_llm_client) -> None:
+    """运行结果应包含 checkpoint_count 字段。"""
+    settings = Settings(output_dir=str(tmp_path))
+    service = WorkflowService(
+        settings=settings,
+        repository=FileRunRepository(tmp_path),
+        llm_client=fake_llm_client,
+    )
+    client = TestClient(create_app(settings=settings, workflow_service=service))
+
+    response = client.post(
+        "/api/v1/case-generation/runs",
+        json={"file_path": str(Path("tests/fixtures/sample_prd.md").resolve())},
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert "checkpoint_count" in data
+    assert data["checkpoint_count"] > 0
+
+
+def test_create_run_persists_checkpoint_artifacts(tmp_path, fake_llm_client) -> None:
+    """运行后应持久化 checkpoints.json 和 checkpoint_coverage.json。"""
+    settings = Settings(output_dir=str(tmp_path))
+    repository = FileRunRepository(tmp_path)
+    service = WorkflowService(
+        settings=settings,
+        repository=repository,
+        llm_client=fake_llm_client,
+    )
+    client = TestClient(create_app(settings=settings, workflow_service=service))
+
+    response = client.post(
+        "/api/v1/case-generation/runs",
+        json={"file_path": str(Path("tests/fixtures/sample_prd.md").resolve())},
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    artifacts = data["artifacts"]
+    assert "checkpoints" in artifacts
+    assert "checkpoint_coverage" in artifacts

@@ -23,6 +23,7 @@ class TestCase(BaseModel):
         priority: 优先级（P0-P3），默认 P2。
         category: 用例类别（functional / edge_case / performance 等）。
         evidence_refs: 关联的 PRD 原文证据引用。
+        checkpoint_id: 所属的 checkpoint 标识，用于回溯 fact → checkpoint → testcase 链路。
     """
 
     # 防止 pytest 将此类误识别为测试类
@@ -36,16 +37,18 @@ class TestCase(BaseModel):
     priority: str = "P2"
     category: str = "functional"
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    checkpoint_id: str = ""
 
 
 class QualityReport(BaseModel):
     """测试用例质量报告。
 
-    记录去重结果、覆盖率评估、警告信息及自动修复字段，
-    帮助使用者了解生成用例的质量状况。
+    记录去重结果、覆盖率评估、警告信息、自动修复字段，
+    以及 checkpoint 层面的质量告警。
     """
 
     duplicate_groups: list[list[str]] = Field(default_factory=list)
     coverage_notes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     repaired_fields: list[str] = Field(default_factory=list)
+    checkpoint_warnings: list[str] = Field(default_factory=list)
