@@ -1,5 +1,8 @@
 from app.domain.case_models import TestCase
+from app.domain.document_models import DocumentSource, ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
+from app.domain.state import GlobalState
+from app.nodes.context_research import build_context_research_node
 from app.nodes.draft_writer import DraftCaseCollection, build_draft_writer_node
 from app.nodes.reflection import deduplicate_cases
 from app.nodes.scenario_planner import scenario_planner_node
@@ -105,6 +108,49 @@ class _RecordingLLMClient:
         )
 
 
+class _RecordingResearchLLMClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        return ResearchOutput()
+
+
+def test_context_research_prompt_requires_canonical_evidence_ref_shape() -> None:
+    llm_client = _RecordingResearchLLMClient()
+    node = build_context_research_node(llm_client)
+    state: GlobalState = {
+        "language": "zh-CN",
+        "parsed_document": ParsedDocument(
+            raw_text="# Title\ncontent",
+            sections=[],
+            references=[],
+            metadata={},
+            source=DocumentSource(
+                source_path="/tmp/prd.md",
+                source_type="markdown",
+                title="Title",
+                checksum="abc",
+            ),
+        ),
+    }
+
+    result = node(state)
+
+    assert result["research_output"].facts == []
+    system_prompt = llm_client.calls[0]["system_prompt"]
+    assert '"section_title"' in system_prompt
+    assert '"excerpt"' in system_prompt
+    assert '"line_start"' in system_prompt
+    assert '"line_end"' in system_prompt
+    assert '"confidence"' in system_prompt
+    assert '"section"' in system_prompt
+    assert '"quote"' in system_prompt
+    assert "`requirement`" in system_prompt
+    assert "string, not an object" in system_prompt
+
+
 def test_draft_writer_prompt_requires_test_cases_wrapper() -> None:
     llm_client = _RecordingLLMClient()
     node = build_draft_writer_node(llm_client)
@@ -142,6 +188,32 @@ def test_draft_writer_prompt_requires_test_cases_wrapper() -> None:
     assert '"root"' in system_prompt
     assert '"prev"' in system_prompt
     assert '"next"' in system_prompt
+
+
+def test_draft_writer_batches_large_scenario_sets() -> None:
+    llm_client = _RecordingLLMClient()
+    node = build_draft_writer_node(llm_client, batch_size=2)
+    state = {
+        "planned_scenarios": [
+            PlannedScenario(
+                title=f"Scenario {index}",
+                fact_id=f"FACT-{index:03d}",
+                category="functional",
+                risk="medium",
+                rationale=f"Rationale {index}",
+            )
+            for index in range(1, 6)
+        ],
+        "mapped_evidence": {},
+    }
+
+    result = node(state)
+
+    assert len(llm_client.calls) == 3
+    assert len(result["draft_cases"]) == 3
+    assert llm_client.calls[0]["user_prompt"].count("Fact ID:") == 2
+    assert llm_client.calls[1]["user_prompt"].count("Fact ID:") == 2
+    assert llm_client.calls[2]["user_prompt"].count("Fact ID:") == 1
 
 
 def test_structure_assembler_builds_bidirectional_fact_tree() -> None:

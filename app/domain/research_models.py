@@ -20,6 +20,14 @@ class EvidenceRef(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def coerce_string_reference(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            normalized_value = dict(value)
+            if "section_title" not in normalized_value and isinstance(normalized_value.get("section"), str):
+                normalized_value["section_title"] = normalized_value["section"].strip()
+            if "excerpt" not in normalized_value and isinstance(normalized_value.get("quote"), str):
+                normalized_value["excerpt"] = normalized_value["quote"].strip()
+            return normalized_value
+
         if not isinstance(value, str):
             return value
 
@@ -55,6 +63,23 @@ class ResearchFact(BaseModel):
     requirement: str = ""
     branch_hint: str = "main"
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_requirement_object(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized_value = dict(value)
+        requirement = normalized_value.get("requirement")
+        if not isinstance(requirement, dict):
+            return normalized_value
+
+        scope = str(requirement.get("scope", "")).strip()
+        detail = str(requirement.get("detail", "")).strip()
+        parts = [part for part in (scope, detail) if part]
+        normalized_value["requirement"] = " | ".join(parts)
+        return normalized_value
 
 
 class PlannedScenario(BaseModel):

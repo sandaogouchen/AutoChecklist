@@ -3,6 +3,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.clients.llm import LLMClientConfig, OpenAICompatibleLLMClient
+from app.domain.research_models import ResearchOutput
 from app.nodes.draft_writer import DraftCaseCollection
 
 
@@ -41,7 +42,13 @@ class _RecordingHttpxClient:
         return _FakeResponse(self.__class__.next_content)
 
 
-def _build_client(monkeypatch, *, base_url: str = "https://example.com/v1", content: str = '{"status":"ok"}') -> OpenAICompatibleLLMClient:
+def _build_client(
+    monkeypatch,
+    *,
+    base_url: str = "https://example.com/v1",
+    content: str = '{"status":"ok"}',
+    timeout_seconds: float = 60.0,
+) -> OpenAICompatibleLLMClient:
     _RecordingHttpxClient.instances.clear()
     _RecordingHttpxClient.next_content = content
     _RecordingHttpxClient.next_post_outcomes = []
@@ -51,6 +58,7 @@ def _build_client(monkeypatch, *, base_url: str = "https://example.com/v1", cont
             api_key="test-key",
             base_url=base_url,
             model="test-model",
+            timeout_seconds=timeout_seconds,
         )
     )
 
@@ -85,6 +93,18 @@ def test_llm_client_uses_expected_chat_completions_url(monkeypatch, base_url: st
 
     assert response.status == "ok"
     assert _RecordingHttpxClient.instances[0].post_calls[0][0] == expected_request_url
+
+
+def test_llm_client_uses_extended_read_timeout_floor(monkeypatch) -> None:
+    _build_client(monkeypatch, timeout_seconds=60.0)
+
+    timeout = _RecordingHttpxClient.instances[0].kwargs["timeout"]
+
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 60.0
+    assert timeout.write == 60.0
+    assert timeout.pool == 60.0
+    assert timeout.read == 120.0
 
 
 def test_llm_client_accepts_fenced_json_response(monkeypatch) -> None:
@@ -149,6 +169,37 @@ def test_llm_client_coerces_string_evidence_refs_into_objects(monkeypatch) -> No
     assert response.test_cases[0].evidence_refs[0].section_title == "prd"
     assert response.test_cases[0].evidence_refs[0].line_start == 1
     assert response.test_cases[0].evidence_refs[0].line_end == 105
+
+
+def test_llm_client_coerces_research_evidence_refs_with_section_and_quote_keys(monkeypatch) -> None:
+    client = _build_client(
+        monkeypatch,
+        content='{"facts":[{"id":"F001","summary":"Optimize goal can be selected","evidence_refs":[{"section":"Ad group > optimize goal","quote":"Provide options 2 secondary goals [single selection]"}]}]}',
+    )
+
+    response = client.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        response_model=ResearchOutput,
+    )
+
+    assert response.facts[0].evidence_refs[0].section_title == "Ad group > optimize goal"
+    assert response.facts[0].evidence_refs[0].excerpt == "Provide options 2 secondary goals [single selection]"
+
+
+def test_llm_client_coerces_research_requirement_objects_into_strings(monkeypatch) -> None:
+    client = _build_client(
+        monkeypatch,
+        content='{"facts":[{"id":"F001","summary":"Optimize goal can be selected","requirement":{"scope":"Ad group > optimize goal","detail":"Provide options 2 secondary goals [single selection]"},"evidence_refs":[]}]}',
+    )
+
+    response = client.generate_structured(
+        system_prompt="system",
+        user_prompt="user",
+        response_model=ResearchOutput,
+    )
+
+    assert response.facts[0].requirement == "Ad group > optimize goal | Provide options 2 secondary goals [single selection]"
 
 
 def test_llm_client_retries_read_timeout_and_returns_success(monkeypatch) -> None:

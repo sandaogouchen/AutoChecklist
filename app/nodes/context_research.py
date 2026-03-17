@@ -13,7 +13,12 @@ def build_context_research_node(llm_client: LLMClient):
                 "You extract testing-relevant product context from PRD documents. "
                 "Return concise structured JSON. Include a `facts` array where each fact captures one "
                 "verifiable change point from the PRD with `id`, `summary`, `change_type`, "
-                "`requirement`, `branch_hint`, and structured `evidence_refs`."
+                "`requirement`, `branch_hint`, and structured `evidence_refs`. "
+                "`requirement` must always be a string, not an object. "
+                "`evidence_refs` must always be an array of objects using the exact shape "
+                '{"section_title": string, "excerpt": string, "line_start": number, '
+                '"line_end": number, "confidence": number}. '
+                'Do not use alternate keys like "section" or "quote".'
             ),
             user_prompt=(
                 f"Language: {state.get('language', 'zh-CN')}\n"
