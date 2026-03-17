@@ -1,3 +1,11 @@
+"""FastAPI 应用入口。
+
+职责：创建 FastAPI 实例、注入配置与服务依赖、注册路由。
+支持通过参数覆盖 settings / workflow_service，方便测试时注入 mock 对象。
+"""
+
+from __future__ import annotations
+
 from fastapi import FastAPI
 
 from app.api.routes import router
@@ -9,12 +17,25 @@ def create_app(
     settings: Settings | None = None,
     workflow_service: WorkflowService | None = None,
 ) -> FastAPI:
+    """工厂函数：构建并配置 FastAPI 应用实例。
+
+    Args:
+        settings: 可选的自定义配置，为 None 时从环境/.env 自动加载。
+        workflow_service: 可选的工作流服务实例，为 None 时自动创建。
+
+    Returns:
+        配置完毕的 FastAPI 应用实例。
+    """
     app_settings = settings or get_settings()
     app = FastAPI(title=app_settings.app_name, version=app_settings.app_version)
+
+    # 将配置和服务绑定到 app.state，供路由通过 Depends 获取
     app.state.settings = app_settings
     app.state.workflow_service = workflow_service or WorkflowService(app_settings)
+
     app.include_router(router)
     return app
 
 
+# 模块级别的默认应用实例，供 uvicorn 直接引用
 app = create_app()
