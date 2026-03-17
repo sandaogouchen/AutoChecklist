@@ -18,7 +18,13 @@ _SYSTEM_PROMPT = (
     "You are a QA expert. Given a list of product facts extracted from a PRD, "
     "generate explicit, verifiable test checkpoints. Each fact may produce 1 or more checkpoints. "
     "Each checkpoint should be a specific, testable verification point. "
-    "Return structured JSON with a 'checkpoints' array."
+    "Return structured JSON with a 'checkpoints' array.\n\n"
+    "【语言要求】\n"
+    "- 所有 title、objective、preconditions 等描述字段必须使用中文输出。\n"
+    "- 英文专有名词必须保留原文，包括但不限于：产品名、品牌名、UI 按钮文案、"
+    "字段名、枚举值、接口名、类名、函数名、变量名、ID、URL、配置项。\n"
+    "- 中英文混排时采用「中文动作 + 原文对象」形式，例如：验证 `SMS code` 过期后被拒绝。\n"
+    "- category、risk、branch_hint 保留英文枚举值不翻译。"
 )
 
 
@@ -182,7 +188,11 @@ def _build_checkpoint_prompt(facts: list[ResearchFact], language: str) -> str:
     lines.append(
         "For each fact, generate 1 or more specific, verifiable test checkpoints. "
         "Include the source fact_ids in each checkpoint. "
-        "Ensure checkpoint titles are unique and descriptive."
+        "Ensure checkpoint titles are unique and descriptive.\n\n"
+        "【输出语言】\n"
+        "- checkpoint 的 title 和 objective 请使用中文书写。\n"
+        "- preconditions 请使用中文书写，其中的专有名词保留英文原文。\n"
+        "- category / risk / branch_hint 保留英文枚举值。"
     )
 
     return "\n".join(lines)
