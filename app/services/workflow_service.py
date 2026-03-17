@@ -2,8 +2,10 @@
 
 作为 API 层与工作流引擎之间的协调者，负责：
 - 创建运行任务并执行 LangGraph 工作流
+- 管理迭代评估回路的生命周期
 - 持久化运行产物（JSON + Markdown），包括 checkpoint 工件
-- 查询历史运行结果
+- 持久化运行状态、评估报告和迭代日志
+- 查询历史运行结果（包括失败运行）
 """
 
 from __future__ import annotations
@@ -12,17 +14,30 @@ from uuid import uuid4
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
 from app.config.settings import Settings
-from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun, ErrorInfo
+from app.domain.api_models import (
+    CaseGenerationRequest,
+    CaseGenerationRun,
+    ErrorInfo,
+    IterationSummary,
+)
 from app.domain.case_models import QualityReport, TestCase
+from app.domain.run_state import RunStage, RunStatus
 from app.graphs.main_workflow import build_workflow
+from app.nodes.evaluation import evaluate
 from app.repositories.run_repository import FileRunRepository
+from app.repositories.run_state_repository import RunStateRepository
+from app.services.iteration_controller import IterationController
 
 
 class WorkflowService:
     """工作流编排服务。
 
-    管理用例生成任务的完整生命周期：创建 → 执行 → 持久化 → 查询。
-    通过依赖注入支持自定义 repository 和 llm_client，方便测试。
+    集成迭代评估回路：
+    1. 初始化运行状态
+    2. 执行工作流生成
+    3. 执行结构化评估
+    4. 由迭代控制器决策：通过 / 回流 / 终止
+    5. 持久化所有状态和工件
     """
 
     def __init__(
@@ -30,69 +45,68 @@ class WorkflowService:
         settings: Settings,
         repository: FileRunRepository | None = None,
         llm_client: LLMClient | None = None,
+        state_repository: RunStateRepository | None = None,
+        iteration_controller: IterationController | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
+        self.state_repository = state_repository or RunStateRepository(settings.output_dir)
+        self.iteration_controller = iteration_controller or IterationController(
+            max_iterations=settings.max_iterations,
+            pass_threshold=settings.evaluation_pass_threshold,
+        )
         self._llm_client = llm_client
         self._workflow = None
-        # 内存缓存：避免对同一 run_id 重复读取文件系统
         self._run_registry: dict[str, CaseGenerationRun] = {}
 
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
-        """创建并执行一次用例生成任务。
-
-        流程：
-        1. 生成唯一的 run_id
-        2. 持久化原始请求
-        3. 调用 LangGraph 工作流执行完整的用例生成流水线
-        4. 将结果和产物持久化到文件系统
-        5. 缓存并返回运行结果
-
-        异常处理：工作流执行失败时不抛出异常，而是将错误信息
-        封装到 ``CaseGenerationRun.error`` 中返回，状态标记为 "failed"。
-        """
+        """创建并执行一次带迭代评估回路的用例生成任务。"""
         run_id = uuid4().hex
 
-        # 持久化原始请求，便于事后审计和重放
+        # 持久化请求
         self.repository.save(
             run_id, request.model_dump(mode="json", by_alias=True), "request.json"
         )
 
-        try:
-            result = self._get_workflow().invoke(
-                {
-                    "run_id": run_id,
-                    "file_path": request.file_path,
-                    "language": request.language,
-                    "request": request,
-                    "model_config": request.llm_config,
-                }
-            )
+        # 初始化运行状态
+        run_state = self.iteration_controller.initialize_state(run_id)
+        self.state_repository.save_run_state(run_state)
 
-            # 计算 checkpoint 数量（轻量字段）
+        result: dict = {}
+        try:
+            result = self._execute_with_iteration(run_id, request, run_state)
+
+            # 重新加载最新状态
+            run_state = self.state_repository.load_run_state(run_id)
+
             checkpoints = result.get("checkpoints", [])
             checkpoint_count = len(checkpoints)
 
             run = CaseGenerationRun(
                 run_id=run_id,
-                status="succeeded",
+                status=run_state.status.value,
                 input=request,
                 parsed_document=result.get("parsed_document"),
                 research_summary=result.get("research_output"),
                 test_cases=result.get("test_cases", []),
                 quality_report=result.get("quality_report", QualityReport()),
                 checkpoint_count=checkpoint_count,
+                iteration_summary=self._build_iteration_summary(run_state),
             )
         except Exception as exc:
-            result = {}
+            # 失败运行持久化：记录错误并保存状态
+            run_state = self.iteration_controller.mark_error(run_state, exc)
+            self.state_repository.save_run_state(run_state)
+            self.state_repository.save_iteration_log(run_state)
+
             run = CaseGenerationRun(
                 run_id=run_id,
                 status="failed",
                 input=request,
                 error=ErrorInfo(code=exc.__class__.__name__, message=str(exc)),
+                iteration_summary=self._build_iteration_summary(run_state),
             )
 
-        # 持久化所有产物并更新缓存
         run = self._persist_run_artifacts(run, result)
         self._run_registry[run_id] = run
         return run
@@ -100,10 +114,8 @@ class WorkflowService:
     def get_run(self, run_id: str) -> CaseGenerationRun:
         """根据 run_id 查询运行结果。
 
-        优先从内存缓存中读取，缓存未命中时从文件系统加载。
-
-        Raises:
-            FileNotFoundError: 指定的 run_id 不存在。
+        优先从内存缓存读取，其次从文件系统加载。
+        支持读取失败运行的状态。
         """
         cached_run = self._run_registry.get(run_id)
         if cached_run is not None:
@@ -111,21 +123,158 @@ class WorkflowService:
 
         run_payload = self.repository.load(run_id, "run_result.json")
         run = CaseGenerationRun.model_validate(run_payload)
+
+        # 尝试补充迭代摘要信息
+        if self.state_repository.run_state_exists(run_id):
+            try:
+                run_state = self.state_repository.load_run_state(run_id)
+                run = run.model_copy(
+                    update={"iteration_summary": self._build_iteration_summary(run_state)}
+                )
+            except Exception:
+                pass  # 状态文件损坏时不阻断主流程
+
         self._run_registry[run_id] = run
         return run
 
-    # ------------------------------------------------------------------
-    # 私有方法
-    # ------------------------------------------------------------------
+    def _execute_with_iteration(
+        self,
+        run_id: str,
+        request: CaseGenerationRequest,
+        run_state,
+    ) -> dict:
+        """执行带迭代评估回路的工作流。
+
+        流程：
+        1. 执行一轮主流程生成
+        2. 执行结构化评估
+        3. 由迭代控制器判断：通过 → 结束 / 不通过但可恢复 → 回流 / 停止条件 → 失败
+        """
+        workflow = self._get_workflow()
+        result: dict = {}
+
+        while True:
+            # 更新状态为 running
+            run_state.status = RunStatus.RUNNING
+            self.state_repository.save_run_state(run_state)
+
+            # 执行工作流
+            workflow_input = {
+                "run_id": run_id,
+                "file_path": request.file_path,
+                "language": request.language,
+                "request": request,
+                "model_config": request.llm_config,
+                "iteration_index": run_state.iteration_index,
+            }
+
+            # 如果是回流且之前有结果，保留部分中间结果
+            if run_state.iteration_index > 0 and result:
+                workflow_input = self._prepare_retry_input(
+                    workflow_input, result, run_state
+                )
+
+            result = workflow.invoke(workflow_input)
+
+            # 更新状态为 evaluating
+            run_state.status = RunStatus.EVALUATING
+            run_state.current_stage = RunStage.EVALUATION
+            self.state_repository.save_run_state(run_state)
+
+            # 执行结构化评估
+            evaluation = evaluate(
+                test_cases=result.get("test_cases", []),
+                checkpoints=result.get("checkpoints", []),
+                research_output=result.get("research_output"),
+                previous_score=run_state.last_evaluation_score,
+            )
+
+            # 持久化评估报告
+            self.state_repository.save_evaluation_report(
+                run_id, evaluation, run_state.iteration_index
+            )
+
+            # 由迭代控制器做出决策
+            decision = self.iteration_controller.decide(run_state, evaluation)
+
+            # 收集本轮工件快照
+            artifacts_snapshot = {
+                "test_case_count": str(len(result.get("test_cases", []))),
+                "checkpoint_count": str(len(result.get("checkpoints", []))),
+                "evaluation_score": str(evaluation.overall_score),
+            }
+
+            # 更新运行状态
+            run_state = self.iteration_controller.update_state_after_evaluation(
+                run_state, evaluation, decision, artifacts_snapshot
+            )
+            self.state_repository.save_run_state(run_state)
+            self.state_repository.save_iteration_log(run_state)
+
+            if decision.action in ("pass", "fail"):
+                break
+
+            # retry: 继续循环
+
+        return result
+
+    def _prepare_retry_input(
+        self,
+        workflow_input: dict,
+        previous_result: dict,
+        run_state,
+    ) -> dict:
+        """准备回流时的工作流输入。
+
+        根据回流目标阶段，保留已有的上游结果：
+        - 回到 context_research: 从头重跑
+        - 回到 checkpoint_generation: 保留 parsed_document 和 research_output
+        - 回到 draft_generation: 保留到 checkpoints 的所有中间结果
+        """
+        target = run_state.current_stage
+
+        if target == RunStage.CONTEXT_RESEARCH:
+            # 从头重跑，不保留
+            return workflow_input
+
+        if target == RunStage.CHECKPOINT_GENERATION:
+            # 保留文档解析和研究输出
+            if "parsed_document" in previous_result:
+                workflow_input["parsed_document"] = previous_result["parsed_document"]
+            if "research_output" in previous_result:
+                workflow_input["research_output"] = previous_result["research_output"]
+            return workflow_input
+
+        # draft_generation 或其他: 保留尽可能多的中间结果
+        for key in (
+            "parsed_document",
+            "research_output",
+            "planned_scenarios",
+            "checkpoints",
+            "checkpoint_coverage",
+            "mapped_evidence",
+        ):
+            if key in previous_result:
+                workflow_input[key] = previous_result[key]
+
+        return workflow_input
+
+    def _build_iteration_summary(self, run_state) -> IterationSummary:
+        """从运行状态构建轻量迭代摘要。"""
+        return IterationSummary(
+            iteration_count=len(run_state.iteration_history),
+            last_evaluation_score=run_state.last_evaluation_score,
+            had_retries=len(run_state.retry_decisions) > 0,
+            final_stage=run_state.current_stage.value,
+            retry_reasons=[d.retry_reason for d in run_state.retry_decisions],
+        )
 
     def _get_workflow(self):
-        """延迟初始化并缓存 LangGraph 工作流实例。"""
         if self._workflow is None:
             self._workflow = build_workflow(self._get_llm_client())
         return self._workflow
 
     def _get_llm_client(self) -> LLMClient:
-        """延迟初始化并缓存 LLM 客户端实例。"""
         if self._llm_client is None:
             config = LLMClientConfig(
                 api_key=self.settings.llm_api_key,
@@ -141,21 +290,7 @@ class WorkflowService:
     def _persist_run_artifacts(
         self, run: CaseGenerationRun, workflow_result: dict | None = None
     ) -> CaseGenerationRun:
-        """将运行结果的各项产物持久化到文件系统。
-
-        产物包括：
-        - parsed_document.json  — 解析后的文档结构
-        - research_output.json  — 上下文研究输出
-        - checkpoints.json      — 检查点列表（新增）
-        - checkpoint_coverage.json — 检查点覆盖状态（新增）
-        - test_cases.json       — 测试用例（JSON 格式）
-        - test_cases.md         — 测试用例（Markdown 可读格式）
-        - quality_report.json   — 质量报告
-        - run_result.json       — 完整运行结果（含 artifacts 路径映射）
-
-        Returns:
-            更新了 ``artifacts`` 字段的运行结果对象。
-        """
+        """将运行结果的各项产物持久化到文件系统。"""
         artifacts: dict[str, str] = {}
         run_id = run.run_id
         wf = workflow_result or {}
@@ -177,7 +312,6 @@ class WorkflowService:
                 )
             )
 
-        # 新增：持久化 checkpoints 工件
         checkpoints = wf.get("checkpoints", [])
         if checkpoints:
             artifacts["checkpoints"] = str(
@@ -188,7 +322,6 @@ class WorkflowService:
                 )
             )
 
-        # 新增：持久化 checkpoint 覆盖状态
         checkpoint_coverage = wf.get("checkpoint_coverage", [])
         if checkpoint_coverage:
             artifacts["checkpoint_coverage"] = str(
@@ -221,7 +354,19 @@ class WorkflowService:
             )
         )
 
-        # 先保存一次包含 artifacts 路径的完整结果
+        # 标记运行状态和迭代日志工件
+        run_state_path = self.state_repository._run_dir(run_id) / "run_state.json"
+        if run_state_path.exists():
+            artifacts["run_state"] = str(run_state_path)
+
+        eval_path = self.state_repository._run_dir(run_id) / "evaluation_report.json"
+        if eval_path.exists():
+            artifacts["evaluation_report"] = str(eval_path)
+
+        iter_log_path = self.state_repository._run_dir(run_id) / "iteration_log.json"
+        if iter_log_path.exists():
+            artifacts["iteration_log"] = str(iter_log_path)
+
         run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
         run_result_path = self.repository.save(
             run_id,
@@ -229,7 +374,6 @@ class WorkflowService:
             "run_result.json",
         )
 
-        # 将 run_result 自身的路径也加入 artifacts，再次保存最终版本
         artifacts["run_result"] = str(run_result_path)
         final_run = run_with_artifacts.model_copy(update={"artifacts": artifacts})
         self.repository.save(
@@ -241,10 +385,7 @@ class WorkflowService:
 
 
 def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    """将测试用例列表渲染为人类可读的 Markdown 文档。
-
-    输出格式：每个用例包含标题、Checkpoint 关联、前置条件、操作步骤和预期结果。
-    """
+    """将测试用例列表渲染为人类可读的 Markdown 文档。"""
     if not test_cases:
         return "# Generated Test Cases\n\nNo test cases were generated.\n"
 
@@ -253,7 +394,6 @@ def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
         lines.append(f"## {test_case.id} {test_case.title}")
         lines.append("")
 
-        # 新增：显示关联的 checkpoint
         if test_case.checkpoint_id:
             lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
             lines.append("")
