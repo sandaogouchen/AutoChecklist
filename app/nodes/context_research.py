@@ -17,6 +17,11 @@ _SYSTEM_PROMPT = (
     "also extract a list of 'facts' — each fact is a discrete, testable piece of information "
     "from the PRD with a unique fact_id (e.g., FACT-001), description, source_section, "
     "category (requirement/constraint/assumption/behavior), and optional evidence_refs. "
+    "For compatibility, facts may also include requirement and branch_hint, but requirement must be a string. "
+    "evidence_refs must always be an array of objects using the exact shape "
+    '{"section_title": string, "excerpt": string, "line_start": number, '
+    '"line_end": number, "confidence": number}. '
+    'Do not use alternate keys like "section" or "quote". '
     "Return concise structured JSON.\n\n"
     "【语言要求】\n"
     "- 所有通用描述、说明文字必须使用中文输出。\n"
