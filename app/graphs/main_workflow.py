@@ -1,3 +1,11 @@
+"""主工作流图定义。
+
+使用 LangGraph 构建 AutoChecklist 的主处理流水线：
+  input_parser → context_research → case_generation（子图） → reflection
+
+每个节点接收并返回 ``GlobalState``，通过增量更新的方式传递数据。
+"""
+
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
@@ -11,29 +19,58 @@ from app.nodes.reflection import reflection_node
 
 
 def build_workflow(llm_client: LLMClient):
+    """构建并编译主工作流图。
+
+    工作流结构（线性流水线）：
+    ```
+    START → input_parser → context_research → case_generation → reflection → END
+    ```
+
+    Args:
+        llm_client: LLM 客户端实例，传递给需要调用 LLM 的节点。
+
+    Returns:
+        编译后的 LangGraph 可执行工作流。
+    """
     case_generation_subgraph = build_case_generation_subgraph(llm_client)
+
     builder = StateGraph(GlobalState)
     builder.add_node("input_parser", input_parser_node)
     builder.add_node("context_research", build_context_research_node(llm_client))
-    builder.add_node("case_generation", _build_case_generation_node(case_generation_subgraph))
+    builder.add_node("case_generation", _build_case_generation_bridge(case_generation_subgraph))
     builder.add_node("reflection", reflection_node)
+
     builder.add_edge(START, "input_parser")
     builder.add_edge("input_parser", "context_research")
     builder.add_edge("context_research", "case_generation")
     builder.add_edge("case_generation", "reflection")
     builder.add_edge("reflection", END)
+
     return builder.compile()
 
 
-def _build_case_generation_node(case_generation_subgraph):
+def _build_case_generation_bridge(case_generation_subgraph):
+    """构建主图与用例生成子图之间的桥接节点。
+
+    职责：
+    1. 从 GlobalState 中提取子图所需的字段，构造 CaseGenState
+    2. 调用子图执行
+    3. 将子图输出映射回 GlobalState 的增量更新
+
+    这种桥接模式将主图与子图的状态结构解耦，
+    使两者可以独立演化而不互相影响。
+    """
+
     def case_generation_node(state: GlobalState) -> GlobalState:
-        subgraph_result = case_generation_subgraph.invoke(
-            {
-                "language": state.get("language", "zh-CN"),
-                "parsed_document": state["parsed_document"],
-                "research_output": state["research_output"],
-            }
-        )
+        # 从全局状态中提取子图所需的输入字段
+        subgraph_input = {
+            "language": state.get("language", "zh-CN"),
+            "parsed_document": state["parsed_document"],
+            "research_output": state["research_output"],
+        }
+        subgraph_result = case_generation_subgraph.invoke(subgraph_input)
+
+        # 将子图输出映射回全局状态
         return {
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
