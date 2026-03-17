@@ -4,6 +4,7 @@
 - 补全缺失的 ID（自动编号 TC-001, TC-002, ...）
 - 为空字段填充默认值
 - 补充缺失的证据引用（从 mapped_evidence 中查找）
+- 保留并补全 checkpoint_id
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
     - ID 为空时按序号自动生成（TC-001 格式）
     - 列表类字段为空时确保为空列表（而非 None）
     - 证据引用为空时尝试从 mapped_evidence 中按标题匹配
+    - 保留 LLM 生成的 checkpoint_id
 
     Returns:
         包含 ``test_cases``（已标准化的用例列表）的状态增量。
@@ -38,6 +40,8 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
                     "category": case.category or "functional",
                     # 优先使用 LLM 生成的证据引用，否则从映射表中查找
                     "evidence_refs": case.evidence_refs or evidence_lookup.get(case.title, []),
+                    # 保留 checkpoint_id（由 draft_writer 生成）
+                    "checkpoint_id": case.checkpoint_id or "",
                 }
             )
         )

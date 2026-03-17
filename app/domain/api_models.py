@@ -68,6 +68,9 @@ class CaseGenerationRun(BaseModel):
 
     包含输入参数、中间产物（解析文档、研究摘要）、最终用例列表、
     质量报告以及持久化产物路径映射。
+
+    ``checkpoint_count`` 是新增的轻量字段，表示本次运行生成的 checkpoint 数量，
+    避免将 checkpoints 全量内嵌到响应体中。
     """
 
     run_id: str
@@ -77,5 +80,6 @@ class CaseGenerationRun(BaseModel):
     research_summary: ResearchOutput | None = None
     test_cases: list[TestCase] = Field(default_factory=list)
     quality_report: QualityReport = Field(default_factory=QualityReport)
+    checkpoint_count: int = 0
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: ErrorInfo | None = None

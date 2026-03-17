@@ -47,3 +47,19 @@ def test_scenario_planner_uses_research_scenarios() -> None:
 
     assert result["planned_scenarios"]
     assert result["planned_scenarios"][0].title == "User logs in with SMS code"
+
+
+def test_deduplicate_preserves_checkpoint_id() -> None:
+    """去重后的用例应保留 checkpoint_id。"""
+    case = TestCase(
+        id="TC-1",
+        title="Login succeeds",
+        steps=["Open login page"],
+        expected_results=["Dashboard is visible"],
+        checkpoint_id="CP-abc123",
+    )
+
+    deduped, _ = deduplicate_cases([case])
+
+    assert len(deduped) == 1
+    assert deduped[0].checkpoint_id == "CP-abc123"

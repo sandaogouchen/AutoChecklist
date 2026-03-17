@@ -70,9 +70,11 @@ def _build_case_generation_bridge(case_generation_subgraph):
         }
         subgraph_result = case_generation_subgraph.invoke(subgraph_input)
 
-        # 将子图输出映射回全局状态
+        # 将子图输出映射回全局状态，包含新增的 checkpoint 字段
         return {
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
+            "checkpoints": subgraph_result.get("checkpoints", []),
+            "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),
             "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),
