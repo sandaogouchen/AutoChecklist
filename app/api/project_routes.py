@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.domain.project_models import ProjectType, RegulatoryFramework
@@ -15,12 +15,15 @@ from app.services.project_context_service import ProjectContextService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-# Module-level service instance \u2013 replaced in tests via dependency override.
-_service = ProjectContextService()
 
+def _get_project_service(request: Request) -> ProjectContextService:
+    """FastAPI dependency that retrieves the shared ProjectContextService
+    instance from ``app.state``.
 
-def get_service() -> ProjectContextService:
-    return _service
+    This ensures the API layer and the workflow layer share the same
+    service (and therefore the same in-memory repository).
+    """
+    return request.app.state.project_context_service
 
 
 # -- request / response schemas -------------------------------------------
@@ -48,21 +51,26 @@ class ProjectUpdateRequest(BaseModel):
 # -- endpoints ------------------------------------------------------------
 
 @router.post("", status_code=201)
-def create_project(body: ProjectCreateRequest):
-    svc = get_service()
+def create_project(
+    body: ProjectCreateRequest,
+    svc: ProjectContextService = Depends(_get_project_service),
+):
     project = svc.create_project(**body.model_dump())
     return project.model_dump()
 
 
 @router.get("")
-def list_projects():
-    svc = get_service()
+def list_projects(
+    svc: ProjectContextService = Depends(_get_project_service),
+):
     return [p.model_dump() for p in svc.list_projects()]
 
 
 @router.get("/{project_id}")
-def get_project(project_id: str):
-    svc = get_service()
+def get_project(
+    project_id: str,
+    svc: ProjectContextService = Depends(_get_project_service),
+):
     project = svc.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -70,8 +78,11 @@ def get_project(project_id: str):
 
 
 @router.patch("/{project_id}")
-def update_project(project_id: str, body: ProjectUpdateRequest):
-    svc = get_service()
+def update_project(
+    project_id: str,
+    body: ProjectUpdateRequest,
+    svc: ProjectContextService = Depends(_get_project_service),
+):
     updates = body.model_dump(exclude_unset=True)
     try:
         updated = svc.update_project(project_id, **updates)
@@ -81,8 +92,10 @@ def update_project(project_id: str, body: ProjectUpdateRequest):
 
 
 @router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str):
-    svc = get_service()
+def delete_project(
+    project_id: str,
+    svc: ProjectContextService = Depends(_get_project_service),
+):
     deleted = svc.delete_project(project_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
