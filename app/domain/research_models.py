@@ -142,6 +142,63 @@ class PlannedScenario(BaseModel):
     branch_hint: str = ""
 
 
+# ---------------------------------------------------------------------------
+# 辅助函数：将 LLM 返回的 dict 元素智能转换为 str
+# ---------------------------------------------------------------------------
+
+def _value_to_str(value: object) -> str:
+    """将任意值转换为紧凑的字符串表示。"""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [str(i).strip() for i in value if str(i).strip()]
+        return ", ".join(parts) if parts else ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _extract_text_from_dict(d: dict, primary_key: str) -> str:
+    """从 LLM 返回的 dict 中提取人类可读的字符串。
+
+    提取策略：
+    1. 如果 *primary_key* 存在于 *d* 中，以其值为主文本；
+       将其他有意义的字符串值用 " | " 拼接在后面。
+    2. 否则，退化为取 dict 中第一个非空字符串值。
+    3. 最后兜底使用 ``str(d)``。
+    """
+    if primary_key in d:
+        main_text = _value_to_str(d[primary_key])
+        extras: list[str] = []
+        for k, v in d.items():
+            if k == primary_key:
+                continue
+            v_str = _value_to_str(v)
+            if v_str:
+                extras.append(v_str)
+        if extras:
+            return main_text + " | " + " | ".join(extras)
+        return main_text
+
+    # 退化：取第一个非空字符串值
+    for v in d.values():
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    # 最终兜底
+    return str(d)
+
+
+# 字段名 -> dict 中预期主键的映射
+_PRIMARY_KEY_MAP: dict[str, str] = {
+    "feature_topics": "topic",
+    "user_scenarios": "scenario",
+    "constraints": "constraint",
+    "ambiguities": "ambiguity",
+    "test_signals": "signal",
+}
+
+
 class ResearchOutput(BaseModel):
     """上下文研究输出。
 
@@ -149,6 +206,9 @@ class ResearchOutput(BaseModel):
     作为后续场景规划和用例生成的输入依据。
 
     ``facts`` 字段是新增的结构化事实列表，默认为空列表以保持向后兼容。
+
+    ``model_validator`` 负责将 LLM 可能返回的 ``list[dict]`` 格式
+    智能转换为 ``list[str]``，从而兼容不同 LLM 的输出风格。
     """
 
     feature_topics: list[str] = Field(default_factory=list)
@@ -157,3 +217,38 @@ class ResearchOutput(BaseModel):
     ambiguities: list[str] = Field(default_factory=list)
     test_signals: list[str] = Field(default_factory=list)
     facts: list[ResearchFact] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_dict_items_to_str(cls, values: Any) -> Any:
+        """将列表字段中的 dict 元素智能转换为 str。
+
+        LLM 有时会返回结构化 dict 而非纯字符串。例如::
+
+            feature_topics: [{"topic": "...", "details": [...]}]
+
+        本 validator 会将其透明地转换为::
+
+            feature_topics: ["... | detail1, detail2"]
+
+        确保下游 Pydantic 字段校验不会失败。
+        """
+        if not isinstance(values, dict):
+            return values
+
+        for field_name, primary_key in _PRIMARY_KEY_MAP.items():
+            raw_list = values.get(field_name)
+            if not isinstance(raw_list, list):
+                continue
+
+            coerced: list[str] = []
+            for item in raw_list:
+                if isinstance(item, str):
+                    coerced.append(item)
+                elif isinstance(item, dict):
+                    coerced.append(_extract_text_from_dict(item, primary_key))
+                else:
+                    coerced.append(str(item))
+            values[field_name] = coerced
+
+        return values

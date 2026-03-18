@@ -1,264 +1,237 @@
 """LLM 客户端模块。
 
-提供与 OpenAI 兼容 API 进行结构化交互的能力：
-- ``LLMClient``：协议接口，定义 LLM 调用的统一契约
-- ``OpenAICompatibleLLMClient``：基于 httpx 的具体实现
-- ``LLMClientConfig``：连接参数的数据模型
+提供与 OpenAI 兼容 API 交互的客户端抽象，包括：
+- ``LLMClientConfig``：客户端配置数据类
+- ``LLMClient``：基础 LLM 客户端，支持 chat / JSON 解析 / 结构化生成
+- ``OpenAICompatibleLLMClient``：从配置对象构造的便捷子类
 """
 
-from __future__ import annotations
-
 import json
+import logging
 import re
-from typing import Any, Protocol, TypeVar, get_origin
+from dataclasses import dataclass, field
+from typing import Any, Optional, Type, TypeVar
 
-import httpx
-from pydantic import BaseModel, ValidationError, field_validator
+from openai import OpenAI
+from pydantic import BaseModel
 
-# 泛型类型变量，约束为 Pydantic BaseModel 的子类，
-# 用于 generate_structured() 的返回值类型推断
-ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
-CHAT_COMPLETIONS_PATH = "chat/completions"
-FENCED_JSON_PATTERN = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
-COMMON_WRAPPER_KEYS = ("data", "result", "output", "response", "research_output", "document")
-READ_TIMEOUT_RETRY_ATTEMPTS = 2
-MIN_READ_TIMEOUT_SECONDS = 120.0
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
 
 
-class LLMClientConfig(BaseModel):
-    """LLM 连接配置。
+@dataclass
+class LLMClientConfig:
+    """LLM 客户端配置。"""
 
-    ``api_key``、``base_url``、``model`` 三个必填字段会做非空校验，
-    防止因配置缺失导致运行时才报错。
-    """
-
-    api_key: str
-    base_url: str
-    model: str
-    timeout_seconds: float = 60.0
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
     temperature: float = 0.2
-    max_tokens: int = 1600
-
-    @field_validator("api_key", "base_url", "model")
-    @classmethod
-    def validate_non_empty(cls, value: str) -> str:
-        """校验关键字段不能为空或纯空白字符串。"""
-        if not value or not value.strip():
-            raise ValueError("value must not be empty")
-        return value.strip()
+    max_tokens: int = 4096
+    timeout_seconds: float = 120.0
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
 
-class LLMClient(Protocol):
-    """​LLM 客户端协议（接口）。
+class LLMClient:
+    """OpenAI 兼容 API 的轻量封装。
 
-    任何实现了 ``generate_structured`` 方法的类均可作为 LLM 客户端注入，
-    便于在测试中替换为 FakeLLMClient。
-    """
-
-    def generate_structured(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        response_model: type[ResponseModelT],
-        model: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> ResponseModelT:
-        """向 LLM 发送请求并将 JSON 响应解析为类型安全的 Pydantic 模型。"""
-
-
-class OpenAICompatibleLLMClient:
-    """兼容 OpenAI Chat Completions API 的 LLM 客户端。
-
-    通过 ``response_format: json_object`` 强制 LLM 返回 JSON，
-    再利用 Pydantic ``model_validate_json`` 完成反序列化与校验。
+    提供 ``chat()``、``parse_json_response()`` 和
+    ``generate_structured()`` 三个核心方法。
     """
 
     def __init__(
         self,
-        config: LLMClientConfig,
-        client: httpx.Client | None = None,
+        api_key: str = "",
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "gpt-4o",
+        temperature: float = 0.2,
+        max_tokens: int = 4096,
+        timeout_seconds: float = 120.0,
     ) -> None:
-        self.config = config
-        self._chat_completions_url = _resolve_chat_completions_url(config.base_url)
-        self._client = client or httpx.Client(
-            timeout=_build_httpx_timeout(config.timeout_seconds),
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            },
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
         )
+
+    # ------------------------------------------------------------------
+    # 核心聊天方法
+    # ------------------------------------------------------------------
+
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """发送聊天补全请求，返回助手消息文本。
+
+        Args:
+            system_prompt: 系统指令。
+            user_prompt: 用户消息。
+            temperature: 覆盖默认温度。
+            max_tokens: 覆盖默认最大 token 数。
+
+        Returns:
+            助手回复的文本内容。
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            logger.exception("LLM 调用失败")
+            raise
+
+        content: str = response.choices[0].message.content or ""
+        logger.debug("LLM 响应长度: %d 字符", len(content))
+        return content
+
+    # ------------------------------------------------------------------
+    # JSON 解析辅助
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def parse_json_response(text: str) -> dict[str, Any]:
+        """从 LLM 响应文本中解析 JSON 对象。
+
+        兼容 LLM 常见的输出格式：纯 JSON、Markdown 代码围栏包裹的 JSON、
+        以及带有额外文本的 JSON。
+
+        Args:
+            text: LLM 返回的原始文本。
+
+        Returns:
+            解析后的 dict。
+
+        Raises:
+            ValueError: 无法从文本中提取有效 JSON。
+        """
+        cleaned = text.strip()
+
+        # 去除 Markdown 代码围栏
+        fence_pattern = re.compile(
+            r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL
+        )
+        match = fence_pattern.search(cleaned)
+        if match:
+            cleaned = match.group(1).strip()
+
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            # 兜底：尝试提取第一个 { ... } 块
+            brace_match = re.search(r"\{.*}", cleaned, re.DOTALL)
+            if brace_match:
+                try:
+                    parsed = json.loads(brace_match.group(0))
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"无法从 LLM 响应中解析 JSON: {exc}"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"无法从 LLM 响应中解析 JSON: {exc}"
+                ) from exc
+
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"期望 JSON 对象 (dict)，实际为 {type(parsed).__name__}"
+            )
+        return parsed
+
+    # ------------------------------------------------------------------
+    # 结构化生成
+    # ------------------------------------------------------------------
 
     def generate_structured(
         self,
-        *,
         system_prompt: str,
         user_prompt: str,
-        response_model: type[ResponseModelT],
-        model: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> ResponseModelT:
-        """调用 LLM 并返回结构化结果。
+        response_model: Type[T],
+        model: Optional[str] = None,  # noqa: ARG002 — 保留以兼容调用方
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> T:
+        """生成结构化（Pydantic 模型）响应。
 
-        流程：构造请求 → 发送 HTTP POST → 提取返回文本 → Pydantic 反序列化。
+        组合 :meth:`chat` + :meth:`parse_json_response` + Pydantic
+        ``model_validate``，一次调用即可获得经过校验的模型实例。
 
-        Raises:
-            httpx.HTTPStatusError: 当 LLM API 返回非 2xx 状态码时。
-            ValueError: 当响应格式不符合预期时。
-            pydantic.ValidationError: 当 JSON 无法匹配目标模型时。
+        Args:
+            system_prompt: 系统指令（应引导 LLM 输出符合 response_model 的 JSON）。
+            user_prompt: 用户上下文。
+            response_model: 用于校验的 Pydantic BaseModel 子类。
+            model: 忽略——构造时已固定模型。保留此参数以兼容调用方。
+            temperature: 覆盖默认温度。
+            max_tokens: 覆盖默认最大 token 数。
+
+        Returns:
+            经过校验的 response_model 实例。
         """
-        payload = self._build_request_payload(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=model,
+        logger.info(
+            "generate_structured: 请求 %s", response_model.__name__,
+        )
+
+        raw_text = self.chat(
+            system_prompt,
+            user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        response = self._post_with_read_timeout_retries(payload)
-        response.raise_for_status()
+        logger.debug("generate_structured: 原始响应: %.500s", raw_text)
 
-        content = _extract_message_content(response.json())
-        return _parse_structured_response(content, response_model)
+        try:
+            parsed_dict = self.parse_json_response(raw_text)
+        except ValueError:
+            logger.exception("generate_structured: 无法解析 LLM 响应中的 JSON")
+            raise
 
-    def _build_request_payload(
-        self,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        model: str | None,
-        temperature: float | None,
-        max_tokens: int | None,
-    ) -> dict[str, Any]:
-        """构造符合 OpenAI Chat Completions API 规范的请求体。"""
-        return {
-            "model": model or self.config.model,
-            "temperature": self.config.temperature if temperature is None else temperature,
-            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
+        logger.debug(
+            "generate_structured: 解析得到的 dict 键: %s",
+            list(parsed_dict.keys()),
+        )
 
-    def _post_with_read_timeout_retries(self, payload: dict[str, Any]) -> httpx.Response:
-        for attempt in range(READ_TIMEOUT_RETRY_ATTEMPTS + 1):
-            try:
-                return self._client.post(self._chat_completions_url, json=payload)
-            except httpx.ReadTimeout:
-                if attempt == READ_TIMEOUT_RETRY_ATTEMPTS:
-                    raise
-
-        raise RuntimeError("unreachable")
+        result = response_model.model_validate(parsed_dict)
+        logger.info(
+            "generate_structured: 成功校验 %s", response_model.__name__,
+        )
+        return result
 
 
-def _extract_message_content(payload: dict[str, Any]) -> str:
-    """从 LLM 响应体中提取纯文本内容。
+class OpenAICompatibleLLMClient(LLMClient):
+    """从 :class:`LLMClientConfig` 构造的便捷 LLM 客户端子类。
 
-    兼容两种响应格式：
-    1. ``content`` 为字符串（标准格式）
-    2. ``content`` 为数组（多段 text 拼接格式）
+    使调用方（如 ``workflow_service.py``）可以直接从配置对象创建客户端::
 
-    Raises:
-        ValueError: 响应中缺少 choices 或无法提取文本内容。
+        config = LLMClientConfig(api_key="sk-...", model="gpt-4o")
+        client = OpenAICompatibleLLMClient(config)
     """
-    choices = payload.get("choices")
-    if not choices:
-        raise ValueError("LLM response did not include choices")
 
-    message = choices[0].get("message", {})
-    content = message.get("content", "")
-
-    # 标准格式：content 直接为字符串
-    if isinstance(content, str):
-        return content
-
-    # 多段格式：content 为包含 type="text" 的对象数组
-    if isinstance(content, list):
-        text_parts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
-        if text_parts:
-            return "".join(text_parts)
-
-    raise ValueError("LLM response did not include structured text content")
-
-
-def _parse_structured_response(content: str, response_model: type[ResponseModelT]) -> ResponseModelT:
-    normalized_content = _normalize_json_content(content)
-    try:
-        return response_model.model_validate_json(normalized_content)
-    except ValidationError as original_error:
-        payload = json.loads(normalized_content)
-        unwrapped_payload = _unwrap_common_wrapper(payload)
-        if unwrapped_payload is not payload:
-            return response_model.model_validate(unwrapped_payload)
-
-        wrapped_payload = _wrap_top_level_list_for_single_list_field_model(payload, response_model)
-        if wrapped_payload is payload:
-            raise original_error
-        return response_model.model_validate(wrapped_payload)
-
-
-def _normalize_json_content(content: str) -> str:
-    stripped_content = content.strip()
-    fenced_match = FENCED_JSON_PATTERN.match(stripped_content)
-    if fenced_match:
-        return fenced_match.group(1).strip()
-    return stripped_content
-
-
-def _unwrap_common_wrapper(payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        return payload
-
-    for key in COMMON_WRAPPER_KEYS:
-        value = payload.get(key)
-        if isinstance(value, dict):
-            return value
-
-    if len(payload) == 1:
-        only_value = next(iter(payload.values()))
-        if isinstance(only_value, dict):
-            return only_value
-
-    return payload
-
-
-def _wrap_top_level_list_for_single_list_field_model(
-    payload: Any,
-    response_model: type[ResponseModelT],
-) -> Any:
-    if not isinstance(payload, list):
-        return payload
-
-    model_fields = response_model.model_fields
-    if len(model_fields) != 1:
-        return payload
-
-    field_name, field_info = next(iter(model_fields.items()))
-    if get_origin(field_info.annotation) is not list:
-        return payload
-
-    return {field_name: payload}
-
-
-def _resolve_chat_completions_url(base_url: str) -> str:
-    normalized_base_url = base_url.strip().rstrip("/")
-    if normalized_base_url.endswith(f"/{CHAT_COMPLETIONS_PATH}"):
-        return normalized_base_url
-    return f"{normalized_base_url}/{CHAT_COMPLETIONS_PATH}"
-
-
-def _build_httpx_timeout(timeout_seconds: float) -> httpx.Timeout:
-    read_timeout = max(timeout_seconds, MIN_READ_TIMEOUT_SECONDS)
-    return httpx.Timeout(
-        connect=timeout_seconds,
-        read=read_timeout,
-        write=timeout_seconds,
-        pool=timeout_seconds,
-    )
+    def __init__(self, config: LLMClientConfig) -> None:
+        super().__init__(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+            timeout_seconds=config.timeout_seconds,
+        )
+        self.config = config
