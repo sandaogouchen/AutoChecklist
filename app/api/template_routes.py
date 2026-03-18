@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/templates", tags=["templates"])
 
 
-# ── 请求/响应模型 ────────────────────────────────────────
+# ── 请求/响应模型 ─────────────────────────────────────────
 
 
 class TemplateCreateRequest(BaseModel):
@@ -54,7 +54,7 @@ class TemplateValidateRequest(BaseModel):
     format: str = Field(default="yaml", description="输入格式: yaml | json")
 
 
-# ── 路由 ──────────────────────────────────────────────
+# ── 路由 ───────────────────────────────────────────────
 # 注意：固定路径路由（validate、import）必须在路径参数路由（{template_id}）
 # 之前注册，否则 FastAPI 会将 "validate" / "import" 当作 template_id 匹配。
 
