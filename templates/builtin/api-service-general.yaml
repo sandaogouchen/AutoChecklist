@@ -1,300 +1,147 @@
-# REST API 服务测试模板
-# 适用于 RESTful API 服务的测试集模板，覆盖接口契约、参数校验、认证授权等维度
-
+id: "tpl-api-general"
+name: "API 服务通用测试模板"
+version: "1.0.0"
+source: "builtin"
 metadata:
-  id: api-service-general
-  name: "REST API 服务测试模板"
-  description: "适用于 RESTful API 服务的测试集模板，覆盖接口契约、参数校验、认证授权等维度"
-  version: "1.0.0"
-  author: "AutoChecklist Team"
+  author: "AutoChecklist"
   tags:
     - "api"
     - "backend"
-    - "rest"
-  applicable_project_types:
-    - "API_SERVICE"
-
-settings:
-  default_priority: medium
-  min_cases_per_category: 2
-  require_negative_cases: true
-  require_boundary_cases: true
-  language: "zh-CN"
-
-source: builtin
-
+    - "service"
+  project_type: "api"
+  description: "适用于后端 API 服务的通用测试检查模板，覆盖接口正确性、参数校验、认证授权、错误处理和性能限流五大维度。"
 categories:
-  # ============================================================
-  # 维度 1: 接口正确性
-  # ============================================================
   - name: "接口正确性"
-    priority: critical
-    description: "验证 API 接口的请求-响应行为是否符合契约规范"
-    checklist:
-      # --- 检查项 1.1 ---
-      - id: api-contract
-        name: "请求-响应契约验证"
-        description: "验证接口的请求参数和响应结构是否符合 API 文档定义"
-        priority: critical
+    description: "验证 API 接口的功能正确性和数据一致性"
+    items:
+      - title: "CRUD 操作验证"
+        description: "验证资源的创建、读取、更新、删除操作"
+        priority: "critical"
         rules:
-          - id: api-contract-01
-            description: "接口响应的 JSON Schema 应与 API 文档（如 OpenAPI/Swagger）定义完全一致，包括字段名称、类型和是否必填"
-            severity: critical
-          - id: api-contract-02
-            description: "响应中的枚举字段值应在文档定义的取值范围内，不应出现未定义的枚举值"
-            severity: high
-          - id: api-contract-03
-            description: "Content-Type、Accept 等请求/响应头应符合接口规范，JSON 接口应返回 application/json"
-            severity: medium
-
-      # --- 检查项 1.2 ---
-      - id: api-crud
-        name: "CRUD操作完整性"
-        description: "验证资源的创建、读取、更新、删除操作的完整性和正确性"
-        priority: critical
+          - "验证 POST 创建资源后返回正确的 201 状态码和资源数据"
+          - "验证 GET 获取资源返回完整且准确的数据"
+          - "验证 PUT/PATCH 更新资源后数据一致性"
+          - "验证 DELETE 删除资源后无法再次获取"
+      - title: "响应格式验证"
+        description: "验证 API 响应的数据格式和结构"
+        priority: "high"
         rules:
-          - id: api-crud-01
-            description: "POST 创建资源后应返回 201 状态码和新资源的完整数据（含生成的 ID），GET 能正确查询到新创建的资源"
-            severity: critical
-          - id: api-crud-02
-            description: "PUT/PATCH 更新资源后应返回 200 状态码和更新后的完整数据，修改字段应生效且未修改字段应保持不变"
-            severity: critical
-          - id: api-crud-03
-            description: "DELETE 删除资源后应返回 204 或 200 状态码，再次 GET 该资源应返回 404"
-            severity: critical
-
-      # --- 检查项 1.3 ---
-      - id: api-pagination-sort
-        name: "分页排序过滤"
-        description: "验证列表接口的分页、排序和过滤功能"
-        priority: high
+          - "验证响应 Content-Type 与约定一致"
+          - "验证响应 JSON 结构符合 API 文档定义"
+          - "验证分页响应包含 total、page、page_size 等元数据"
+      - title: "业务逻辑验证"
+        description: "验证接口的业务规则和约束"
+        priority: "critical"
         rules:
-          - id: api-pagination-sort-01
-            description: "分页参数（page/size 或 offset/limit）应正确生效，返回数据条数应与分页参数一致，总条数应准确"
-            severity: high
-          - id: api-pagination-sort-02
-            description: "排序参数应支持升序和降序，返回数据的顺序应与指定排序字段一致"
-            severity: high
-          - id: api-pagination-sort-03
-            description: "过滤条件应精确匹配，多条件组合过滤时应使用 AND 逻辑，返回结果不应包含不匹配的数据"
-            severity: high
-
-  # ============================================================
-  # 维度 2: 参数校验
-  # ============================================================
+          - "验证业务唯一性约束（如名称不重复）"
+          - "验证状态机转换规则（如订单状态流转）"
+          - "验证关联数据的级联操作"
   - name: "参数校验"
-    priority: high
-    description: "验证接口对请求参数的校验能力，确保非法参数被正确拦截"
-    checklist:
-      # --- 检查项 2.1 ---
-      - id: param-required
-        name: "必填参数缺失"
-        description: "验证必填参数缺失时的接口行为"
-        priority: high
+    description: "验证 API 输入参数的校验和处理"
+    items:
+      - title: "必填参数校验"
+        description: "验证必填参数缺失时的错误处理"
+        priority: "high"
         rules:
-          - id: param-required-01
-            description: "缺失任一必填参数时接口应返回 400 状态码，错误信息应明确指出缺失的参数名"
-            severity: high
-          - id: param-required-02
-            description: "必填参数传入空字符串或 null 时应视为未传入，返回与缺失参数相同的校验错误"
-            severity: high
-          - id: param-required-03
-            description: "同时缺失多个必填参数时，错误响应应列出所有缺失参数，而非仅报告第一个"
-            severity: medium
-
-      # --- 检查项 2.2 ---
-      - id: param-type-format
-        name: "参数类型与格式"
-        description: "验证参数类型不匹配或格式不符时的校验行为"
-        priority: high
+          - "验证缺少必填字段时返回 422 并包含明确错误信息"
+          - "验证必填字段为空字符串时的处理"
+          - "验证必填字段为 null 时的处理"
+      - title: "参数类型与格式校验"
+        description: "验证参数的类型和格式约束"
+        priority: "high"
         rules:
-          - id: param-type-format-01
-            description: "整数字段传入字符串、布尔字段传入数字等类型不匹配场景应返回 400 并提示类型错误"
-            severity: high
-          - id: param-type-format-02
-            description: "日期、邮箱、URL、手机号等格式化字段传入非法格式时应返回明确的格式校验错误"
-            severity: high
-          - id: param-type-format-03
-            description: "JSON 请求体格式错误（如缺少引号、多余逗号）应返回 400，不应导致服务端 500 错误"
-            severity: critical
-
-      # --- 检查项 2.3 ---
-      - id: param-boundary
-        name: "边界值与极端输入"
-        description: "验证参数在边界值和极端场景下的处理"
-        priority: high
+          - "验证字符串字段的长度限制"
+          - "验证数值字段的范围限制"
+          - "验证日期、邮箱、URL 等格式字段"
+          - "验证枚举字段的值范围"
+      - title: "边界值与特殊字符"
+        description: "验证参数的边界条件和特殊输入"
+        priority: "medium"
         rules:
-          - id: param-boundary-01
-            description: "字符串字段在最大长度、最小长度边界值时应正确处理，超出限制应返回校验错误"
-            severity: high
-          - id: param-boundary-02
-            description: "数值字段在最大值、最小值、零、负数等边界条件下应正确校验和处理"
-            severity: high
-          - id: param-boundary-03
-            description: "超大请求体（如数组包含数万条记录）应返回 413 或被合理限制，不应导致服务端 OOM"
-            severity: high
-
-  # ============================================================
-  # 维度 3: 认证授权
-  # ============================================================
+          - "验证字符串最大长度边界"
+          - "验证数值上下界"
+          - "验证包含特殊字符（Unicode、emoji）的输入"
+          - "验证超大 payload 的处理"
   - name: "认证授权"
-    priority: high
-    description: "验证接口的身份认证和权限控制机制"
-    checklist:
-      # --- 检查项 3.1 ---
-      - id: auth-token
-        name: "Token验证"
-        description: "验证 Token 认证机制的正确性"
-        priority: critical
+    description: "验证 API 的认证和授权机制"
+    items:
+      - title: "认证验证"
+        description: "验证 API 的认证机制"
+        priority: "critical"
         rules:
-          - id: auth-token-01
-            description: "未携带 Token 或 Authorization 头的请求应返回 401 Unauthorized"
-            severity: critical
-          - id: auth-token-02
-            description: "携带过期、篡改或格式错误的 Token 应返回 401，错误信息应区分 Token 过期和 Token 无效"
-            severity: critical
-          - id: auth-token-03
-            description: "Token 刷新接口应正确返回新 Token，旧 Token 在合理的宽限期后应失效"
-            severity: high
-
-      # --- 检查项 3.2 ---
-      - id: auth-permission
-        name: "权限控制"
-        description: "验证基于角色或资源的权限控制"
-        priority: critical
+          - "验证无 Token 请求返回 401"
+          - "验证过期 Token 返回 401 并包含过期提示"
+          - "验证篡改 Token 返回 401"
+      - title: "授权验证"
+        description: "验证 API 的权限控制"
+        priority: "critical"
         rules:
-          - id: auth-permission-01
-            description: "普通用户访问管理员接口应返回 403 Forbidden，不应泄露接口的存在或数据结构"
-            severity: critical
-          - id: auth-permission-02
-            description: "用户只能操作自己拥有的资源，访问他人资源应返回 403 或 404"
-            severity: critical
-          - id: auth-permission-03
-            description: "权限变更（如角色调整）应即时生效，不应因缓存导致权限延迟更新"
-            severity: high
-
-      # --- 检查项 3.3 ---
-      - id: auth-session
-        name: "会话管理"
-        description: "验证会话生命周期管理的安全性"
-        priority: high
+          - "验证普通用户无法访问管理员接口"
+          - "验证用户只能操作自己的资源"
+          - "验证跨租户数据隔离"
+      - title: "会话管理"
+        description: "验证会话和 Token 管理"
+        priority: "high"
         rules:
-          - id: auth-session-01
-            description: "用户登出后 Token/Session 应立即失效，使用已登出的凭证请求应返回 401"
-            severity: high
-          - id: auth-session-02
-            description: "同一账户多端登录策略应符合业务规则（互踢、共存或限制数量）"
-            severity: medium
-          - id: auth-session-03
-            description: "密码修改后所有已有会话应强制失效，要求用户重新登录"
-            severity: high
-
-  # ============================================================
-  # 维度 4: 错误处理
-  # ============================================================
+          - "验证 Token 刷新机制"
+          - "验证并发登录策略"
   - name: "错误处理"
-    priority: high
-    description: "验证接口错误响应的规范性和一致性"
-    checklist:
-      # --- 检查项 4.1 ---
-      - id: error-http-status
-        name: "HTTP状态码规范"
-        description: "验证接口返回的 HTTP 状态码是否符合 RESTful 规范"
-        priority: high
+    description: "验证 API 的错误处理和异常响应"
+    items:
+      - title: "HTTP 状态码规范"
+        description: "验证不同错误场景返回正确的 HTTP 状态码"
+        priority: "high"
         rules:
-          - id: error-http-status-01
-            description: "成功操作应使用正确的状态码：GET 200、POST 201、PUT 200、DELETE 204"
-            severity: high
-          - id: error-http-status-02
-            description: "客户端错误应使用 4xx 状态码（400/401/403/404/409/422），不应使用 200 包裹错误信息"
-            severity: high
-          - id: error-http-status-03
-            description: "服务端未预期异常应返回 500 Internal Server Error，且不应在响应中暴露堆栈信息或内部实现细节"
-            severity: critical
-
-      # --- 检查项 4.2 ---
-      - id: error-response-format
-        name: "错误响应格式"
-        description: "验证错误响应的格式一致性和可读性"
-        priority: high
+          - "验证资源不存在返回 404"
+          - "验证权限不足返回 403"
+          - "验证参数错误返回 422"
+          - "验证冲突操作返回 409"
+      - title: "错误响应格式"
+        description: "验证错误响应的结构化格式"
+        priority: "medium"
         rules:
-          - id: error-response-format-01
-            description: "所有错误响应应遵循统一格式（如包含 code、message、details 字段），不同接口的错误格式应保持一致"
-            severity: high
-          - id: error-response-format-02
-            description: "错误消息应对开发者友好，包含足够的上下文信息以定位问题（如字段名、约束条件）"
-            severity: medium
-          - id: error-response-format-03
-            description: "面向终端用户的错误信息应友好可读，不应暴露技术细节（如数据库表名、SQL 语句）"
-            severity: high
-
-      # --- 检查项 4.3 ---
-      - id: error-chain
-        name: "异常链路处理"
-        description: "验证下游依赖异常时的处理策略"
-        priority: high
+          - "验证错误响应包含 error_code 和 message"
+          - "验证错误信息对调用方有指导意义"
+          - "验证错误响应不泄露内部实现细节"
+      - title: "异常容错"
+        description: "验证后端异常时的容错处理"
+        priority: "high"
         rules:
-          - id: error-chain-01
-            description: "下游服务不可用时应返回 502 或 503 状态码，并携带可用于排查的 Request-ID"
-            severity: high
-          - id: error-chain-02
-            description: "下游服务超时应在合理时间内返回，不应让客户端无限等待（应配置超时时间）"
-            severity: high
-          - id: error-chain-03
-            description: "依赖服务部分降级时，主接口应仍能返回核心数据，非关键字段可以为空并标注降级状态"
-            severity: medium
-
-  # ============================================================
-  # 维度 5: 性能与限流
-  # ============================================================
+          - "验证数据库连接失败时的降级响应"
+          - "验证第三方服务超时时的超时处理"
+          - "验证未知异常的 500 兆底处理"
   - name: "性能与限流"
-    priority: medium
-    description: "验证接口的响应性能和流量控制能力"
-    checklist:
-      # --- 检查项 5.1 ---
-      - id: perf-response-sla
-        name: "响应时间SLA"
-        description: "验证接口响应时间是否满足 SLA 要求"
-        priority: medium
+    description: "验证 API 的性能和流量控制"
+    items:
+      - title: "响应时间"
+        description: "验证 API 的响应时间是否满足 SLA"
+        priority: "high"
         rules:
-          - id: perf-response-sla-01
-            description: "简单查询接口 P99 响应时间应控制在 200ms 以内，P95 控制在 100ms 以内"
-            severity: medium
-          - id: perf-response-sla-02
-            description: "复杂查询和聚合接口 P99 响应时间应控制在 2 秒以内"
-            severity: medium
-          - id: perf-response-sla-03
-            description: "写入接口（POST/PUT/DELETE）P99 响应时间应控制在 500ms 以内"
-            severity: medium
-
-      # --- 检查项 5.2 ---
-      - id: perf-stress
-        name: "并发压力测试"
-        description: "验证接口在高并发场景下的稳定性"
-        priority: medium
+          - "验证列表接口 P99 响应时间 < 500ms"
+          - "验证详情接口 P99 响应时间 < 200ms"
+          - "验证大数据量查询的分页性能"
+      - title: "限流策略"
+        description: "验证 API 的流量控制机制"
+        priority: "medium"
         rules:
-          - id: perf-stress-01
-            description: "在预期峰值 QPS 的 2 倍压力下，接口错误率应控制在 0.1% 以内"
-            severity: medium
-          - id: perf-stress-02
-            description: "并发创建/更新同一资源时不应出现数据不一致或死锁"
-            severity: high
-          - id: perf-stress-03
-            description: "持续压力测试（30分钟以上）期间，接口响应时间不应出现持续恶化趋势"
-            severity: medium
-
-      # --- 检查项 5.3 ---
-      - id: perf-rate-limit
-        name: "限流与熔断机制"
-        description: "验证接口的限流和熔断保护"
-        priority: medium
+          - "验证超过限流阈值返回 429"
+          - "验证限流响应包含 Retry-After 头"
+      - title: "幂等性"
+        description: "验证写操作的幂等性"
+        priority: "high"
         rules:
-          - id: perf-rate-limit-01
-            description: "超过限流阈值的请求应返回 429 Too Many Requests，并在响应头中包含 Retry-After 信息"
-            severity: high
-          - id: perf-rate-limit-02
-            description: "限流策略应区分用户/IP/接口维度，单用户超限不应影响其他用户的正常使用"
-            severity: medium
-          - id: perf-rate-limit-03
-            description: "熔断触发后应有自动恢复机制（半开状态探测），下游恢复后服务应自动恢复正常"
-            severity: medium
+          - "验证重复 POST 请求不会创建重复资源"
+          - "验证重复 PUT 请求结果一致"
+exclusions:
+  - pattern: "基础设施层（数据库、缓存、消息队列）的内部行为"
+    reason: "基础设施由运维团队保证"
+  - pattern: "第三方 API 的内部实现"
+    reason: "第三方服务由供应商保证"
+settings:
+  min_cases_per_category: 3
+  require_edge_cases: true
+  priority_weights:
+    critical: 1.0
+    high: 0.8
+    medium: 0.5
+    low: 0.3

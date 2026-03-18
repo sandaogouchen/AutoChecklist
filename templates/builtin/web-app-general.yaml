@@ -1,346 +1,158 @@
-# Web 应用通用测试模板
-# 适用于标准 Web 应用的通用测试集模板，覆盖功能、UI、安全、性能等核心维度
-
+id: "tpl-web-general"
+name: "Web 应用通用测试模板"
+version: "1.0.0"
+source: "builtin"
 metadata:
-  id: web-app-general
-  name: "Web 应用通用测试模板"
-  description: "适用于标准 Web 应用的通用测试集模板，覆盖功能、UI、安全、性能等核心维度"
-  version: "1.0.0"
-  author: "AutoChecklist Team"
+  author: "AutoChecklist"
   tags:
     - "web"
-    - "frontend"
     - "general"
-  applicable_project_types:
-    - "WEB_APP"
-
-settings:
-  default_priority: medium
-  min_cases_per_category: 2
-  require_negative_cases: true
-  require_boundary_cases: true
-  language: "zh-CN"
-
-source: builtin
-
+    - "frontend"
+  project_type: "web"
+  description: "适用于 Web 前端应用的通用测试检查模板，覆盖功能、UI/UX、异常处理、安全、性能和兼容性六大维度。"
 categories:
-  # ============================================================
-  # 维度 1: 功能正确性
-  # ============================================================
   - name: "功能正确性"
-    priority: critical
-    description: "验证核心业务功能是否按预期工作，包括正向流程、输入校验和数据持久化"
-    checklist:
-      # --- 检查项 1.1 ---
-      - id: func-positive-flow
-        name: "正向流程验证"
-        description: "验证主要业务流程在正常输入下能够正确完成"
-        priority: critical
+    description: "验证核心业务功能是否按需求正确实现"
+    items:
+      - title: "核心业务流程验证"
+        description: "确保主要业务流程端到端可正常完成"
+        priority: "critical"
         rules:
-          - id: func-positive-flow-01
-            description: "核心业务流程（如注册、登录、下单、支付）在合法输入下应能顺利完成，并返回预期结果"
-            severity: critical
-          - id: func-positive-flow-02
-            description: "多步骤流程中每一步的状态流转应正确，前置步骤的数据应能正确传递到后续步骤"
-            severity: critical
-          - id: func-positive-flow-03
-            description: "流程完成后，页面应展示正确的成功状态反馈，相关数据应同步更新"
-            severity: high
-
-      # --- 检查项 1.2 ---
-      - id: func-input-validation
-        name: "输入校验"
-        description: "验证表单和输入字段的校验逻辑是否完善"
-        priority: critical
+          - "每个核心流程至少覆盖正常路径和一个异常路径"
+          - "验证流程中每个步骤的状态转换正确性"
+          - "验证流程完成后的数据持久化结果"
+      - title: "表单输入与校验"
+        description: "验证所有表单的输入校验和提交逻辑"
+        priority: "high"
         rules:
-          - id: func-input-validation-01
-            description: "必填字段为空提交时应显示明确的错误提示，且不允许表单提交"
-            severity: critical
-          - id: func-input-validation-02
-            description: "输入内容超出长度限制、格式不符（如邮箱、手机号）时应给出实时校验反馈"
-            severity: high
-          - id: func-input-validation-03
-            description: "特殊字符、SQL注入片段、脚本标签等恶意输入应被正确过滤或转义，不应导致系统异常"
-            severity: critical
-
-      # --- 检查项 1.3 ---
-      - id: func-data-persistence
-        name: "数据持久化"
-        description: "验证用户操作产生的数据能够正确存储和读取"
-        priority: critical
+          - "覆盖必填字段为空的场景"
+          - "覆盖字段格式校验（邮箱、手机号、URL 等）"
+          - "覆盖字段长度边界值"
+      - title: "数据展示与列表"
+        description: "验证数据列表的展示、排序、筛选和分页"
+        priority: "high"
         rules:
-          - id: func-data-persistence-01
-            description: "用户提交的数据应完整持久化到后端存储，刷新页面后数据不应丢失"
-            severity: critical
-          - id: func-data-persistence-02
-            description: "数据的创建、读取、更新、删除操作应与数据库状态保持一致，不出现脏读或幻读"
-            severity: critical
-          - id: func-data-persistence-03
-            description: "并发编辑场景下应有冲突检测机制，避免后提交的数据静默覆盖先提交的数据"
-            severity: high
-
-  # ============================================================
-  # 维度 2: UI/UX
-  # ============================================================
+          - "验证空数据状态的展示"
+          - "验证分页跳转和每页数量切换"
+          - "验证排序和筛选条件的组合"
   - name: "UI/UX"
-    priority: high
-    description: "验证页面展示、交互体验和用户反馈是否符合设计规范"
-    checklist:
-      # --- 检查项 2.1 ---
-      - id: ui-layout-responsive
-        name: "页面布局与响应式"
-        description: "验证页面在不同屏幕尺寸下的布局表现"
-        priority: high
+    description: "验证用户界面和交互体验"
+    items:
+      - title: "页面布局与响应式"
+        description: "验证页面在不同屏幕尺寸下的布局正确性"
+        priority: "medium"
         rules:
-          - id: ui-layout-responsive-01
-            description: "页面在主流分辨率（1920x1080、1440x900、1366x768）下布局应无错位、重叠或溢出"
-            severity: high
-          - id: ui-layout-responsive-02
-            description: "响应式断点切换时，内容区域、导航栏、侧边栏应平滑过渡，不出现布局闪烁"
-            severity: medium
-          - id: ui-layout-responsive-03
-            description: "移动端视口下关键操作按钮应可见且可点击，不被其他元素遮挡"
-            severity: high
-
-      # --- 检查项 2.2 ---
-      - id: ui-form-interaction
-        name: "表单交互"
-        description: "验证表单元素的交互行为是否符合用户预期"
-        priority: high
+          - "验证桌面端（≥1280px）布局"
+          - "验证平板端（768px-1279px）布局"
+          - "验证移动端（<768px）布局"
+      - title: "交互反馈"
+        description: "验证用户操作后的反馈是否及时且正确"
+        priority: "medium"
         rules:
-          - id: ui-form-interaction-01
-            description: "输入框聚焦、失焦、错误状态应有明确的视觉区分（边框颜色、图标提示等）"
-            severity: medium
-          - id: ui-form-interaction-02
-            description: "下拉选择、日期选择器、文件上传等复合组件应能正常打开、选择和关闭"
-            severity: high
-          - id: ui-form-interaction-03
-            description: "表单提交按钮在请求进行中应设置为禁用状态，防止用户重复提交"
-            severity: high
-
-      # --- 检查项 2.3 ---
-      - id: ui-loading-feedback
-        name: "加载状态与反馈"
-        description: "验证系统在数据加载和操作执行时的用户反馈"
-        priority: high
+          - "验证按钮点击后的 loading 状态"
+          - "验证操作成功/失败的 toast 提示"
+          - "验证表单提交后的状态恢复"
+      - title: "导航与路由"
+        description: "验证页面导航和路由跳转"
+        priority: "high"
         rules:
-          - id: ui-loading-feedback-01
-            description: "数据加载过程中应展示加载指示器（如 Spinner、骨架屏），避免页面空白"
-            severity: high
-          - id: ui-loading-feedback-02
-            description: "操作成功或失败后应通过 Toast、弹窗或内联消息给予明确反馈"
-            severity: high
-          - id: ui-loading-feedback-03
-            description: "长时间操作（超过 3 秒）应展示进度指示，并提供取消操作的能力"
-            severity: medium
-
-  # ============================================================
-  # 维度 3: 异常处理与容错
-  # ============================================================
+          - "验证面包屑导航的正确性"
+          - "验证浏览器前进/后退的状态保持"
+          - "验证直接访问 URL 的权限控制"
   - name: "异常处理与容错"
-    priority: high
-    description: "验证系统在异常场景下的容错能力和恢复机制"
-    checklist:
-      # --- 检查项 3.1 ---
-      - id: error-network
-        name: "网络异常"
-        description: "验证网络不稳定或中断时系统的行为表现"
-        priority: high
+    description: "验证系统在异常情况下的处理能力"
+    items:
+      - title: "网络异常处理"
+        description: "验证网络断开、超时等场景的处理"
+        priority: "high"
         rules:
-          - id: error-network-01
-            description: "网络请求超时时应展示友好的错误提示，并提供重试按钮"
-            severity: high
-          - id: error-network-02
-            description: "网络断开后恢复时，页面应能自动或手动刷新恢复正常状态，不出现数据不一致"
-            severity: high
-          - id: error-network-03
-            description: "弱网环境下（高延迟、低带宽），核心功能应仍可使用，不出现页面卡死"
-            severity: medium
-
-      # --- 检查项 3.2 ---
-      - id: error-concurrency
-        name: "并发与竞态"
-        description: "验证多用户或多操作并发时的系统稳定性"
-        priority: high
+          - "验证网络断开时的用户提示"
+          - "验证请求超时的重试机制"
+          - "验证网络恢复后的自动重连"
+      - title: "接口错误处理"
+        description: "验证后端接口返回错误时的前端处理"
+        priority: "high"
         rules:
-          - id: error-concurrency-01
-            description: "用户快速连续点击提交按钮不应产生重复数据或重复请求"
-            severity: high
-          - id: error-concurrency-02
-            description: "多个浏览器标签页同时操作同一资源时，应有合理的冲突检测与提示"
-            severity: medium
-          - id: error-concurrency-03
-            description: "前端异步请求的竞态条件应被正确处理，确保页面展示最新请求的结果"
-            severity: high
-
-      # --- 检查项 3.3 ---
-      - id: error-data-conflict
-        name: "数据冲突处理"
-        description: "验证数据冲突场景下的处理策略"
-        priority: high
+          - "验证 4xx 错误的用户友好提示"
+          - "验证 5xx 错误的兆底页面"
+          - "验证接口返回数据格式异常时的容错"
+      - title: "并发操作处理"
+        description: "验证用户快速重复操作时的处理"
+        priority: "medium"
         rules:
-          - id: error-data-conflict-01
-            description: "乐观锁冲突时应提示用户数据已被他人修改，并提供刷新或合并选项"
-            severity: high
-          - id: error-data-conflict-02
-            description: "删除已被引用的数据时应给出关联关系提示，防止级联删除导致数据丢失"
-            severity: high
-
-  # ============================================================
-  # 维度 4: 安全性
-  # ============================================================
+          - "验证按钮防重复点击"
+          - "验证表单防重复提交"
   - name: "安全性"
-    priority: high
-    description: "验证系统的认证、授权和数据安全防护能力"
-    checklist:
-      # --- 检查项 4.1 ---
-      - id: sec-auth
-        name: "认证与授权"
-        description: "验证用户身份认证和权限控制机制"
-        priority: critical
+    description: "验证 Web 应用的安全防护"
+    items:
+      - title: "XSS 防护"
+        description: "验证跨站脚本攻击的防护措施"
+        priority: "critical"
         rules:
-          - id: sec-auth-01
-            description: "未登录用户访问受保护页面应被重定向到登录页，不应暴露任何敏感数据"
-            severity: critical
-          - id: sec-auth-02
-            description: "用户只能访问其权限范围内的资源，越权请求应返回 403 并记录审计日志"
-            severity: critical
-          - id: sec-auth-03
-            description: "登录会话应有合理的过期时间，过期后需重新认证，Token 不应长期有效"
-            severity: high
-
-      # --- 检查项 4.2 ---
-      - id: sec-data
-        name: "数据安全"
-        description: "验证敏感数据的传输和存储安全"
-        priority: high
+          - "验证用户输入内容的转义处理"
+          - "验证富文本编辑器的 XSS 过滤"
+          - "验证 URL 参数的注入防护"
+      - title: "认证与授权"
+        description: "验证用户认证和权限控制"
+        priority: "critical"
         rules:
-          - id: sec-data-01
-            description: "密码、身份证号等敏感字段在前端展示时应脱敏处理（如 ****）"
-            severity: high
-          - id: sec-data-02
-            description: "所有 API 请求应通过 HTTPS 传输，禁止明文传输敏感数据"
-            severity: critical
-          - id: sec-data-03
-            description: "浏览器本地存储（LocalStorage/SessionStorage）中不应保存未加密的敏感信息"
-            severity: high
-
-      # --- 检查项 4.3 ---
-      - id: sec-xss-csrf
-        name: "XSS/CSRF防护"
-        description: "验证系统对常见 Web 攻击的防护能力"
-        priority: high
+          - "验证未登录用户的访问限制"
+          - "验证 Token 过期后的自动跳转"
+          - "验证不同角色的权限隔离"
+      - title: "敏感数据保护"
+        description: "验证敏感信息的前端保护措施"
+        priority: "high"
         rules:
-          - id: sec-xss-csrf-01
-            description: "用户输入在页面渲染时应经过转义处理，防止存储型和反射型 XSS 攻击"
-            severity: critical
-          - id: sec-xss-csrf-02
-            description: "表单提交和状态变更接口应携带 CSRF Token，防止跨站请求伪造"
-            severity: high
-          - id: sec-xss-csrf-03
-            description: "Content-Security-Policy、X-Frame-Options 等安全响应头应正确配置"
-            severity: medium
-
-  # ============================================================
-  # 维度 5: 性能与稳定性
-  # ============================================================
+          - "验证密码字段的掩码显示"
+          - "验证敏感数据不在 URL 中明文传输"
   - name: "性能与稳定性"
-    priority: medium
-    description: "验证系统的加载速度、响应时间和资源使用效率"
-    checklist:
-      # --- 检查项 5.1 ---
-      - id: perf-page-load
-        name: "页面加载性能"
-        description: "验证页面的加载速度是否满足性能基准"
-        priority: medium
+    description: "验证页面性能和运行稳定性"
+    items:
+      - title: "页面加载性能"
+        description: "验证页面首屏加载和交互响应速度"
+        priority: "high"
         rules:
-          - id: perf-page-load-01
-            description: "首屏渲染时间（FCP）应控制在 1.5 秒以内，最大内容绘制（LCP）应控制在 2.5 秒以内"
-            severity: medium
-          - id: perf-page-load-02
-            description: "静态资源（JS/CSS/图片）应启用 Gzip 压缩和浏览器缓存，减少重复加载"
-            severity: medium
-          - id: perf-page-load-03
-            description: "非首屏内容应采用懒加载策略，避免首次加载时请求过多资源"
-            severity: low
-
-      # --- 检查项 5.2 ---
-      - id: perf-api-response
-        name: "API响应时间"
-        description: "验证后端接口的响应速度"
-        priority: medium
+          - "首屏加载时间不超过 3 秒"
+          - "交互响应时间不超过 200ms"
+          - "验证大数据量列表的渲染性能"
+      - title: "内存与资源管理"
+        description: "验证前端资源的合理使用"
+        priority: "medium"
         rules:
-          - id: perf-api-response-01
-            description: "常规查询接口 P95 响应时间应控制在 500ms 以内"
-            severity: medium
-          - id: perf-api-response-02
-            description: "复杂聚合查询或报表接口 P95 响应时间应控制在 3 秒以内"
-            severity: medium
-
-      # --- 检查项 5.3 ---
-      - id: perf-memory-leak
-        name: "内存与资源泄漏"
-        description: "验证长时间运行时是否存在内存泄漏"
-        priority: medium
+          - "验证长时间使用无内存泄漏"
+          - "验证图片和静态资源的懒加载"
+      - title: "接口请求优化"
+        description: "验证接口请求的优化策略"
+        priority: "medium"
         rules:
-          - id: perf-memory-leak-01
-            description: "页面长时间运行或反复切换路由后，JS 堆内存不应持续增长"
-            severity: medium
-          - id: perf-memory-leak-02
-            description: "组件卸载时应清理定时器、事件监听器和订阅，防止内存泄漏"
-            severity: high
-          - id: perf-memory-leak-03
-            description: "WebSocket 和长轮询连接在页面离开时应正确关闭，不产生僵尸连接"
-            severity: medium
-
-  # ============================================================
-  # 维度 6: 兼容性
-  # ============================================================
+          - "验证重复请求的缓存和去重"
+          - "验证列表请求的分页加载"
   - name: "兼容性"
-    priority: medium
-    description: "验证系统在不同浏览器、分辨率和语言环境下的兼容表现"
-    checklist:
-      # --- 检查项 6.1 ---
-      - id: compat-browser
-        name: "浏览器兼容性"
-        description: "验证系统在主流浏览器中的表现"
-        priority: medium
+    description: "验证跨浏览器和跨设备的兼容性"
+    items:
+      - title: "浏览器兼容性"
+        description: "验证主流浏览器的功能和展示一致性"
+        priority: "medium"
         rules:
-          - id: compat-browser-01
-            description: "核心功能在 Chrome、Firefox、Safari、Edge 最新两个大版本中应表现一致"
-            severity: medium
-          - id: compat-browser-02
-            description: "使用的 Web API 和 CSS 特性应在目标浏览器中有兼容方案或 Polyfill"
-            severity: medium
-          - id: compat-browser-03
-            description: "浏览器控制台中不应出现未处理的 JS 错误或废弃 API 警告"
-            severity: low
-
-      # --- 检查项 6.2 ---
-      - id: compat-resolution
-        name: "屏幕分辨率适配"
-        description: "验证不同分辨率下的展示效果"
-        priority: medium
+          - "验证 Chrome 最新两个版本"
+          - "验证 Firefox 最新版本"
+          - "验证 Safari 最新版本"
+      - title: "操作系统兼容性"
+        description: "验证不同操作系统下的表现"
+        priority: "low"
         rules:
-          - id: compat-resolution-01
-            description: "在 1080p 及以上分辨率下页面元素不应过小或间距过大"
-            severity: medium
-          - id: compat-resolution-02
-            description: "在低分辨率（如 1366x768）下关键信息和操作不应被截断或隐藏"
-            severity: medium
-
-      # --- 检查项 6.3 ---
-      - id: compat-i18n
-        name: "国际化与本地化"
-        description: "验证多语言和本地化支持"
-        priority: medium
-        rules:
-          - id: compat-i18n-01
-            description: "切换语言后所有 UI 文案应完整翻译，不出现硬编码文本或翻译缺失"
-            severity: medium
-          - id: compat-i18n-02
-            description: "日期、时间、货币、数字格式应根据用户所在地区正确展示"
-            severity: medium
-          - id: compat-i18n-03
-            description: "RTL（从右到左）语言环境下页面布局应正确镜像"
-            severity: low
+          - "验证 Windows 10/11 下的表现"
+          - "验证 macOS 下的表现"
+exclusions:
+  - pattern: "第三方 SDK 内部逻辑"
+    reason: "第三方 SDK 由供应商保证质量"
+  - pattern: "浏览器原生 API 行为"
+    reason: "浏览器原生能力不在测试范围内"
+settings:
+  min_cases_per_category: 3
+  require_edge_cases: true
+  priority_weights:
+    critical: 1.0
+    high: 0.8
+    medium: 0.5
+    low: 0.3

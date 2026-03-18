@@ -1,0 +1,164 @@
+id: "tpl-mobile-general"
+name: "移动应用通用测试模板"
+version: "1.0.0"
+source: "builtin"
+metadata:
+  author: "AutoChecklist"
+  tags:
+    - "mobile"
+    - "app"
+    - "ios"
+    - "android"
+  project_type: "mobile"
+  description: "适用于移动端应用的通用测试检查模板，覆盖功能正确性、UI适配、离线与弱网、权限管理、安全性和性能六大维度。"
+categories:
+  - name: "功能正确性"
+    description: "验证移动应用核心功能的正确性"
+    items:
+      - title: "核心业务流程"
+        description: "验证移动端主要业务流程"
+        priority: "critical"
+        rules:
+          - "验证主流程在 iOS 和 Android 上均可正常完成"
+          - "验证流程中断（如来电、切后台）后的恢复"
+          - "验证流程各步骤的数据正确性"
+      - title: "手势与交互"
+        description: "验证移动端特有的手势交互"
+        priority: "high"
+        rules:
+          - "验证滑动、拖拽、长按等手势响应"
+          - "验证下拉刷新和上拉加载"
+          - "验证多点触控场景"
+      - title: "推送与通知"
+        description: "验证消息推送和本地通知"
+        priority: "medium"
+        rules:
+          - "验证推送消息的接收和展示"
+          - "验证点击推送跳转到正确页面"
+          - "验证通知权限关闭时的降级处理"
+  - name: "UI适配"
+    description: "验证不同设备和屏幕的UI适配"
+    items:
+      - title: "屏幕尺寸适配"
+        description: "验证不同屏幕尺寸下的UI表现"
+        priority: "high"
+        rules:
+          - "验证小屏手机（≤5.5英寸）的布局"
+          - "验证大屏手机（≥6.5英寸）的布局"
+          - "验证折叠屏展开/折叠切换"
+      - title: "横竖屏切换"
+        description: "验证屏幕旋转时的UI适配"
+        priority: "medium"
+        rules:
+          - "验证竖屏转横屏的布局重排"
+          - "验证旋转后数据和状态不丢失"
+      - title: "系统级适配"
+        description: "验证系统级显示设置的适配"
+        priority: "medium"
+        rules:
+          - "验证深色模式切换"
+          - "验证系统字体大小调整后的显示"
+          - "验证刘海屏/挖孔屏的安全区域"
+  - name: "离线与弱网"
+    description: "验证网络异常情况下的表现"
+    items:
+      - title: "离线模式"
+        description: "验证无网络时的功能降级"
+        priority: "high"
+        rules:
+          - "验证离线时已缓存数据可正常查看"
+          - "验证离线操作的本地暂存和同步"
+          - "验证网络恢复后的数据同步"
+      - title: "弱网表现"
+        description: "验证弱网环境下的用户体验"
+        priority: "high"
+        rules:
+          - "验证弱网下的加载超时提示"
+          - "验证弱网下图片的渐进式加载"
+          - "验证弱网下操作的重试机制"
+      - title: "网络切换"
+        description: "验证网络类型切换时的处理"
+        priority: "medium"
+        rules:
+          - "验证 WiFi 切 4G/5G 的无缝体验"
+          - "验证大文件下载时的网络切换处理"
+  - name: "权限管理"
+    description: "验证系统权限的请求和使用"
+    items:
+      - title: "权限请求"
+        description: "验证权限请求的时机和方式"
+        priority: "high"
+        rules:
+          - "验证首次使用功能时请求对应权限"
+          - "验证权限说明文案的清晰性"
+          - "验证用户拒绝权限后的功能降级"
+      - title: "权限撤销"
+        description: "验证权限被撤销后的处理"
+        priority: "medium"
+        rules:
+          - "验证系统设置中撤销权限后的表现"
+          - "验证重新授权后的功能恢复"
+      - title: "最小权限原则"
+        description: "验证应用不请求多余权限"
+        priority: "medium"
+        rules:
+          - "验证应用只请求功能必需的权限"
+          - "验证权限使用范围与申请一致"
+  - name: "安全性"
+    description: "验证移动应用的安全防护"
+    items:
+      - title: "数据存储安全"
+        description: "验证本地数据的安全存储"
+        priority: "critical"
+        rules:
+          - "验证敏感数据使用加密存储"
+          - "验证 Token 存储在安全容器中"
+          - "验证应用卸载后敏感数据清除"
+      - title: "传输安全"
+        description: "验证网络传输的安全性"
+        priority: "critical"
+        rules:
+          - "验证所有请求使用 HTTPS"
+          - "验证证书校验不被绕过"
+      - title: "生物认证"
+        description: "验证指纹/面部识别等生物认证"
+        priority: "high"
+        rules:
+          - "验证生物认证的正确触发"
+          - "验证认证失败后的降级方案"
+  - name: "性能"
+    description: "验证移动应用的性能表现"
+    items:
+      - title: "启动性能"
+        description: "验证应用启动速度"
+        priority: "high"
+        rules:
+          - "验证冷启动时间 < 3秒"
+          - "验证热启动时间 < 1秒"
+      - title: "内存与电量"
+        description: "验证资源占用"
+        priority: "medium"
+        rules:
+          - "验证前台运行无内存泄漏"
+          - "验证后台运行的电量消耗合理"
+          - "验证大图/视频的内存管理"
+      - title: "流畅度"
+        description: "验证界面操作的流畅性"
+        priority: "high"
+        rules:
+          - "验证列表滚动帧率 ≥ 55fps"
+          - "验证页面切换动画流畅无卡顿"
+          - "验证大数据量渲染不掉帧"
+exclusions:
+  - pattern: "操作系统底层行为"
+    reason: "系统层由 Apple/Google 保证"
+  - pattern: "第三方 SDK 内部实现"
+    reason: "由 SDK 供应商保证质量"
+settings:
+  min_cases_per_category: 3
+  require_edge_cases: true
+  priority_weights:
+    critical: 1.0
+    high: 0.8
+    medium: 0.5
+    low: 0.3
