@@ -1,5 +1,8 @@
 from app.domain.case_models import TestCase
+from app.domain.document_models import DocumentSource, ParsedDocument
 from app.domain.research_models import ResearchOutput
+from app.domain.state import GlobalState
+from app.nodes.context_research import build_context_research_node
 from app.nodes.reflection import deduplicate_cases
 from app.nodes.scenario_planner import scenario_planner_node
 
@@ -63,3 +66,47 @@ def test_deduplicate_preserves_checkpoint_id() -> None:
 
     assert len(deduped) == 1
     assert deduped[0].checkpoint_id == "CP-abc123"
+
+
+class _RecordingResearchLLMClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        return ResearchOutput()
+
+
+def test_context_research_prompt_requires_compatibility_guidance() -> None:
+    llm_client = _RecordingResearchLLMClient()
+    node = build_context_research_node(llm_client)
+    state: GlobalState = {
+        "language": "zh-CN",
+        "parsed_document": ParsedDocument(
+            raw_text="# Title\ncontent",
+            sections=[],
+            references=[],
+            metadata={},
+            source=DocumentSource(
+                source_path="/tmp/prd.md",
+                source_type="markdown",
+                title="Title",
+                checksum="abc",
+            ),
+        ),
+    }
+
+    result = node(state)
+
+    assert result["research_output"].facts == []
+    system_prompt = llm_client.calls[0]["system_prompt"]
+    assert "fact_id" in system_prompt
+    assert "description" in system_prompt
+    assert '"section_title"' in system_prompt
+    assert '"excerpt"' in system_prompt
+    assert '"line_start"' in system_prompt
+    assert '"line_end"' in system_prompt
+    assert '"confidence"' in system_prompt
+    assert '"section"' in system_prompt
+    assert '"quote"' in system_prompt
+    assert "requirement must be a string" in system_prompt
