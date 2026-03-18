@@ -20,6 +20,35 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+def _build_schema_hint(response_model: Type[BaseModel]) -> str:
+    """从 Pydantic model 提取 JSON Schema 摘要，作为 LLM 输出约束的一部分。
+
+    将 response_model 的 JSON Schema 序列化为字符串，嵌入到 system prompt 中，
+    以便 LLM 在生成响应时严格遵守字段定义和类型约束。
+
+    Args:
+        response_model: 用于校验 LLM 输出的 Pydantic BaseModel 子类。
+
+    Returns:
+        包含 JSON Schema 约束说明的字符串；若提取失败则返回空字符串。
+    """
+    try:
+        schema = response_model.model_json_schema()
+        schema_str = json.dumps(schema, ensure_ascii=False, indent=2)
+        # 限制 schema 长度以避免过大的 prompt
+        if len(schema_str) > 3000:
+            schema_str = schema_str[:3000] + "\n... (schema truncated)"
+        return (
+            "\n\n--- JSON Schema Constraint ---\n"
+            "Your response MUST conform to the following JSON Schema. "
+            "Do NOT include any fields not defined in this schema.\n"
+            f"```json\n{schema_str}\n```\n"
+            "--- End of Schema ---"
+        )
+    except Exception:
+        return ""
+
+
 @dataclass
 class LLMClientConfig:
     """LLM 客户端配置。"""
@@ -167,7 +196,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         response_model: Type[T],
-        model: Optional[str] = None,  # noqa: ARG002 — 保留以兼容调用方
+        model: Optional[str] = None,
         *,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -195,8 +224,12 @@ class LLMClient:
         model_name = response_model.__name__
         logger.info("generate_structured: 请求 %s", model_name)
 
+        # 将 Pydantic schema 注入 system prompt，帮助 LLM 生成符合预期的 JSON
+        schema_hint = _build_schema_hint(response_model)
+        enriched_system_prompt = system_prompt + schema_hint
+
         raw_text = self.chat(
-            system_prompt,
+            enriched_system_prompt,
             user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -216,13 +249,6 @@ class LLMClient:
 
         # ------------------------------------------------------------------
         # list → dict 自动包装逻辑
-        #
-        # 当 LLM 直接返回一个 JSON 数组而非对象时，尝试自动包装为 dict，
-        # 以便后续 Pydantic 校验能正常进行。具体策略：遍历 response_model
-        # 的所有字段，找到类型注解为 list[...] 的字段；如果恰好有且仅有
-        # 一个这样的字段，就将解析到的 list 包装为 {field_name: parsed_list}。
-        # 若存在多个或零个 list 字段，则说明 LLM 输出格式不符合预期，
-        # 直接抛出 ValueError 让调用方知晓。
         # ------------------------------------------------------------------
         if isinstance(parsed, list):
             list_fields: list[str] = []
@@ -272,13 +298,7 @@ class LLMClient:
 
 
 class OpenAICompatibleLLMClient(LLMClient):
-    """从 :class:`LLMClientConfig` 构造的便捷 LLM 客户端子类。
-
-    使调用方（如 ``workflow_service.py``）可以直接从配置对象创建客户端::
-
-        config = LLMClientConfig(api_key="sk-...", model="gpt-4o")
-        client = OpenAICompatibleLLMClient(config)
-    """
+    """从 :class:`LLMClientConfig` 构造的便捷 LLM 客户端子类。"""
 
     def __init__(self, config: LLMClientConfig) -> None:
         super().__init__(

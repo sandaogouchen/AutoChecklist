@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import re
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 from app.clients.llm import LLMClient
 from app.domain.checkpoint_models import Checkpoint, generate_checkpoint_id
@@ -25,6 +28,28 @@ _SYSTEM_PROMPT = (
     "字段名、枚举值、接口名、类名、函数名、变量名、ID、URL、配置项。\n"
     "- 中英文混排时采用「中文动作 + 原文对象」形式，例如：验证 `SMS code` 过期后被拒绝。\n"
     "- category、risk、branch_hint 保留英文枚举值不翻译。"
+    "\n\n"
+    "【输出 JSON 结构约束（严格遵守，违反将导致解析失败）】\n"
+    "你必须严格遵守以下 JSON schema。不要输出 schema 中未定义的字段。\n\n"
+    "每个 checkpoint 对象仅允许以下字段：\n"
+    "- title (string): 必填，检查点标题\n"
+    "- objective (string): 可选，检查点目标\n"
+    "- category (string): 可选，默认 \"functional\"\n"
+    "- risk (string): 可选，默认 \"medium\"\n"
+    "- branch_hint (string): 可选\n"
+    "- fact_ids (array of string): 可选，关联的 fact ID 列表\n"
+    "- preconditions (array of string): 可选，前置条件列表。"
+    "【重要】此字段必须是字符串数组，每个前置条件是数组中的一个独立元素。"
+    "绝对不要将所有前置条件合并为一个字符串。\n\n"
+    "禁止出现的字段（输出这些字段会导致解析失败）：\n"
+    "- steps\n"
+    "- expected_result / expected_results\n"
+    "- checkpoint_id（由系统自动生成，不要手动填写）\n\n"
+    "正确示例：\n"
+    '{"checkpoints": [{"title": "验证...", "preconditions": ["条件1", "条件2"], '
+    '"fact_ids": ["FACT-001"]}]}\n\n'
+    "错误示例（preconditions 为字符串）：\n"
+    '{"checkpoints": [{"title": "验证...", "preconditions": "条件1。条件2。"}]}'
 )
 
 
@@ -41,6 +66,31 @@ class CheckpointDraft(BaseModel):
     branch_hint: str = ""
     fact_ids: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_and_strip_extra_fields(cls, values: Any) -> Any:
+        """在 Pydantic 校验之前自动修复 LLM 返回的常见格式问题。
+
+        修复逻辑：
+        1. 移除 LLM 可能错误输出的多余字段（steps、expected_result 等）
+        2. 如果 preconditions 是字符串而非列表，按常见分隔符拆分为列表
+        """
+        if not isinstance(values, dict):
+            return values
+
+        # 移除 LLM 可能错误输出的多余字段
+        _EXTRA_FIELDS = {"steps", "expected_result", "expected_results", "checkpoint_id"}
+        for key in _EXTRA_FIELDS:
+            values.pop(key, None)
+
+        # 如果 preconditions 是字符串，自动拆分为列表
+        preconditions = values.get("preconditions")
+        if isinstance(preconditions, str):
+            parts = re.split(r'[。\n；;]', preconditions)
+            values["preconditions"] = [p.strip() for p in parts if p.strip()]
+
+        return values
 
 
 class CheckpointDraftCollection(BaseModel):
@@ -193,6 +243,11 @@ def _build_checkpoint_prompt(facts: list[ResearchFact], language: str) -> str:
         "- checkpoint 的 title 和 objective 请使用中文书写。\n"
         "- preconditions 请使用中文书写，其中的专有名词保留英文原文。\n"
         "- category / risk / branch_hint 保留英文枚举值。"
+        "\n\n"
+        "【再次强调】preconditions 字段必须是字符串数组 (JSON array of strings)。\n"
+        "如果有多个前置条件，请拆分为数组中的多个元素。\n"
+        "如果只有一个前置条件，也要写成只包含一个元素的数组。\n"
+        "不要输出 steps、expected_result、checkpoint_id 等未定义字段。"
     )
 
     return "\n".join(lines)
