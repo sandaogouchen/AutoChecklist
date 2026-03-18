@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class LLMConfigOverride(BaseModel):
-    """LLM 配置覆盖。"""
+    """​LLM 配置覆盖。"""
     model: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
