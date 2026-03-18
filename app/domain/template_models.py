@@ -61,7 +61,7 @@ class TemplateCategoryItem(BaseModel):
 class TemplateCategory(BaseModel):
     """测试维度。
 
-    模板的一级分类，如“功能正确性”、“安全性”等，
+    模板的一级分类，如"功能正确性"、"安全性"等，
     每个维度下包含一个或多个检查项。
     """
     name: str
