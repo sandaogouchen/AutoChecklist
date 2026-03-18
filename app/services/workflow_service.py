@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from uuid import uuid4
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
 from app.config.settings import Settings
@@ -35,6 +34,7 @@ from app.services.project_context_service import ProjectContextService
 from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
+from app.utils.run_id import generate_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -76,17 +76,22 @@ class WorkflowService:
         if platform_dispatcher is not None:
             self.platform_dispatcher = platform_dispatcher
         else:
-            xmind_agent = self._create_xmind_agent() if enable_xmind else None
+            # 使用工厂函数模式：每次 dispatch 时按 run_dir 动态创建 XMind Agent
+            xmind_agent_factory = self._create_xmind_agent_factory() if enable_xmind else None
             self.platform_dispatcher = PlatformDispatcher(
                 repository=self.repository,
-                xmind_agent=xmind_agent,
+                xmind_agent_factory=xmind_agent_factory,
             )
 
         self.project_context_service = project_context_service
 
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
         """创建并执行一次带迭代评估回路的用例生成任务。"""
-        run_id = uuid4().hex
+        # 使用 UTC+8 日期时间格式生成 run_id，替代原先的 UUID
+        run_id = generate_run_id(
+            output_dir=Path(self.settings.output_dir),
+            timezone=self.settings.timezone,
+        )
 
         # 提取 project_id 用于后续上下文加载
         project_id = getattr(request, 'project_id', None)
@@ -331,16 +336,22 @@ class WorkflowService:
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client
 
-    def _create_xmind_agent(self) -> XMindDeliveryAgent:
-        """创建 XMind 交付代理实例。"""
-        output_dir = Path(self.settings.output_dir)
-        connector = FileXMindConnector(output_dir=output_dir / "xmind")
-        payload_builder = XMindPayloadBuilder()
-        return XMindDeliveryAgent(
-            connector=connector,
-            payload_builder=payload_builder,
-            output_dir=output_dir,
-        )
+    def _create_xmind_agent_factory(self):
+        """创建 XMind 交付代理工厂函数。
+
+        返回一个工厂函数，接受 run_dir 参数，
+        每次调用时创建一个新的 XMindDeliveryAgent 实例，
+        其 connector 输出目录指向指定的运行目录。
+        """
+        def factory(run_dir: Path) -> XMindDeliveryAgent:
+            connector = FileXMindConnector(output_dir=run_dir)
+            payload_builder = XMindPayloadBuilder()
+            return XMindDeliveryAgent(
+                connector=connector,
+                payload_builder=payload_builder,
+                output_dir=run_dir,
+            )
+        return factory
 
     def _persist_run_artifacts(
         self, run: CaseGenerationRun, workflow_result: dict | None = None
