@@ -2,9 +2,9 @@
 
 覆盖以下核心场景：
 - XMindPayloadBuilder 的树结构构建
-- FileXMindConnector 的 .xmind 文件生成
+- FileXMindConnector 的 .xmind 文件生成（文件名简洁化为 checklist.xmind）
 - XMindDeliveryAgent 的完整交付流程及错误处理
-- PlatformDispatcher 的产物持久化和 XMind 集成
+- PlatformDispatcher 的产物持久化和 XMind 集成（XMind 归入运行目录）
 """
 
 from __future__ import annotations
@@ -201,7 +201,10 @@ class TestFileXMindConnector:
     """测试 FileXMindConnector 的 .xmind 文件生成。"""
 
     def test_creates_valid_xmind_file(self, tmp_path: Path) -> None:
-        """验证生成的 .xmind 文件是有效的 ZIP 且包含正确的 JSON 结构。"""
+        """验证生成的 .xmind 文件是有效的 ZIP 且包含正确的 JSON 结构。
+
+        文件名应为固定的 checklist.xmind。
+        """
         connector = FileXMindConnector(output_dir=tmp_path)
 
         root = XMindNode(
@@ -223,9 +226,10 @@ class TestFileXMindConnector:
         assert result.file_path
         assert result.error_message == ""
 
-        # 验证文件存在
+        # 验证文件存在且名称为 checklist.xmind
         xmind_file = Path(result.file_path)
         assert xmind_file.exists()
+        assert xmind_file.name == "checklist.xmind"
         assert xmind_file.suffix == ".xmind"
 
         # 验证 ZIP 结构
@@ -242,6 +246,8 @@ class TestFileXMindConnector:
 
             sheet = content[0]
             assert sheet["class"] == "sheet"
+            # sheet title 应为传入的 title 参数，而非文件名
+            assert sheet["title"] == "测试思维导图"
             assert "rootTopic" in sheet
 
             root_topic = sheet["rootTopic"]
@@ -258,6 +264,19 @@ class TestFileXMindConnector:
             assert "notes" in child
             assert "labels" in child
 
+    def test_xmind_file_in_run_directory(self, tmp_path: Path) -> None:
+        """验证 XMind 文件输出到指定的运行目录下。"""
+        run_dir = tmp_path / "2026-03-18_23-15-30"
+        connector = FileXMindConnector(output_dir=run_dir)
+
+        root = XMindNode(title="测试")
+        result = connector.create_map(root, "测试")
+
+        assert result.success is True
+        xmind_file = Path(result.file_path)
+        assert xmind_file.parent == run_dir
+        assert xmind_file.name == "checklist.xmind"
+
     def test_health_check(self, tmp_path: Path) -> None:
         """验证健康检查功能。"""
         connector = FileXMindConnector(output_dir=tmp_path)
@@ -273,13 +292,17 @@ class TestXMindDeliveryAgent:
     """测试 XMindDeliveryAgent 的交付流程。"""
 
     def test_success_delivery(self, tmp_path: Path) -> None:
-        """验证完整的成功交付流程。"""
-        connector = FileXMindConnector(output_dir=tmp_path / "xmind")
+        """验证完整的成功交付流程。
+
+        XMind 文件应输出到运行目录下。
+        """
+        run_dir = tmp_path / "test-run-001"
+        connector = FileXMindConnector(output_dir=run_dir)
         builder = XMindPayloadBuilder()
         agent = XMindDeliveryAgent(
             connector=connector,
             payload_builder=builder,
-            output_dir=tmp_path,
+            output_dir=run_dir,
         )
 
         result = agent.deliver(
@@ -288,14 +311,20 @@ class TestXMindDeliveryAgent:
             checkpoints=[_make_checkpoint()],
             research_output=_make_research_output(),
             title="测试交付",
+            output_dir=run_dir,
         )
 
         assert result.success is True
         assert result.file_path
         assert result.error_message == ""
 
-        # 验证交付元数据文件
-        meta_path = tmp_path / "test-run-001" / "xmind_delivery.json"
+        # 验证 XMind 文件在运行目录下
+        xmind_file = Path(result.file_path)
+        assert xmind_file.parent == run_dir
+        assert xmind_file.name == "checklist.xmind"
+
+        # 验证交付元数据文件也在运行目录下
+        meta_path = run_dir / "xmind_delivery.json"
         assert meta_path.exists()
 
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -327,12 +356,13 @@ class TestXMindDeliveryAgent:
 
     def test_empty_cases_delivery(self, tmp_path: Path) -> None:
         """验证空用例列表的交付。"""
-        connector = FileXMindConnector(output_dir=tmp_path / "xmind")
+        run_dir = tmp_path / "empty-run"
+        connector = FileXMindConnector(output_dir=run_dir)
         builder = XMindPayloadBuilder()
         agent = XMindDeliveryAgent(
             connector=connector,
             payload_builder=builder,
-            output_dir=tmp_path,
+            output_dir=run_dir,
         )
 
         result = agent.deliver(
@@ -340,6 +370,7 @@ class TestXMindDeliveryAgent:
             test_cases=[],
             checkpoints=[],
             title="空交付",
+            output_dir=run_dir,
         )
 
         # 即使没有用例也应该能成功生成文件
@@ -354,24 +385,28 @@ class TestXMindDeliveryAgent:
 class TestPlatformDispatcher:
     """测试 PlatformDispatcher 的产物持久化和平台交付。"""
 
-    def test_with_xmind(self, tmp_path: Path) -> None:
-        """验证启用 XMind 时 dispatcher 包含 xmind 产物。"""
+    def test_with_xmind_factory(self, tmp_path: Path) -> None:
+        """验证使用 xmind_agent_factory 时 XMind 产物在运行目录下。"""
         from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun
         from app.domain.case_models import QualityReport
         from app.repositories.run_repository import FileRunRepository
         from app.services.platform_dispatcher import PlatformDispatcher
 
         repository = FileRunRepository(tmp_path)
-        connector = FileXMindConnector(output_dir=tmp_path / "xmind")
-        builder = XMindPayloadBuilder()
-        xmind_agent = XMindDeliveryAgent(
-            connector=connector,
-            payload_builder=builder,
-            output_dir=tmp_path,
-        )
+
+        # 创建工厂函数
+        def xmind_factory(run_dir: Path) -> XMindDeliveryAgent:
+            connector = FileXMindConnector(output_dir=run_dir)
+            builder = XMindPayloadBuilder()
+            return XMindDeliveryAgent(
+                connector=connector,
+                payload_builder=builder,
+                output_dir=run_dir,
+            )
+
         dispatcher = PlatformDispatcher(
             repository=repository,
-            xmind_agent=xmind_agent,
+            xmind_agent_factory=xmind_factory,
         )
 
         request = CaseGenerationRequest(file_path="test.md")
@@ -396,6 +431,51 @@ class TestPlatformDispatcher:
         assert "quality_report" in artifacts
 
         # 应包含 xmind 产物
+        assert "xmind_file" in artifacts
+
+        # XMind 文件应在运行目录下
+        xmind_path = Path(artifacts["xmind_file"])
+        run_dir = repository._run_dir("dispatch-test")
+        assert xmind_path.parent == run_dir
+        assert xmind_path.name == "checklist.xmind"
+
+    def test_with_xmind_agent_backward_compat(self, tmp_path: Path) -> None:
+        """验证直接传入 xmind_agent 仍然可用（向后兼容）。"""
+        from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun
+        fromapp.domain.case_models import QualityReport
+        from app.repositories.run_repository import FileRunRepository
+        from app.services.platform_dispatcher import PlatformDispatcher
+
+        repository = FileRunRepository(tmp_path)
+        run_dir = repository._run_dir("compat-test")
+        connector = FileXMindConnector(output_dir=run_dir)
+        builder = XMindPayloadBuilder()
+        xmind_agent = XMindDeliveryAgent(
+            connector=connector,
+            payload_builder=builder,
+            output_dir=run_dir,
+        )
+        dispatcher = PlatformDispatcher(
+            repository=repository,
+            xmind_agent=xmind_agent,
+        )
+
+        request = CaseGenerationRequest(file_path="test.md")
+        run = CaseGenerationRun(
+            run_id="compat-test",
+            status="succeeded",
+            input=request,
+            test_cases=[_make_test_case()],
+            quality_report=QualityReport(),
+        )
+        workflow_result = {"checkpoints": [_make_checkpoint()]}
+
+        artifacts = dispatcher.dispatch(
+            run_id="compat-test",
+            run=run,
+            workflow_result=workflow_result,
+        )
+
         assert "xmind_file" in artifacts
 
     def test_xmind_failure_doesnt_break(self, tmp_path: Path) -> None:
@@ -475,12 +555,13 @@ class TestXMindDeliveryResultInArtifacts:
 
     def test_delivery_result_persisted(self, tmp_path: Path) -> None:
         """验证交付结果元数据被持久化。"""
-        connector = FileXMindConnector(output_dir=tmp_path / "xmind")
+        run_dir = tmp_path / "persist-test"
+        connector = FileXMindConnector(output_dir=run_dir)
         builder = XMindPayloadBuilder()
         agent = XMindDeliveryAgent(
             connector=connector,
             payload_builder=builder,
-            output_dir=tmp_path,
+            output_dir=run_dir,
         )
 
         result = agent.deliver(
@@ -488,10 +569,11 @@ class TestXMindDeliveryResultInArtifacts:
             test_cases=[_make_test_case()],
             checkpoints=[_make_checkpoint()],
             title="持久化测试",
+            output_dir=run_dir,
         )
 
         # 验证元数据文件存在且可解析
-        meta_path = tmp_path / "persist-test" / "xmind_delivery.json"
+        meta_path = run_dir / "xmind_delivery.json"
         assert meta_path.exists()
 
         meta = json.loads(meta_path.read_text(encoding="utf-8"))

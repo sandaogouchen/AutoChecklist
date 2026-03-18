@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     max_iterations: int = 3
     evaluation_pass_threshold: float = 0.7
 
+    # ---- 时区配置 ----
+    # 用于 run_id 生成时的时间格式化，默认 UTC+8（Asia/Shanghai）
+    timezone: str = "Asia/Shanghai"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

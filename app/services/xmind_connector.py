@@ -23,6 +23,9 @@ from app.domain.xmind_models import XMindDeliveryResult, XMindNode
 
 logger = logging.getLogger(__name__)
 
+# XMind 文件固定名称（每次运行只生成一个 XMind 文件）
+XMIND_DEFAULT_FILENAME = "checklist.xmind"
+
 
 @runtime_checkable
 class XMindConnector(Protocol):
@@ -75,17 +78,20 @@ class FileXMindConnector:
     def create_map(self, root_node: XMindNode, title: str) -> XMindDeliveryResult:
         """生成 .xmind 文件。
 
+        文件固定命名为 ``checklist.xmind``，存放在 ``output_dir`` 下。
+        ``title`` 参数仍用于 XMind 文件内部的 sheet 标题和根节点标题，
+        仅文件名做了简洁化处理。
+
         Args:
             root_node: 思维导图的根节点。
-            title: 思维导图标题，同时用于生成文件名。
+            title: 思维导图标题，用于 sheet 内部标题。
 
         Returns:
             交付结果，成功时包含文件路径。
         """
         try:
-            # 生成唯一文件名，避免冲突
-            safe_title = _sanitize_filename(title)
-            file_name = f"{safe_title}_{uuid4().hex[:8]}.xmind"
+            # 使用固定的简洁文件名
+            file_name = XMIND_DEFAULT_FILENAME
             file_path = self.output_dir / file_name
 
             # 构建 XMind JSON 内容
@@ -194,6 +200,7 @@ def _sanitize_filename(name: str) -> str:
     """将字符串转换为安全的文件名。
 
     移除或替换不安全的字符，截断过长的名称。
+    保留供备选场景使用（如未来需要从 title 生成文件名时）。
 
     Args:
         name: 原始名称。

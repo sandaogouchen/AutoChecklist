@@ -59,6 +59,7 @@ class XMindDeliveryAgent:
         checkpoints: list[Checkpoint],
         research_output: ResearchOutput | None = None,
         title: str = "",
+        output_dir: str | Path | None = None,
     ) -> XMindDeliveryResult:
         """执行 XMind 交付流程。
 
@@ -71,11 +72,21 @@ class XMindDeliveryAgent:
             checkpoints: 检查点列表。
             research_output: 研究输出（可选）。
             title: 思维导图标题。
+            output_dir: 可选的运行级别输出目录。传入时 XMind 文件将
+                输出到该目录下，而非 connector 的默认目录。
 
         Returns:
             交付结果对象。
         """
         try:
+            # 如果指定了 run 级别的输出目录，动态更新 connector 的输出目录
+            if output_dir is not None:
+                run_output_dir = Path(output_dir)
+                from app.services.xmind_connector import FileXMindConnector
+                if isinstance(self.connector, FileXMindConnector):
+                    self.connector.output_dir = run_output_dir
+                    self.connector.output_dir.mkdir(parents=True, exist_ok=True)
+
             # 构建节点树
             root_node: XMindNode = self.payload_builder.build(
                 test_cases=test_cases,
@@ -96,8 +107,9 @@ class XMindDeliveryAgent:
                 update={"delivery_time": datetime.now().isoformat()}
             )
 
-            # 保存交付元数据
-            self._save_delivery_artifact(run_id, result)
+            # 保存交付元数据到运行目录
+            effective_output_dir = Path(output_dir) if output_dir else self.output_dir
+            self._save_delivery_artifact(run_id, result, effective_output_dir)
 
             logger.info(
                 "XMind 交付完成: run_id=%s, success=%s, file=%s",
@@ -116,21 +128,35 @@ class XMindDeliveryAgent:
             )
             # 尽力保存错误元数据
             try:
-                self._save_delivery_artifact(run_id, error_result)
+                effective_output_dir = Path(output_dir) if output_dir else self.output_dir
+                self._save_delivery_artifact(run_id, error_result, effective_output_dir)
             except Exception:
                 logger.warning("保存 XMind 交付错误元数据失败: run_id=%s", run_id)
             return error_result
 
     def _save_delivery_artifact(
-        self, run_id: str, result: XMindDeliveryResult
+        self,
+        run_id: str,
+        result: XMindDeliveryResult,
+        base_dir: Path | None = None,
     ) -> None:
         """保存交付结果元数据到文件系统。
 
         Args:
             run_id: 运行 ID。
             result: 交付结果对象。
+            base_dir: 元数据输出的基础目录。如果为 None，使用 self.output_dir。
         """
-        run_dir = self.output_dir / run_id
+        effective_dir = base_dir if base_dir is not None else self.output_dir
+
+        # 当 base_dir 即为 run 级别目录时，直接在其下写入；
+        # 否则按旧逻辑在 base_dir / run_id 下写入。
+        # 判断依据：如果 effective_dir 的最后一级路径就是 run_id，则直接使用
+        if effective_dir.name == run_id:
+            run_dir = effective_dir
+        else:
+            run_dir = effective_dir / run_id
+
         run_dir.mkdir(parents=True, exist_ok=True)
 
         artifact_path = run_dir / "xmind_delivery.json"
