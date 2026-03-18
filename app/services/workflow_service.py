@@ -1,20 +1,37 @@
-"""核心工作流编排服务。"""
+"""工作流编排服务。
+
+作为 API 层与工作流引擎之间的协调者，负责：
+- 创建运行任务并执行 LangGraph 工作流
+- 管理迭代评估回路的生命周期
+- 通过 PlatformDispatcher 持久化运行产物（JSON + Markdown + XMind）
+- 持久化运行状态、评估报告和迭代日志
+- 查询历史运行结果（包括失败运行）
+"""
+
 from __future__ import annotations
 
 import logging
-import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-from app.clients.llm import LLMClient
-from app.domain.api_models import CaseGenerationRequest, GenerationOptions
-from app.domain.run_state import RunStage, RunState, RunStatus
-from app.graphs.main_workflow import build_main_graph
+from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
+from app.config.settings import Settings
+from app.domain.api_models import (
+    CaseGenerationRequest,
+    CaseGenerationRun,
+    ErrorInfo,
+    IterationSummary,
+)
+from app.domain.case_models import QualityReport, TestCase
+from app.domain.run_state import RunStage, RunStatus
+from app.graphs.main_workflow import build_workflow
+from app.nodes.evaluation import evaluate
+from app.nodes.project_context_loader import build_project_context_loader
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
+from app.services.platform_dispatcher import PlatformDispatcher
 from app.services.project_context_service import ProjectContextService
-from app.services.template_service import TemplateService
 from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
@@ -24,25 +41,29 @@ logger = logging.getLogger(__name__)
 
 
 class WorkflowService:
+    """工作流编排服务。
+
+    集成迭代评估回路：
+    1. 初始化运行状态
+    2. 执行工作流生成
+    3. 执行结构化评估
+    4. 由迭代控制器决策：通过 / 回流 / 终止
+    5. 通过 PlatformDispatcher 持久化所有状态和工件（包含可选的 XMind 交付）
+    """
+
     def __init__(
         self,
-        llm_client: LLMClient,
-        run_repository: FileRunRepository,
-        run_state_repository: RunStateRepository,
-        project_service: ProjectContextService,
-        # ---- 模板驱动生成支持（可选，向后兼容） ----
-        template_service: Optional[TemplateService] = None,
+        settings: Settings,
+        repository: FileRunRepository | None = None,
+        llm_client: LLMClient | None = None,
+        state_repository: RunStateRepository | None = None,
+        iteration_controller: IterationController | None = None,
+        platform_dispatcher: PlatformDispatcher | None = None,
+        enable_xmind: bool = False,
+        project_context_service: ProjectContextService | None = None,
+        # ---- 模板驱动生成支持 ----
+        template_service: Optional["TemplateService"] = None,
     ) -> None:
-        self.llm_client = llm_client
-        self.run_repository = run_repository
-        self.run_state_repository = run_state_repository
-        self.project_service = project_service
-        self.template_service = template_service
-        self.iteration_controller = IterationController()
-
-    async def execute(self, request: CaseGenerationRequest) -> dict[str, Any]:
-        """执行用例生成工作流。"""
-        run_id = str(uuid.uuid4())
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
         self.state_repository = state_repository or RunStateRepository(settings.output_dir)
@@ -66,6 +87,7 @@ class WorkflowService:
             )
 
         self.project_context_service = project_context_service
+        self.template_service = template_service
 
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
         """创建并执行一次带迭代评估回路的用例生成任务。"""
@@ -85,54 +107,132 @@ class WorkflowService:
 
         # 初始化运行状态
         run_state = self.iteration_controller.initialize_state(run_id)
+        self.state_repository.save_run_state(run_state)
 
+        result: dict = {}
         try:
-            # 读取文件内容
-            file_path = Path(request.file_path)
-            if not file_path.exists():
-                raise FileNotFoundError(f"文件不存在: {request.file_path}")
-            raw_input = file_path.read_text(encoding="utf-8")
+            result = self._execute_with_iteration(run_id, request, run_state)
 
-            # 获取项目上下文（可选）
-            project_context = None
-            if request.project_id:
-                project_context = self.project_service.get_context(request.project_id)
+            # 重新加载最新状态
+            run_state = self.state_repository.load_run_state(run_id)
 
-            # ---- 模板加载（可选） ----
-            # 如果请求指定了 template_id 且模板服务可用，则加载模板。
-            # 加载失败时降级为无模板模式，不阻断主流程。
-            template_data: Optional[dict] = None
-            template_id = getattr(request, "template_id", None)
-            if template_id and self.template_service:
-                try:
-                    template_obj = self.template_service.get_template(template_id)
-                    if template_obj is not None:
-                        template_data = template_obj.model_dump()
-                        logger.info("已加载模板: id=%s, name=%s", template_id, template_obj.name)
-                    else:
-                        logger.warning("模板未找到 (id=%s)，降级为无模板模式", template_id)
-                except Exception:
-                    logger.warning("模板加载失败 (id=%s)，降级为无模板模式", template_id, exc_info=True)
+            checkpoints = result.get("checkpoints", [])
+            checkpoint_count = len(checkpoints)
 
-            # 构建初始状态
-            options = request.options or GenerationOptions()
-            initial_state = {
-                "raw_input": raw_input,
+            run = CaseGenerationRun(
+                run_id=run_id,
+                status=run_state.status.value,
+                input=request,
+                parsed_document=result.get("parsed_document"),
+                research_summary=result.get("research_output"),
+                test_cases=result.get("test_cases", []),
+                quality_report=result.get("quality_report", QualityReport()),
+                checkpoint_count=checkpoint_count,
+                iteration_summary=self._build_iteration_summary(run_state),
+            )
+        except Exception as exc:
+            # 失败运行持久化：记录错误并保存状态
+            run_state = self.iteration_controller.mark_error(run_state, exc)
+            self.state_repository.save_run_state(run_state)
+            self.state_repository.save_iteration_log(run_state)
+
+            run = CaseGenerationRun(
+                run_id=run_id,
+                status="failed",
+                input=request,
+                error=ErrorInfo(code=exc.__class__.__name__, message=str(exc)),
+                iteration_summary=self._build_iteration_summary(run_state),
+            )
+
+        run = self._persist_run_artifacts(run, result)
+        self._run_registry[run_id] = run
+        return run
+
+    def get_run(self, run_id: str) -> CaseGenerationRun:
+        """根据 run_id 查询运行结果。
+
+        优先从内存缓存读取，其次从文件系统加载。
+        支持读取失败运行的状态。
+        """
+        cached_run = self._run_registry.get(run_id)
+        if cached_run is not None:
+            return cached_run
+
+        run_payload = self.repository.load(run_id, "run_result.json")
+        run = CaseGenerationRun.model_validate(run_payload)
+
+        # 尝试补充迭代摘要信息
+        if self.state_repository.run_state_exists(run_id):
+            try:
+                run_state = self.state_repository.load_run_state(run_id)
+                run = run.model_copy(
+                    update={"iteration_summary": self._build_iteration_summary(run_state)}
+                )
+            except Exception:
+                pass  # 状态文件损坏时不阻断主流程
+
+        self._run_registry[run_id] = run
+        return run
+
+    def _execute_with_iteration(
+        self,
+        run_id: str,
+        request: CaseGenerationRequest,
+        run_state,
+    ) -> dict:
+        """执行带迭代评估回路的工作流。
+
+        流程：
+        1. 执行一轮主流程生成
+        2. 执行结构化评估
+        3. 由迭代控制器判断：通过 -> 结束 / 不通过但可恢复 -> 回流 / 停止条件 -> 失败
+        """
+        workflow = self._get_workflow()
+        result: dict = {}
+
+        # ---- 模板驱动生成支持：加载模板数据 ----
+        template_data: dict | None = None
+        template_id = getattr(request, "template_id", None)
+        if template_id and self.template_service:
+            try:
+                template_obj = self.template_service.get(template_id)
+                if template_obj is not None:
+                    template_data = template_obj.model_dump()
+                    logger.info(
+                        "已加载模板: id=%s, name=%s",
+                        template_id,
+                        template_obj.metadata.name,
+                    )
+                else:
+                    logger.warning(
+                        "模板未找到 (id=%s)，降级为无模板模式", template_id
+                    )
+            except Exception:
+                logger.warning(
+                    "模板加载失败 (id=%s)，降级为无模板模式",
+                    template_id,
+                    exc_info=True,
+                )
+
+        while True:
+            # 更新状态为 running
+            run_state.status = RunStatus.RUNNING
+            self.state_repository.save_run_state(run_state)
+
+            # 执行工作流
+            workflow_input = {
+                "run_id": run_id,
                 "file_path": request.file_path,
                 "language": request.language,
-                "project_context": project_context,
-                "project_id": request.project_id,
-                "llm_config": request.llm_config.model_dump() if request.llm_config else None,
-                "iteration_index": 0,
-                "max_iterations": options.max_iterations,
+                "request": request,
+                "model_config": request.llm_config,
+                "iteration_index": run_state.iteration_index,
+                "project_id": getattr(request, 'project_id', None) or "",
                 # ---- 模板驱动生成支持 ----
                 "template": template_data,
                 "template_id": template_id,
             }
 
-            # 构建并执行工作流
-            graph = build_main_graph(self.llm_client)
-            result = await graph.ainvoke(initial_state)
             # 如果是回流且之前有结果，保留部分中间结果
             if run_state.iteration_index > 0 and result:
                 workflow_input = self._prepare_retry_input(
@@ -152,6 +252,8 @@ class WorkflowService:
                 checkpoints=result.get("checkpoints", []),
                 research_output=result.get("research_output"),
                 previous_score=run_state.last_evaluation_score,
+                # ---- 模板驱动生成支持：传递模板数据用于合规性评估 ----
+                template_data=template_data,
             )
 
             # 持久化评估报告
@@ -339,15 +441,30 @@ def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
     if not test_cases:
         return "# 生成的测试用例\n\n暂无测试用例。\n"
 
-            # ... 后续的迭代评估逻辑 ...
+    lines = ["# 生成的测试用例", ""]
+    for test_case in test_cases:
+        lines.append(f"## {test_case.id} {test_case.title}")
+        lines.append("")
 
-            # 持久化结果
-            # ...
+        if test_case.checkpoint_id:
+            lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
+            lines.append("")
 
-            return {"run_id": run_id, "status": "completed", "result": result}
+        lines.append("### 前置条件")
+        lines.extend(
+            [f"- {item}" for item in test_case.preconditions] or ["- 无"]
+        )
+        lines.append("")
+        lines.append("### 步骤")
+        lines.extend(
+            [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
+            or ["1. 无"]
+        )
+        lines.append("")
+        lines.append("### 预期结果")
+        lines.extend(
+            [f"- {item}" for item in test_case.expected_results] or ["- 无"]
+        )
+        lines.append("")
 
-        except Exception as e:
-            logger.exception("工作流执行失败: %s", e)
-            run_state = self.iteration_controller.mark_error(run_state, e)
-            self.run_state_repository.save_run_state(run_state)
-            raise
+    return "\n".join(lines).strip() + "\n"
