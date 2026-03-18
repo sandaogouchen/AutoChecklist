@@ -15,11 +15,11 @@ from app.domain.template_models import (
 )
 
 
-# ── TemplateMetadata ────────────────────────────────
+# ── TemplateMetadata ────────────────────────────────────────
 
 
 class TestTemplateMetadata:
-    """模板元信息模型测试。"""
+    """TemplateMetadata 模型测试。"""
 
     def test_valid_metadata(self):
         meta = TemplateMetadata(name="Test Template", version="1.0.0")
@@ -50,7 +50,7 @@ class TestTemplateMetadata:
         assert meta.updated_at is not None
 
 
-# ── TemplateSettings ────────────────────────────────
+# ── TemplateSettings ────────────────────────────────────────
 
 
 class TestTemplateSettings:
@@ -76,7 +76,7 @@ class TestTemplateSettings:
             TemplateSettings(min_cases_per_category=21)
 
 
-# ── TemplateCategoryItem ──────────────────────────────
+# ── TemplateCategoryItem ────────────────────────────────────
 
 
 class TestTemplateCategoryItem:
@@ -99,7 +99,7 @@ class TestTemplateCategoryItem:
         assert item.priority is None
 
 
-# ── TemplateCategory ────────────────────────────────
+# ── TemplateCategory ────────────────────────────────────────
 
 
 class TestTemplateCategory:
@@ -116,7 +116,7 @@ class TestTemplateCategory:
             TemplateCategory(name="Test", items=[])
 
 
-# ── ChecklistTemplate ──────────────────────────────
+# ── ChecklistTemplate ──────────────────────────────────────
 
 
 class TestChecklistTemplate:
