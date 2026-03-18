@@ -3,13 +3,15 @@
 作为 API 层与工作流引擎之间的协调者，负责：
 - 创建运行任务并执行 LangGraph 工作流
 - 管理迭代评估回路的生命周期
-- 持久化运行产物（JSON + Markdown），包括 checkpoint 工件
+- 通过 PlatformDispatcher 持久化运行产物（JSON + Markdown + XMind）
 - 持久化运行状态、评估报告和迭代日志
 - 查询历史运行结果（包括失败运行）
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from uuid import uuid4
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
@@ -27,6 +29,12 @@ from app.nodes.evaluation import evaluate
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
+from app.services.platform_dispatcher import PlatformDispatcher
+from app.services.xmind_connector import FileXMindConnector
+from app.services.xmind_delivery_agent import XMindDeliveryAgent
+from app.services.xmind_payload_builder import XMindPayloadBuilder
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowService:
@@ -37,7 +45,7 @@ class WorkflowService:
     2. 执行工作流生成
     3. 执行结构化评估
     4. 由迭代控制器决策：通过 / 回流 / 终止
-    5. 持久化所有状态和工件
+    5. 通过 PlatformDispatcher 持久化所有状态和工件（包含可选的 XMind 交付）
     """
 
     def __init__(
@@ -47,6 +55,8 @@ class WorkflowService:
         llm_client: LLMClient | None = None,
         state_repository: RunStateRepository | None = None,
         iteration_controller: IterationController | None = None,
+        platform_dispatcher: PlatformDispatcher | None = None,
+        enable_xmind: bool = False,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
@@ -58,6 +68,16 @@ class WorkflowService:
         self._llm_client = llm_client
         self._workflow = None
         self._run_registry: dict[str, CaseGenerationRun] = {}
+
+        # 初始化平台分发器
+        if platform_dispatcher is not None:
+            self.platform_dispatcher = platform_dispatcher
+        else:
+            xmind_agent = self._create_xmind_agent() if enable_xmind else None
+            self.platform_dispatcher = PlatformDispatcher(
+                repository=self.repository,
+                xmind_agent=xmind_agent,
+            )
 
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
         """创建并执行一次带迭代评估回路的用例生成任务。"""
@@ -148,7 +168,7 @@ class WorkflowService:
         流程：
         1. 执行一轮主流程生成
         2. 执行结构化评估
-        3. 由迭代控制器判断：通过 → 结束 / 不通过但可恢复 → 回流 / 停止条件 → 失败
+        3. 由迭代控制器判断：通过 -> 结束 / 不通过但可恢复 -> 回流 / 停止条件 -> 失败
         """
         workflow = self._get_workflow()
         result: dict = {}
@@ -287,74 +307,35 @@ class WorkflowService:
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client
 
+    def _create_xmind_agent(self) -> XMindDeliveryAgent:
+        """创建 XMind 交付代理实例。"""
+        output_dir = Path(self.settings.output_dir)
+        connector = FileXMindConnector(output_dir=output_dir / "xmind")
+        payload_builder = XMindPayloadBuilder()
+        return XMindDeliveryAgent(
+            connector=connector,
+            payload_builder=payload_builder,
+            output_dir=output_dir,
+        )
+
     def _persist_run_artifacts(
         self, run: CaseGenerationRun, workflow_result: dict | None = None
     ) -> CaseGenerationRun:
-        """将运行结果的各项产物持久化到文件系统。"""
-        artifacts: dict[str, str] = {}
+        """将运行结果的各项产物持久化到文件系统。
+
+        通过 PlatformDispatcher 统一管理本地产物持久化和可选的 XMind 交付。
+        """
         run_id = run.run_id
         wf = workflow_result or {}
 
-        if run.parsed_document is not None:
-            artifacts["parsed_document"] = str(
-                self.repository.save(
-                    run_id,
-                    run.parsed_document.model_dump(mode="json"),
-                    "parsed_document.json",
-                )
-            )
-        if run.research_summary is not None:
-            artifacts["research_output"] = str(
-                self.repository.save(
-                    run_id,
-                    run.research_summary.model_dump(mode="json"),
-                    "research_output.json",
-                )
-            )
-
-        checkpoints = wf.get("checkpoints", [])
-        if checkpoints:
-            artifacts["checkpoints"] = str(
-                self.repository.save(
-                    run_id,
-                    [cp.model_dump(mode="json") for cp in checkpoints],
-                    "checkpoints.json",
-                )
-            )
-
-        checkpoint_coverage = wf.get("checkpoint_coverage", [])
-        if checkpoint_coverage:
-            artifacts["checkpoint_coverage"] = str(
-                self.repository.save(
-                    run_id,
-                    [cc.model_dump(mode="json") for cc in checkpoint_coverage],
-                    "checkpoint_coverage.json",
-                )
-            )
-
-        artifacts["test_cases"] = str(
-            self.repository.save(
-                run_id,
-                [case.model_dump(mode="json") for case in run.test_cases],
-                "test_cases.json",
-            )
-        )
-        artifacts["test_cases_markdown"] = str(
-            self.repository.save_text(
-                run_id,
-                "test_cases.md",
-                _render_test_cases_markdown(run.test_cases),
-            )
-        )
-        artifacts["quality_report"] = str(
-            self.repository.save(
-                run_id,
-                run.quality_report.model_dump(mode="json"),
-                "quality_report.json",
-            )
+        # 使用 PlatformDispatcher 进行产物持久化和平台交付
+        artifacts = self.platform_dispatcher.dispatch(
+            run_id=run_id,
+            run=run,
+            workflow_result=wf,
         )
 
-        # 标记运行状态和迭代日志工件
+        # 补充运行状态和评估报告路径
         run_state_path = self.state_repository._run_dir(run_id) / "run_state.json"
         if run_state_path.exists():
             artifacts["run_state"] = str(run_state_path)
@@ -385,11 +366,14 @@ class WorkflowService:
 
 
 def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    """将测试用例列表渲染为人类可读的 Markdown 文档。"""
-    if not test_cases:
-        return "# Generated Test Cases\n\nNo test cases were generated.\n"
+    """将测试用例列表渲染为人类可读的 Markdown 文档。
 
-    lines = ["# Generated Test Cases", ""]
+    使用中文标题以保持与中文优先输出策略的一致性。
+    """
+    if not test_cases:
+        return "# 生成的测试用例\n\n暂无测试用例。\n"
+
+    lines = ["# 生成的测试用例", ""]
     for test_case in test_cases:
         lines.append(f"## {test_case.id} {test_case.title}")
         lines.append("")
@@ -398,20 +382,20 @@ def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
             lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
             lines.append("")
 
-        lines.append("### Preconditions")
+        lines.append("### 前置条件")
         lines.extend(
-            [f"- {item}" for item in test_case.preconditions] or ["- None"]
+            [f"- {item}" for item in test_case.preconditions] or ["- 无"]
         )
         lines.append("")
-        lines.append("### Steps")
+        lines.append("### 步骤")
         lines.extend(
             [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
-            or ["1. None"]
+            or ["1. 无"]
         )
         lines.append("")
-        lines.append("### Expected Results")
+        lines.append("### 预期结果")
         lines.extend(
-            [f"- {item}" for item in test_case.expected_results] or ["- None"]
+            [f"- {item}" for item in test_case.expected_results] or ["- 无"]
         )
         lines.append("")
 

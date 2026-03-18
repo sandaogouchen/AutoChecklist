@@ -37,6 +37,7 @@ class RunStage(str, Enum):
     DRAFT_GENERATION = "draft_generation"
     EVALUATION = "evaluation"
     OUTPUT_DELIVERY = "output_delivery"
+    XMIND_DELIVERY = "xmind_delivery"
 
 
 class EvaluationDimension(BaseModel):

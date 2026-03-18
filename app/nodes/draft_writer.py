@@ -18,7 +18,15 @@ _SYSTEM_PROMPT = (
     "You write concise manual QA test cases as structured JSON. "
     "Each test case MUST include an id, title, steps, expected_results, evidence_refs, "
     "and a checkpoint_id field that references the checkpoint it was generated from. "
-    "Always include ids, steps, expected_results, and evidence_refs."
+    "Always include ids, steps, expected_results, and evidence_refs.\n\n"
+    "【语言要求】\n"
+    "- title 字段使用中文书写，简要概括测试目标。\n"
+    "- steps 字段使用中文书写操作步骤，其中 UI 元素、按钮文案、字段名等"
+    "专有名词保留英文原文并用反引号包裹，例如：点击 `Submit` 按钮。\n"
+    "- expected_results 字段使用中文书写预期结果。\n"
+    "- preconditions 字段使用中文书写前置条件。\n"
+    "- id、priority、category、checkpoint_id 等标识字段保留英文。\n"
+    "- evidence_refs 中的 section_title 和 excerpt 保留原文不翻译。"
 )
 
 
