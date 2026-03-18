@@ -28,7 +28,9 @@ def build_workflow(llm_client: LLMClient, project_context_loader=None):
 
     Args:
         llm_client: LLM 客户端实例，传递给需要调用 LLM 的节点。
-        project_context_loader: 可选的项目上下文加载节点，插入在 input_parser 之后。
+        project_context_loader: 可选的项目上下文加载节点（闭包 callable），
+            插入在 input_parser 之后。由
+            ``build_project_context_loader(service)`` 工厂函数创建。
 
     Returns:
         编译后的 LangGraph 可执行工作流。
@@ -74,6 +76,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "language": state.get("language", "zh-CN"),
             "parsed_document": state["parsed_document"],
             "research_output": state["research_output"],
+            # 传递项目上下文摘要到子图，供 draft_writer 等节点使用
+            "project_context_summary": state.get("project_context_summary", ""),
         }
         subgraph_result = case_generation_subgraph.invoke(subgraph_input)
 

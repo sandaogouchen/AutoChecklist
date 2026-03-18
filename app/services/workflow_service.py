@@ -26,15 +26,15 @@ from app.domain.case_models import QualityReport, TestCase
 from app.domain.run_state import RunStage, RunStatus
 from app.graphs.main_workflow import build_workflow
 from app.nodes.evaluation import evaluate
+from app.nodes.project_context_loader import build_project_context_loader
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
 from app.services.platform_dispatcher import PlatformDispatcher
+from app.services.project_context_service import ProjectContextService
 from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
-from app.services.project_context_service import ProjectContextService
-from app.nodes.project_context_loader import load_project_context
 
 logger = logging.getLogger(__name__)
 
@@ -299,10 +299,19 @@ class WorkflowService:
         )
 
     def _get_workflow(self):
+        """构建并缓存 LangGraph 工作流实例。
+
+        当 ``project_context_service`` 可用时，使用
+        ``build_project_context_loader`` 工厂函数创建闭包节点，
+        而非直接调用节点函数。
+        """
         if self._workflow is None:
             project_loader = None
             if self.project_context_service is not None:
-                project_loader = load_project_context(self.project_context_service)
+                # 使用工厂函数创建闭包，而非直接执行节点函数
+                project_loader = build_project_context_loader(
+                    self.project_context_service
+                )
             self._workflow = build_workflow(
                 self._get_llm_client(),
                 project_context_loader=project_loader,
