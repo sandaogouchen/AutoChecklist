@@ -38,6 +38,7 @@ class TestCase(BaseModel):
     category: str = "functional"
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     checkpoint_id: str = ""
+    project_id: str = ""
 
 
 class QualityReport(BaseModel):
@@ -52,3 +53,4 @@ class QualityReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     repaired_fields: list[str] = Field(default_factory=list)
     checkpoint_warnings: list[str] = Field(default_factory=list)
+    missing_required_modules: list[str] = Field(default_factory=list)

@@ -11,6 +11,9 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.config.settings import Settings, get_settings
 from app.services.workflow_service import WorkflowService
+from app.api.project_routes import router as project_router
+from app.repositories.project_repository import ProjectRepository
+from app.services.project_context_service import ProjectContextService
 
 
 def create_app(
@@ -31,9 +34,19 @@ def create_app(
 
     # 将配置和服务绑定到 app.state，供路由通过 Depends 获取
     app.state.settings = app_settings
-    app.state.workflow_service = workflow_service or WorkflowService(app_settings)
+
+    # 项目上下文服务
+    project_repo = ProjectRepository()
+    project_context_service = ProjectContextService(project_repo)
+    app.state.project_context_service = project_context_service
+
+    app.state.workflow_service = workflow_service or WorkflowService(
+        app_settings,
+        project_context_service=project_context_service,
+    )
 
     app.include_router(router)
+    app.include_router(project_router)
     return app
 
 

@@ -116,3 +116,4 @@ class RunState(BaseModel):
     iteration_history: list[IterationRecord] = Field(default_factory=list)
     retry_decisions: list[RetryDecision] = Field(default_factory=list)
     error: dict[str, Any] | None = None
+    project_id: str | None = None

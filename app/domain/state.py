@@ -51,6 +51,10 @@ class GlobalState(TypedDict, total=False):
     evaluation_report: EvaluationReport
     iteration_index: int
 
+    # ---- 项目上下文新增字段 ----
+    project_id: str
+    project_context_summary: str
+
 
 class CaseGenState(TypedDict, total=False):
     """用例生成子图状态。"""
@@ -64,3 +68,4 @@ class CaseGenState(TypedDict, total=False):
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
+    project_context_summary: str

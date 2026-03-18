@@ -69,6 +69,11 @@ def build_draft_writer_node(llm_client: LLMClient):
                 for index, scenario in enumerate(scenarios, start=1)
             ]
 
+        # ---- 项目上下文：追加 checklist 模板约束 ----
+        project_context_summary = state.get("project_context_summary", "")
+        if project_context_summary:
+            prompt_lines.insert(0, f"[Project Checklist Constraints]\n{project_context_summary}\n")
+
         if not prompt_lines:
             return {"draft_cases": []}
 

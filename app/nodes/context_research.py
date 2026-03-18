@@ -51,9 +51,16 @@ def build_context_research_node(llm_client: LLMClient):
         parsed_document = state["parsed_document"]
         model_config = state.get("model_config")
 
+        # ---- 项目上下文注入 ----
+        project_context_summary = state.get("project_context_summary", "")
+        project_prefix = ""
+        if project_context_summary:
+            project_prefix = f"[Project Context]\n{project_context_summary}\n\n"
+
         response = llm_client.generate_structured(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=(
+                f"{project_prefix}"
                 f"Language: {state.get('language', 'zh-CN')}\n"
                 f"Document title: {parsed_document.source.title if parsed_document.source else ''}\n"
                 f"Document body:\n{parsed_document.raw_text}"

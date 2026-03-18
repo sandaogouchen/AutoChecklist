@@ -26,10 +26,12 @@ from app.domain.case_models import QualityReport, TestCase
 from app.domain.run_state import RunStage, RunStatus
 from app.graphs.main_workflow import build_workflow
 from app.nodes.evaluation import evaluate
+from app.nodes.project_context_loader import build_project_context_loader
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
 from app.services.platform_dispatcher import PlatformDispatcher
+from app.services.project_context_service import ProjectContextService
 from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
@@ -57,6 +59,7 @@ class WorkflowService:
         iteration_controller: IterationController | None = None,
         platform_dispatcher: PlatformDispatcher | None = None,
         enable_xmind: bool = False,
+        project_context_service: ProjectContextService | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
@@ -79,9 +82,14 @@ class WorkflowService:
                 xmind_agent=xmind_agent,
             )
 
+        self.project_context_service = project_context_service
+
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
         """创建并执行一次带迭代评估回路的用例生成任务。"""
         run_id = uuid4().hex
+
+        # 提取 project_id 用于后续上下文加载
+        project_id = getattr(request, 'project_id', None)
 
         # 持久化请求
         self.repository.save(
@@ -186,6 +194,7 @@ class WorkflowService:
                 "request": request,
                 "model_config": request.llm_config,
                 "iteration_index": run_state.iteration_index,
+                "project_id": getattr(request, 'project_id', None) or "",
             }
 
             # 如果是回流且之前有结果，保留部分中间结果
@@ -290,8 +299,23 @@ class WorkflowService:
         )
 
     def _get_workflow(self):
+        """构建并缓存 LangGraph 工作流实例。
+
+        当 ``project_context_service`` 可用时，使用
+        ``build_project_context_loader`` 工厂函数创建闭包节点，
+        而非直接调用节点函数。
+        """
         if self._workflow is None:
-            self._workflow = build_workflow(self._get_llm_client())
+            project_loader = None
+            if self.project_context_service is not None:
+                # 使用工厂函数创建闭包，而非直接执行节点函数
+                project_loader = build_project_context_loader(
+                    self.project_context_service
+                )
+            self._workflow = build_workflow(
+                self._get_llm_client(),
+                project_context_loader=project_loader,
+            )
         return self._workflow
 
     def _get_llm_client(self) -> LLMClient:

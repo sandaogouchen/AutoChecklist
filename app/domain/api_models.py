@@ -68,6 +68,7 @@ class CaseGenerationRequest(BaseModel):
         serialization_alias="model_config",
     )
     options: RunOptions = Field(default_factory=RunOptions)
+    project_id: str | None = None
 
 
 class CaseGenerationRun(BaseModel):
@@ -88,3 +89,4 @@ class CaseGenerationRun(BaseModel):
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: ErrorInfo | None = None
     iteration_summary: IterationSummary = Field(default_factory=IterationSummary)
+    project_id: str | None = None

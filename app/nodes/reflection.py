@@ -59,6 +59,13 @@ def reflection_node(state: GlobalState) -> GlobalState:
             research_output=research_output,
         )
 
+    # ---- 项目上下文感知的检查 ----
+    project_context_summary = state.get("project_context_summary", "")
+    if project_context_summary:
+        warnings.append(
+            f"Project context was applied. Review test cases for project-specific coverage."
+        )
+
     # 更新 checkpoint 覆盖状态
     updated_coverage = _compute_checkpoint_coverage(checkpoints, deduped_cases)
 
