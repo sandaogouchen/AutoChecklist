@@ -2,23 +2,31 @@
 
 将测试用例、检查点、研究输出等数据映射为 XMind 思维导图的节点树结构。
 
-层次结构：
+层次结构（扁平模式，向后兼容）：
 - 根节点：运行标题或 PRD 标题
   - 一级节点：按 checkpoint 或 fact 分组
     - 二级节点：测试用例标题（附带优先级标签）
       - 三级节点：步骤 + 预期结果（叶子节点）
+
+F3 新增树形模式：
+- 当 ``optimized_tree`` 不为空时，使用 ChecklistNode 树形结构直接
+  构建 XMindNode 层级，保留前置操作合并后的分组关系。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from app.domain.xmind_models import XMindNode
 
 if TYPE_CHECKING:
     from app.domain.case_models import TestCase
+    from app.domain.checklist_models import ChecklistNode
     from app.domain.checkpoint_models import Checkpoint
     from app.domain.research_models import ResearchOutput
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 分类 → XMind 标记映射
@@ -54,8 +62,13 @@ class XMindPayloadBuilder:
         research_output: ResearchOutput | None = None,
         run_id: str = "",
         title: str = "",
+        optimized_tree: list[ChecklistNode] | None = None,
     ) -> XMindNode:
         """构建 XMind 节点树。
+
+        当 ``optimized_tree`` 非空时，优先使用树形结构构建根节点，
+        以保留前置操作合并后的层级关系（F3）。否则退回到按
+        checkpoint 分组的扁平模式（向后兼容）。
 
         Args:
             test_cases: 测试用例列表。
@@ -63,12 +76,18 @@ class XMindPayloadBuilder:
             research_output: 研究输出（可选，用于补充根节点信息）。
             run_id: 运行 ID。
             title: 根节点标题，为空时使用默认标题。
+            optimized_tree: 合并后的 ChecklistNode 树（可选，F3 新增）。
 
         Returns:
             XMind 根节点。
         """
         root_title = title or f"测试用例 - {run_id}" if run_id else "测试用例"
 
+        # --- F3: 优先使用 optimized_tree ---
+        if optimized_tree:
+            return self._build_tree_root(root_title, optimized_tree)
+
+        # --- 原始扁平模式（向后兼容） ---
         # 构建 checkpoint_id → checkpoint 查找表
         cp_lookup: dict[str, Checkpoint] = {}
         for cp in checkpoints:
@@ -129,6 +148,107 @@ class XMindPayloadBuilder:
             title=root_title,
             children=level1_children,
         )
+
+    # ------------------------------------------------------------------
+    # F3 新增: 树形模式构建方法
+    # ------------------------------------------------------------------
+
+    def _build_tree_root(
+        self,
+        root_title: str,
+        optimized_tree: list[ChecklistNode],
+    ) -> XMindNode:
+        """从 ChecklistNode 树构建 XMind 根节点。
+
+        Args:
+            root_title: 根节点标题。
+            optimized_tree: 顶层 ChecklistNode 列表。
+
+        Returns:
+            XMind 根节点。
+        """
+        children = [self._build_tree_node(node) for node in optimized_tree]
+        return XMindNode(title=root_title, children=children)
+
+    def _build_tree_node(self, node: ChecklistNode) -> XMindNode:
+        """递归地将 ChecklistNode 转换为 XMindNode。
+
+        根据 ``node_type`` 分发到分组节点或用例叶子节点。
+
+        Args:
+            node: ChecklistNode 实例。
+
+        Returns:
+            对应的 XMindNode。
+        """
+        if node.node_type == "case":
+            return self._build_case_xmind_node(node)
+        return self._build_group_xmind_node(node)
+
+    def _build_group_xmind_node(self, node: ChecklistNode) -> XMindNode:
+        """构建分组类型的 XMindNode（对应 node_type == "group"）。
+
+        Args:
+            node: 分组 ChecklistNode。
+
+        Returns:
+            分组 XMindNode，其子节点递归构建。
+        """
+        children = [self._build_tree_node(child) for child in node.children]
+        return XMindNode(
+            title=node.title or "(unnamed group)",
+            children=children,
+        )
+
+    def _build_case_xmind_node(self, node: ChecklistNode) -> XMindNode:
+        """构建用例叶子类型的 XMindNode（对应 node_type == "case"）。
+
+        复用 ``_PRIORITY_MARKERS`` 为用例添加优先级图标。
+
+        Args:
+            node: 用例 ChecklistNode。
+
+        Returns:
+            用例 XMindNode，包含剩余步骤和预期结果。
+        """
+        markers: list[str] = []
+        priority_marker = _PRIORITY_MARKERS.get(node.priority)
+        if priority_marker:
+            markers.append(priority_marker)
+
+        labels = [node.priority] if node.priority else []
+
+        leaf_children: list[XMindNode] = []
+
+        if node.remaining_steps:
+            steps_node = XMindNode(
+                title="步骤",
+                children=[
+                    XMindNode(title=f"{i}. {step}")
+                    for i, step in enumerate(node.remaining_steps, start=1)
+                ],
+            )
+            leaf_children.append(steps_node)
+
+        if node.expected_results:
+            results_node = XMindNode(
+                title="预期结果",
+                children=[
+                    XMindNode(title=result) for result in node.expected_results
+                ],
+            )
+            leaf_children.append(results_node)
+
+        return XMindNode(
+            title=node.title or node.test_case_ref,
+            children=leaf_children,
+            markers=markers,
+            labels=labels,
+        )
+
+    # ------------------------------------------------------------------
+    # 原有扁平模式辅助方法（向后兼容）
+    # ------------------------------------------------------------------
 
     def _build_checkpoint_node(
         self, checkpoint: Checkpoint, cases: list[TestCase]

@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from app.domain.case_models import TestCase
+from app.services.markdown_renderer import render_test_cases_markdown
 
 if TYPE_CHECKING:
     from app.domain.api_models import CaseGenerationRun
+    from app.domain.checklist_models import ChecklistNode
     from app.repositories.run_repository import FileRunRepository
     from app.services.xmind_delivery_agent import XMindDeliveryAgent
 
@@ -192,13 +194,21 @@ class PlatformDispatcher:
                 "test_cases.json",
             )
         )
+
+        # --- F4 变更：使用共享 markdown_renderer，支持 optimized_tree ---
+        optimized_tree: list[ChecklistNode] | None = workflow_result.get(
+            "optimized_tree"
+        )
         artifacts["test_cases_markdown"] = str(
             self.repository.save_text(
                 run_id,
                 "test_cases.md",
-                _render_test_cases_markdown(run.test_cases),
+                render_test_cases_markdown(
+                    run.test_cases, optimized_tree=optimized_tree
+                ),
             )
         )
+
         artifacts["quality_report"] = str(
             self.repository.save(
                 run_id,
@@ -208,40 +218,3 @@ class PlatformDispatcher:
         )
 
         return artifacts
-
-
-def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    """将测试用例列表渲染为人类可读的 Markdown 文档。
-
-    使用中文标题以保持与中文优先输出策略的一致性。
-    """
-    if not test_cases:
-        return "# 生成的测试用例\n\n暂无测试用例。\n"
-
-    lines = ["# 生成的测试用例", ""]
-    for test_case in test_cases:
-        lines.append(f"## {test_case.id} {test_case.title}")
-        lines.append("")
-
-        if test_case.checkpoint_id:
-            lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
-            lines.append("")
-
-        lines.append("### 前置条件")
-        lines.extend(
-            [f"- {item}" for item in test_case.preconditions] or ["- 无"]
-        )
-        lines.append("")
-        lines.append("### 步骤")
-        lines.extend(
-            [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
-            or ["1. 无"]
-        )
-        lines.append("")
-        lines.append("### 预期结果")
-        lines.extend(
-            [f"- {item}" for item in test_case.expected_results] or ["- 无"]
-        )
-        lines.append("")
-
-    return "\n".join(lines).strip() + "\n"

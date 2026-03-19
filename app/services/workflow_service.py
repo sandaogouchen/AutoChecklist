@@ -6,6 +6,9 @@
 - 通过 PlatformDispatcher 持久化运行产物（JSON + Markdown + XMind）
 - 持久化运行状态、评估报告和迭代日志
 - 查询历史运行结果（包括失败运行）
+
+Note: Markdown 渲染逻辑已迁移至 ``app.services.markdown_renderer``，
+由 ``PlatformDispatcher`` 在持久化时统一调用。
 """
 
 from __future__ import annotations
@@ -398,40 +401,3 @@ class WorkflowService:
             "run_result.json",
         )
         return final_run
-
-
-def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    """将测试用例列表渲染为人类可读的 Markdown 文档。
-
-    使用中文标题以保持与中文优先输出策略的一致性。
-    """
-    if not test_cases:
-        return "# 生成的测试用例\n\n暂无测试用例。\n"
-
-    lines = ["# 生成的测试用例", ""]
-    for test_case in test_cases:
-        lines.append(f"## {test_case.id} {test_case.title}")
-        lines.append("")
-
-        if test_case.checkpoint_id:
-            lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
-            lines.append("")
-
-        lines.append("### 前置条件")
-        lines.extend(
-            [f"- {item}" for item in test_case.preconditions] or ["- 无"]
-        )
-        lines.append("")
-        lines.append("### 步骤")
-        lines.extend(
-            [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
-            or ["1. 无"]
-        )
-        lines.append("")
-        lines.append("### 预期结果")
-        lines.extend(
-            [f"- {item}" for item in test_case.expected_results] or ["- 无"]
-        )
-        lines.append("")
-
-    return "\n".join(lines).strip() + "\n"
