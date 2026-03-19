@@ -2,10 +2,12 @@
 
 统一管理运行产物的持久化和多平台交付逻辑：
 1. 持久化本地产物（JSON、Markdown 等）
-2. 如果配置了 XMind 交付代理（直接实例或工厂函数），执行 XMind 交付
+2. 如果配置了 XMind 交付代理，执行 XMind 交付
 3. 返回合并后的产物路径字典
 
-XMind 交付失败不会导致整个分发流程失败。
+变更：
+- 使用共享的 markdown_renderer 替代内联 _render_test_cases_markdown（DRY 修复）
+- 传递 optimized_tree 到 Markdown 渲染器
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from app.domain.case_models import TestCase
+from app.services.markdown_renderer import render_test_cases_markdown
 
 if TYPE_CHECKING:
     from app.domain.api_models import CaseGenerationRun
@@ -67,6 +69,7 @@ class PlatformDispatcher:
                     test_cases=run.test_cases,
                     checkpoints=workflow_result.get("checkpoints", []),
                     research_output=run.research_summary,
+                    optimized_tree=workflow_result.get("optimized_tree", []),
                     title=run.input.file_path if run.input else "",
                     output_dir=run_dir,
                 )
@@ -141,11 +144,14 @@ class PlatformDispatcher:
                 "test_cases.json",
             )
         )
+
+        # 使用共享 Markdown 渲染器，传递 optimized_tree
+        optimized_tree = workflow_result.get("optimized_tree", [])
         artifacts["test_cases_markdown"] = str(
             self.repository.save_text(
                 run_id,
                 "test_cases.md",
-                _render_test_cases_markdown(run.test_cases),
+                render_test_cases_markdown(run.test_cases, optimized_tree),
             )
         )
         artifacts["quality_report"] = str(
@@ -157,37 +163,3 @@ class PlatformDispatcher:
         )
 
         return artifacts
-
-
-def _render_test_cases_markdown(test_cases: list[TestCase]) -> str:
-    """将测试用例列表渲染为人类可读的 Markdown 文档。"""
-    if not test_cases:
-        return "# 生成的测试用例\n\n暂无测试用例。\n"
-
-    lines = ["# 生成的测试用例", ""]
-    for test_case in test_cases:
-        lines.append(f"## {test_case.id} {test_case.title}")
-        lines.append("")
-
-        if test_case.checkpoint_id:
-            lines.append(f"**Checkpoint:** {test_case.checkpoint_id}")
-            lines.append("")
-
-        lines.append("### 前置条件")
-        lines.extend(
-            [f"- {item}" for item in test_case.preconditions] or ["- 无"]
-        )
-        lines.append("")
-        lines.append("### 步骤")
-        lines.extend(
-            [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
-            or ["1. 无"]
-        )
-        lines.append("")
-        lines.append("### 预期结果")
-        lines.extend(
-            [f"- {item}" for item in test_case.expected_results] or ["- 无"]
-        )
-        lines.append("")
-
-    return "\n".join(lines).strip() + "\n"

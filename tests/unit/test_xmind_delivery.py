@@ -16,11 +16,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.domain.case_models import (
-    Checkpoint,
-    ResearchOutput,
-    TestCase,
-)
+from app.domain.case_models import TestCase
+from app.domain.checklist_models import ChecklistNode
+from app.domain.checkpoint_models import Checkpoint
+from app.domain.research_models import ResearchOutput
 from app.domain.xmind_models import (
     XMindDeliveryResult,
     XMindNode,
@@ -37,37 +36,42 @@ from app.services.xmind_payload_builder import XMindPayloadBuilder
 
 def _make_test_case(
     *,
+    tc_id: str = "TC-001",
     title: str = "测试用例1",
     priority: str = "P0",
     module: str = "登录模块",
-    steps: str = "步骤1\n步骤2",
-    expected: str = "期望结果",
-    category: str = "功能",
-    preconditions: str = "前置条件",
+    steps: list[str] | None = None,
+    expected: list[str] | None = None,
+    category: str = "functional",
+    preconditions: list[str] | None = None,
+    checkpoint_id: str = "CP-001",
 ) -> TestCase:
     """创建测试辅助 TestCase。"""
+    del module
     return TestCase(
+        id=tc_id,
         title=title,
         priority=priority,
-        module=module,
-        steps=steps,
-        expected_result=expected,
-        test_category=category,
-        preconditions=preconditions,
+        steps=steps or ["步骤1", "步骤2"],
+        expected_results=expected or ["期望结果"],
+        category=category,
+        preconditions=preconditions or ["前置条件"],
+        checkpoint_id=checkpoint_id,
     )
 
 
 def _make_checkpoint(
     *,
+    checkpoint_id: str = "CP-001",
     name: str = "检查点1",
     status: str = "passed",
     details: str = "检查通过",
 ) -> Checkpoint:
     """创建测试辅助 Checkpoint。"""
+    del status, details
     return Checkpoint(
-        name=name,
-        status=status,
-        details=details,
+        checkpoint_id=checkpoint_id,
+        title=name,
     )
 
 
@@ -77,10 +81,54 @@ def _make_research_output(
     key_findings: list[str] | None = None,
 ) -> ResearchOutput:
     """创建测试辅助 ResearchOutput。"""
+    del summary
     return ResearchOutput(
-        summary=summary,
-        key_findings=key_findings or ["发现1", "发现2"],
+        feature_topics=key_findings or ["发现1", "发现2"],
     )
+
+
+def _make_optimized_tree() -> list[ChecklistNode]:
+    """创建用于验证 XMind 树模式的优化树。"""
+    return [
+        ChecklistNode(
+            node_id="GRP-001",
+            title="系统已部署测试版本",
+            node_type="group",
+            children=[
+                ChecklistNode(
+                    node_id="GRP-002",
+                    title="用户已登录系统",
+                    node_type="group",
+                    children=[
+                        ChecklistNode(
+                            node_id="GRP-003",
+                            title="进入 `Create Ad Group` 页面",
+                            node_type="group",
+                            children=[
+                                ChecklistNode(
+                                    node_id="GRP-004",
+                                    title="定位 `optimize goal` 区域",
+                                    node_type="group",
+                                    children=[
+                                        ChecklistNode(
+                                            node_id="EXP-001",
+                                            title="`optimize goal` 字段在创建阶段显式可见。",
+                                            node_type="expected_result",
+                                        ),
+                                        ChecklistNode(
+                                            node_id="EXP-002",
+                                            title="用户可主动选择 `optimize goal`。",
+                                            node_type="expected_result",
+                                        ),
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+    ]
 
 
 # =========================================================================
@@ -284,6 +332,43 @@ class TestFileXMindConnector:
 class TestXMindDeliveryAgent:
     """测试 XMindDeliveryAgent 的交付流程。"""
 
+    def test_uses_optimized_tree_for_xmind_output(self, tmp_path: Path) -> None:
+        """传入 optimized_tree 时，XMind 应切换到逻辑路径树模式。"""
+        run_dir = tmp_path / "tree-run"
+        connector = FileXMindConnector(output_dir=run_dir)
+        builder = XMindPayloadBuilder()
+        agent = XMindDeliveryAgent(
+            connector=connector,
+            payload_builder=builder,
+            output_dir=run_dir,
+        )
+
+        result = agent.deliver(
+            run_id="tree-run",
+            test_cases=[_make_test_case()],
+            checkpoints=[_make_checkpoint()],
+            optimized_tree=_make_optimized_tree(),
+            title="树模式交付",
+            output_dir=run_dir,
+        )
+
+        assert result.success is True
+
+        with zipfile.ZipFile(result.file_path, "r") as zf:
+            content = json.loads(zf.read("content.json"))
+
+        root_children = content[0]["rootTopic"]["children"]["attached"]
+        assert root_children[0]["title"] == "系统已部署测试版本"
+        level2 = root_children[0]["children"]["attached"][0]
+        assert level2["title"] == "用户已登录系统"
+        level3 = level2["children"]["attached"][0]
+        assert level3["title"] == "进入 `Create Ad Group` 页面"
+        level4 = level3["children"]["attached"][0]
+        assert level4["title"] == "定位 `optimize goal` 区域"
+        leaf_titles = [node["title"] for node in level4["children"]["attached"]]
+        assert "`optimize goal` 字段在创建阶段显式可见。" in leaf_titles
+        assert "用户可主动选择 `optimize goal`。" in leaf_titles
+
     def test_success_delivery(self, tmp_path: Path) -> None:
         """验证完整的成功交付流程。
 
@@ -377,6 +462,48 @@ class TestXMindDeliveryAgent:
 
 class TestPlatformDispatcher:
     """测试 PlatformDispatcher 的产物持久化和平台交付。"""
+
+    def test_dispatch_forwards_optimized_tree_to_xmind_agent(
+        self, tmp_path: Path
+    ) -> None:
+        """dispatch 应将 optimized_tree 继续传给 XMind 交付。"""
+        from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun
+        from app.domain.case_models import QualityReport
+        from app.repositories.run_repository import FileRunRepository
+        from app.services.platform_dispatcher import PlatformDispatcher
+
+        repository = FileRunRepository(tmp_path)
+        mock_agent = MagicMock(spec=XMindDeliveryAgent)
+        mock_agent.deliver.return_value = XMindDeliveryResult(
+            success=True,
+            file_path="mocked/checklist.xmind",
+        )
+
+        dispatcher = PlatformDispatcher(
+            repository=repository,
+            xmind_agent=mock_agent,
+        )
+
+        request = CaseGenerationRequest(file_path="test.md")
+        run = CaseGenerationRun(
+            run_id="dispatch-tree",
+            status="succeeded",
+            input=request,
+            test_cases=[_make_test_case()],
+            quality_report=QualityReport(),
+        )
+        optimized_tree = _make_optimized_tree()
+
+        dispatcher.dispatch(
+            run_id="dispatch-tree",
+            run=run,
+            workflow_result={
+                "checkpoints": [_make_checkpoint()],
+                "optimized_tree": optimized_tree,
+            },
+        )
+
+        assert mock_agent.deliver.call_args.kwargs["optimized_tree"] == optimized_tree
 
     def test_with_xmind_factory(self, tmp_path: Path) -> None:
         """验证使用 xmind_agent_factory 时 XMind 产物在运行目录下。"""
