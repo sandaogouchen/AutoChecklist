@@ -2,6 +2,8 @@
 
 定义了测试用例（``TestCase``）和质量报告（``QualityReport``）的数据结构，
 作为工作流最终输出的核心模型。
+
+新增模版绑定字段，支持 testcase 继承 checkpoint 的模版归属信息。
 """
 
 from __future__ import annotations
@@ -23,7 +25,13 @@ class TestCase(BaseModel):
         priority: 优先级（P0-P3），默认 P2。
         category: 用例类别（functional / edge_case / performance 等）。
         evidence_refs: 关联的 PRD 原文证据引用。
-        checkpoint_id: 所属的 checkpoint 标识，用于回溯 fact → checkpoint → testcase 链路。
+        checkpoint_id: 所属的 checkpoint 标识，用于回溯 fact -> checkpoint -> testcase 链路。
+        project_id: 所属项目 ID。
+        template_leaf_id: 绑定的模版叶子节点 ID（继承自 checkpoint）。
+        template_path_ids: 从模版根到叶子的节点 ID 路径（继承自 checkpoint）。
+        template_path_titles: 从模版根到叶子的节点标题路径（继承自 checkpoint）。
+        template_match_confidence: 模版匹配置信度（继承自 checkpoint）。
+        template_match_low_confidence: 低置信度标记（继承自 checkpoint）。
     """
 
     # 防止 pytest 将此类误识别为测试类
@@ -39,6 +47,13 @@ class TestCase(BaseModel):
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     checkpoint_id: str = ""
     project_id: str = ""
+
+    # ---- 模版绑定字段（继承自 checkpoint） ----
+    template_leaf_id: str = ""
+    template_path_ids: list[str] = Field(default_factory=list)
+    template_path_titles: list[str] = Field(default_factory=list)
+    template_match_confidence: float = 0.0
+    template_match_low_confidence: bool = False
 
 
 class QualityReport(BaseModel):

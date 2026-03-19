@@ -6,6 +6,8 @@
 
 TypedDict 的 ``total=False`` 表示所有字段均为可选，
 这与 LangGraph 的增量更新模式一致——每个节点只需返回自己修改的字段。
+
+新增模版相关状态字段，支持项目级 Checklist 模版的加载与传递。
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from app.domain.checklist_models import (
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 from app.domain.run_state import EvaluationReport, RunState
+from app.domain.template_models import ProjectChecklistTemplateFile, TemplateLeafTarget
 
 
 class GlobalState(TypedDict, total=False):
@@ -30,6 +33,9 @@ class GlobalState(TypedDict, total=False):
 
     新增字段：
     - optimized_tree: 前置条件分组优化后的 ChecklistNode 树
+    - template_file_path: 项目级 Checklist 模版文件路径
+    - project_template: 解析后的模版文件对象
+    - template_leaf_targets: 拍平后的模版叶子目标列表
     """
 
     run_id: str
@@ -61,12 +67,19 @@ class GlobalState(TypedDict, total=False):
     project_id: str
     project_context_summary: str
 
+    # ---- 模版相关字段 ----
+    template_file_path: str
+    project_template: ProjectChecklistTemplateFile
+    template_leaf_targets: list[TemplateLeafTarget]
+
 
 class CaseGenState(TypedDict, total=False):
     """用例生成子图状态。
 
     新增字段：
     - optimized_tree: 前置条件分组优化后的 ChecklistNode 树
+    - template_leaf_targets: 拍平后的模版叶子目标列表
+    - project_template: 解析后的模版文件对象
     """
 
     language: str
@@ -82,3 +95,7 @@ class CaseGenState(TypedDict, total=False):
     test_cases: list[TestCase]
     optimized_tree: list[ChecklistNode]
     project_context_summary: str
+
+    # ---- 模版相关字段 ----
+    template_leaf_targets: list[TemplateLeafTarget]
+    project_template: ProjectChecklistTemplateFile

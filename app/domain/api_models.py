@@ -6,6 +6,7 @@
 - 辅助模型（模型配置覆盖、运行选项、错误信息）
 
 新增迭代评估回路相关的轻量摘要字段。
+新增项目级 Checklist 模版文件路径字段。
 """
 
 from __future__ import annotations
@@ -56,7 +57,12 @@ class IterationSummary(BaseModel):
 
 
 class CaseGenerationRequest(BaseModel):
-    """用例生成请求。"""
+    """用例生成请求。
+
+    新增字段：
+    - template_file_path: 可选的项目级 Checklist 模版文件路径（YAML 格式）。
+      提供后，生成的 checkpoint 和 testcase 将强制归类到模版叶子节点。
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -69,6 +75,7 @@ class CaseGenerationRequest(BaseModel):
     )
     options: RunOptions = Field(default_factory=RunOptions)
     project_id: str | None = None
+    template_file_path: str | None = None
 
 
 class CaseGenerationRun(BaseModel):
