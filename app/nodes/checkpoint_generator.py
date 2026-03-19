@@ -2,6 +2,10 @@
 
 调用 LLM 将 ResearchFact 列表转换为显式的 Checkpoint 列表。
 每个 fact 可以展开为 1 到 N 个 checkpoint，作为后续用例生成的输入。
+
+变更：新增模版绑定能力，当 template_leaf_targets 非空时，
+在 prompt 中注入模版叶子列表，引导 LLM 将每个 checkpoint 归类到最匹配的叶子节点，
+并在后处理阶段校验、回填模版路径信息。
 """
 
 from __future__ import annotations
@@ -15,6 +19,10 @@ from app.clients.llm import LLMClient
 from app.domain.checkpoint_models import Checkpoint, generate_checkpoint_id
 from app.domain.research_models import ResearchFact
 from app.domain.state import CaseGenState
+from app.domain.template_models import TemplateLeafTarget
+
+# 低置信度阈值：低于此值的模版匹配将被标记为低置信度
+_LOW_CONFIDENCE_THRESHOLD = 0.6
 
 # LLM 系统提示词：指导模型从事实列表中生成可验证的测试检查点
 _SYSTEM_PROMPT = (
@@ -40,14 +48,18 @@ _SYSTEM_PROMPT = (
     "- fact_ids (array of string): 可选，关联的 fact ID 列表\n"
     "- preconditions (array of string): 可选，前置条件列表。"
     "【重要】此字段必须是字符串数组，每个前置条件是数组中的一个独立元素。"
-    "绝对不要将所有前置条件合并为一个字符串。\n\n"
+    "绝对不要将所有前置条件合并为一个字符串。\n"
+    "- template_leaf_id (string): 可选，绑定的模版叶子节点 ID\n"
+    "- template_match_confidence (number): 可选，模版匹配置信度 0.0-1.0\n"
+    "- template_match_reason (string): 可选，模版匹配理由\n\n"
     "禁止出现的字段（输出这些字段会导致解析失败）：\n"
     "- steps\n"
     "- expected_result / expected_results\n"
     "- checkpoint_id（由系统自动生成，不要手动填写）\n\n"
     "正确示例：\n"
     '{"checkpoints": [{"title": "验证...", "preconditions": ["条件1", "条件2"], '
-    '"fact_ids": ["FACT-001"]}]}\n\n'
+    '"fact_ids": ["FACT-001"], "template_leaf_id": "leaf-01", '
+    '"template_match_confidence": 0.85, "template_match_reason": "该检查点验证登录功能"}]}\n\n'
     "错误示例（preconditions 为字符串）：\n"
     '{"checkpoints": [{"title": "验证...", "preconditions": "条件1。条件2。"}]}'
 )
@@ -66,6 +78,12 @@ class CheckpointDraft(BaseModel):
     branch_hint: str = ""
     fact_ids: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
+
+    # ---- 模版绑定字段（由 LLM 填写） ----
+    template_leaf_id: str = ""
+    template_match_confidence: float = 0.0
+    template_match_low_confidence: bool = False
+    template_match_reason: str = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -112,12 +130,18 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
         流程：
         1. 从 research_output 中提取 facts
         2. 如果 facts 为空，则从 feature_topics / user_scenarios 合成基础 facts
-        3. 构造 prompt 发送给 LLM
+        3. 构造 prompt 发送给 LLM（如有模版叶子，注入绑定指令）
         4. 为每个返回的 checkpoint 生成稳定 ID
         5. 关联证据引用
+        6. 后处理：校验模版叶子 ID、回填路径、标记低置信度
         """
         research_output = state["research_output"]
         facts = research_output.facts
+
+        # 读取模版叶子目标（可能为空列表）
+        template_leaf_targets: list[TemplateLeafTarget] = state.get(
+            "template_leaf_targets", []
+        )
 
         # 向后兼容：如果 facts 为空，从现有字段合成基础 facts
         if not facts:
@@ -128,6 +152,10 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
 
         prompt = _build_checkpoint_prompt(facts, state.get("language", "zh-CN"))
 
+        # 如果存在模版叶子目标，注入模版绑定 prompt
+        if template_leaf_targets:
+            prompt += "\n\n" + _build_template_binding_prompt(template_leaf_targets)
+
         response = llm_client.generate_structured(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=prompt,
@@ -136,6 +164,12 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
 
         # 构建 fact_id → fact 的查找表，用于关联证据引用
         fact_lookup = {f.fact_id: f for f in facts if f.fact_id}
+
+        # 构建 leaf_id 合法集合，用于后处理校验
+        valid_leaf_ids: set[str] = {lt.leaf_id for lt in template_leaf_targets}
+        leaf_lookup: dict[str, TemplateLeafTarget] = {
+            lt.leaf_id: lt for lt in template_leaf_targets
+        }
 
         checkpoints: list[Checkpoint] = []
         for draft in response.checkpoints:
@@ -151,6 +185,30 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
                 if fact and fact.evidence_refs:
                     evidence_refs.extend(fact.evidence_refs)
 
+            # ---- 模版绑定后处理 ----
+            template_leaf_id = draft.template_leaf_id
+            template_path_ids: list[str] = []
+            template_path_titles: list[str] = []
+            template_match_confidence = draft.template_match_confidence
+            template_match_reason = draft.template_match_reason
+            template_match_low_confidence = False
+
+            if template_leaf_id and template_leaf_targets:
+                if template_leaf_id not in valid_leaf_ids:
+                    # LLM 返回了无效的 leaf_id，清空绑定
+                    template_leaf_id = ""
+                    template_match_confidence = 0.0
+                    template_match_reason = ""
+                else:
+                    # 回填路径信息
+                    leaf_target = leaf_lookup[template_leaf_id]
+                    template_path_ids = leaf_target.path_ids
+                    template_path_titles = leaf_target.path_titles
+
+                    # 标记低置信度
+                    if template_match_confidence < _LOW_CONFIDENCE_THRESHOLD:
+                        template_match_low_confidence = True
+
             checkpoints.append(
                 Checkpoint(
                     checkpoint_id=checkpoint_id,
@@ -163,6 +221,12 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
                     evidence_refs=evidence_refs,
                     preconditions=draft.preconditions,
                     coverage_status="uncovered",
+                    template_leaf_id=template_leaf_id,
+                    template_path_ids=template_path_ids,
+                    template_path_titles=template_path_titles,
+                    template_match_confidence=template_match_confidence,
+                    template_match_reason=template_match_reason,
+                    template_match_low_confidence=template_match_low_confidence,
                 )
             )
 
@@ -248,6 +312,41 @@ def _build_checkpoint_prompt(facts: list[ResearchFact], language: str) -> str:
         "如果有多个前置条件，请拆分为数组中的多个元素。\n"
         "如果只有一个前置条件，也要写成只包含一个元素的数组。\n"
         "不要输出 steps、expected_result、checkpoint_id 等未定义字段。"
+    )
+
+    return "\n".join(lines)
+
+
+def _build_template_binding_prompt(leaf_targets: list[TemplateLeafTarget]) -> str:
+    """构造模版绑定的 prompt 片段。
+
+    将所有叶子目标格式化为列表，注入到 checkpoint 生成 prompt 中，
+    引导 LLM 为每个 checkpoint 选择最匹配的模版叶子节点。
+
+    Args:
+        leaf_targets: 拍平后的模版叶子目标列表。
+
+    Returns:
+        模版绑定指令的 prompt 文本。
+    """
+    lines = [
+        "【模版归类要求（必须遵守）】",
+        "以下是项目级 Checklist 模版的叶子节点列表，每个 checkpoint 必须绑定到最匹配的叶子节点。",
+        "请为每个 checkpoint 设置以下字段：",
+        "- template_leaf_id: 最匹配的叶子节点 ID（必须从下方列表中选择）",
+        "- template_match_confidence: 匹配置信度（0.0-1.0，1.0 表示完全匹配）",
+        "- template_match_reason: 简要说明为什么选择该叶子节点（中文）",
+        "",
+        "可选的叶子节点列表：",
+    ]
+
+    for lt in leaf_targets:
+        lines.append(f"- ID: {lt.leaf_id} | 路径: {lt.path_text}")
+
+    lines.append("")
+    lines.append(
+        "如果某个 checkpoint 确实无法匹配任何叶子节点，"
+        "可以将 template_leaf_id 设为空字符串，template_match_confidence 设为 0.0。"
     )
 
     return "\n".join(lines)
