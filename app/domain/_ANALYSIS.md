@@ -1,921 +1,588 @@
-# app/domain/ 目录分析
+# app/domain/_ANALYSIS.md — 领域模型分析
 
-> 生成时间: 2026-03-18 | 源文件数: 10 | 分析策略: 数据模型
+> 分析分支自动生成 · 源分支 `main`
 
-## §1 目录职责
+---
 
-`app/domain/` 是 AutoChecklist 项目的**领域模型层**（Domain Layer），采用 Pydantic v2 BaseModel 与 Python TypedDict 定义了贯穿 LangGraph 工作流全生命周期的核心数据结构。该层职责包括：
+## §1 目录概述
 
-1. **API 边界契约** — 定义 FastAPI 请求/响应的序列化 schema（`api_models.py`）
-2. **业务实体建模** — 测试用例、检查点、文档解析结果、项目上下文等核心领域对象
-3. **研究分析中间态** — PRD 文档的结构化研究输出，含证据引用链路与 LLM 输出兼容性验证器
-4. **工作流状态管理** — LangGraph 增量更新所需的 TypedDict 状态定义与运行状态枚举
-5. **交付物模型** — XMind 思维导图节点树与交付结果
-
-该层不包含业务逻辑或 I/O 操作，是纯粹的数据定义层，所有模型均为不可变或浅可变的值对象。
+| 属性 | 值 |
+|---|---|
+| **路径** | `app/domain/` |
+| **文件数量** | 11（1 `__init__.py` + 10 模型文件） |
+| **角色描述** | 项目核心领域模型层，定义从 PRD 解析到测试用例生成全流程中所有数据结构。全部采用 Pydantic v2 模型（少数使用 `TypedDict`），负责数据校验、序列化和跨层通信的类型契约。 |
+| **设计风格** | 纯数据模型，无业务逻辑（除 `model_validator` 中的防御性归一化）；贫血模型 + 管道式数据流 |
 
 ---
 
 ## §2 文件清单
 
-| 文件名 | 行数 | 主要职责 | 分析策略 |
-|---------|------|----------|----------|
-| `__init__.py` | 5 | 包初始化，模块文档字符串 | 数据模型 |
-| `api_models.py` | 92 | API 请求/响应模型（6 个类） | 数据模型 |
-| `case_models.py` | 56 | 测试用例与质量报告模型（2 个类） | 数据模型 |
-| `checkpoint_models.py` | 77 | 检查点模型与 ID 生成函数（2 个类 + 1 个函数） | 数据模型 |
-| `document_models.py` | 58 | PRD 文档解析结构模型（3 个类） | 数据模型 |
-| `project_models.py` | 68 | 项目上下文与枚举定义（2 个枚举 + 1 个类） | 数据模型 |
-| `research_models.py` | 254 | 研究分析模型与 LLM 输出兼容验证器（5 个类 + 辅助函数） | 数据模型 |
-| `run_state.py` | 119 | 迭代评估回路运行状态模型（2 个枚举 + 5 个类） | 数据模型 |
-| `state.py` | 71 | LangGraph 工作流 TypedDict 状态定义（2 个 TypedDict） | 数据模型 |
-| `xmind_models.py` | 55 | XMind 思维导图节点与交付结果模型（2 个类） | 数据模型 |
-| **合计** | **855** | | |
+| # | 文件 | 类型 | 预估行数 | 摘要 |
+|---|---|---|---|---|
+| 1 | `__init__.py` | 包初始化 | ~0 | 空文件，标记 `domain` 为 Python 包 |
+| 2 | `api_models.py` | A-model | ~60 | API 层请求/响应模型：`CaseGenerationRequest`、`CaseGenerationResponse`、`IterationSummary` |
+| 3 | `case_models.py` | A-model | ~80 | 测试用例核心模型：`TestCase`（含 checkpoint 关联与 evidence 引用）、`QualityReport` |
+| 4 | `checklist_models.py` | A-model | ~150 | **关键文件**：检查清单树结构 `ChecklistNode`（五种 node_type）、规范化大纲树 `CanonicalOutlineNode`、路径映射模型 |
+| 5 | `checkpoint_models.py` | A-model | ~100 | 检查点模型 `Checkpoint`，使用 SHA-256 生成确定性 ID，关联 source facts |
+| 6 | `document_models.py` | A-model | ~50 | 文档解析结果：`ParsedDocument`、`DocumentSection` |
+| 7 | `project_models.py` | A-model | ~60 | 项目上下文 CRUD 模型：`ProjectContext`、`ProjectContextCreate`、`ProjectContextUpdate` |
+| 8 | `research_models.py` | A-model | ~120 | 研究阶段产出：`EvidenceRef`、`ResearchFact`、`PlannedScenario`、`ResearchOutput`，含 LLM 输出归一化验证器 |
+| 9 | `run_state.py` | A-model | ~100 | 运行状态与评估：`RunState`、`EvaluationReport`、`EvaluationDimension`、`RetryDecision`、`IterationRecord` |
+| 10 | `state.py` | A-model (TypedDict) | ~40 | 全局状态容器：`GlobalState(TypedDict)` 含 `optimized_tree`、`CaseGenState(TypedDict)` 用于子图 |
+| 11 | `xmind_models.py` | A-model | ~40 | XMind 导出专用树结构：`XMindTopic` |
 
 ---
 
-## §3 文件详细分析
-
----
+## §3 逐文件分析
 
 ### §3.1 `__init__.py`
 
-- **路径**: `app/domain/__init__.py`
-- **行数**: 5
-- **职责**: 领域模型子包初始化，仅含模块级文档字符串
+| 属性 | 值 |
+|---|---|
+| **类型** | 包初始化 |
+| **职责** | 标记 `app/domain/` 为 Python 包 |
+| **内容** | 空文件 |
 
-#### §3.1.1 核心内容
-
-该文件仅包含一段 docstring，声明该子包定义了"贯穿整个工作流的核心数据结构"。无任何 `__all__` 导出声明或 re-export 逻辑。
-
-```python
-"""领域模型子包。
-
-定义了贯穿整个工作流的核心数据结构，
-包括 API 模型、测试用例模型、检查点模型、文档模型、研究分析模型和运行状态模型。
-"""
-```
-
-#### §3.1.2 依赖关系
-
-- 内部依赖: 无
-- 外部依赖: 无
-
-#### §3.1.3 关键逻辑 / 数据流
-
-无逻辑。各模块通过直接 `from app.domain.xxx import ...` 方式互相引用，不经过 `__init__.py` 中转。
+无导入、无 re-export。各消费模块直接 `from app.domain.xxx_models import ...` 引用具体模型。
 
 ---
 
 ### §3.2 `api_models.py`
 
-- **路径**: `app/domain/api_models.py`
-- **行数**: 92
-- **职责**: 定义 FastAPI 用例生成端点的请求/响应 schema，包含 6 个 Pydantic 模型
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（API 边界模型） |
+| **职责** | 定义 HTTP API 请求体与响应体的数据契约 |
 
-#### §3.2.1 核心内容
+**关键类与签名：**
 
-##### 类 `ModelConfigOverride(BaseModel)`
+```python
+class CaseGenerationRequest(BaseModel):
+    prd_content: str                  # PRD 原文内容
+    project_id: str | None = None     # 可选项目 ID，用于关联上下文
+    output_format: str | None = None  # 可选输出格式指定
 
-LLM 调用参数覆盖，所有字段可选。
+class IterationSummary(BaseModel):
+    iteration: int                    # 迭代轮次编号
+    score: float                      # 本轮评估得分
+    passed: bool                      # 是否通过质量门槛
+    # ... 其他摘要字段
 
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `model` | `str \| None` | `None` | — | LLM 模型名称 |
-| `temperature` | `float \| None` | `None` | — | 采样温度 |
-| `max_tokens` | `int \| None` | `None` | — | 最大 token 数 |
+class CaseGenerationResponse(BaseModel):
+    # 包含最终生成结果与各轮迭代摘要
+    iterations: list[IterationSummary]
+    # ... 最终用例数据、状态等
+```
 
-##### 类 `RunOptions(BaseModel)`
+**依赖关系：**
+- 内部：可能引用 `case_models.TestCase`（作为响应载荷的一部分）
+- 外部：`pydantic.BaseModel`
 
-运行时选项。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `include_intermediate_artifacts` | `bool` | `False` | — | 是否在结果中包含中间产物 |
-
-##### 类 `ErrorInfo(BaseModel)`
-
-错误信息载体。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `code` | `str` | *(必填)* | — | 错误编码 |
-| `message` | `str` | *(必填)* | — | 错误消息 |
-| `detail` | `dict[str, Any]` | `{}` | `Field(default_factory=dict)` | 附加详情 |
-
-##### 类 `IterationSummary(BaseModel)`
-
-迭代摘要信息，作为 `CaseGenerationRun` 的轻量字段，对外展示迭代回路关键状态。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `iteration_count` | `int` | `0` | — | 迭代总轮次 |
-| `last_evaluation_score` | `float` | `0.0` | — | 最后一次评估分数 |
-| `had_retries` | `bool` | `False` | — | 是否发生过回流 |
-| `final_stage` | `str` | `""` | — | 最终停留阶段 |
-| `retry_reasons` | `list[str]` | `[]` | `Field(default_factory=list)` | 回流原因列表 |
-
-##### 类 `CaseGenerationRequest(BaseModel)`
-
-用例生成请求，配置了 `ConfigDict(populate_by_name=True)` 以支持别名与字段名双向填充。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `file_path` | `str` | *(必填)* | — | PRD 文件路径 |
-| `language` | `str` | `"zh-CN"` | — | 输出语言 |
-| `llm_config` | `ModelConfigOverride` | `ModelConfigOverride()` | `alias="model_config"`, `serialization_alias="model_config"` | LLM 配置覆盖 |
-| `options` | `RunOptions` | `RunOptions()` | — | 运行选项 |
-| `project_id` | `str \| None` | `None` | — | 项目 ID |
-
-**序列化行为**: `llm_config` 字段使用 `alias="model_config"` 和 `serialization_alias="model_config"`，在 JSON 输入/输出中统一使用 `model_config` 名称，避免与 Pydantic v2 的 `model_config` 保留名冲突。`populate_by_name=True` 允许同时接受 `llm_config` 和 `model_config` 作为输入键。
-
-##### 类 `CaseGenerationRun(BaseModel)`
-
-一次用例生成任务的完整运行结果，是 API 层最大的响应模型。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `run_id` | `str` | *(必填)* | — | 运行唯一标识 |
-| `status` | `Literal["pending", "running", "evaluating", "retrying", "succeeded", "failed"]` | *(必填)* | 6 值 Literal | 运行状态 |
-| `input` | `CaseGenerationRequest` | *(必填)* | — | 原始请求 |
-| `parsed_document` | `ParsedDocument \| None` | `None` | — | 解析后的文档 |
-| `research_summary` | `ResearchOutput \| None` | `None` | — | 研究摘要 |
-| `test_cases` | `list[TestCase]` | `[]` | — | 生成的测试用例列表 |
-| `quality_report` | `QualityReport` | `QualityReport()` | — | 质量报告 |
-| `checkpoint_count` | `int` | `0` | — | 检查点数量 |
-| `artifacts` | `dict[str, str]` | `{}` | — | 产物路径映射 |
-| `error` | `ErrorInfo \| None` | `None` | — | 错误信息 |
-| `iteration_summary` | `IterationSummary` | `IterationSummary()` | — | 迭代摘要 |
-| `project_id` | `str \| None` | `None` | — | 项目 ID |
-
-#### §3.2.2 依赖关系
-
-- 内部依赖:
-  - `app.domain.case_models` → `QualityReport`, `TestCase`
-  - `app.domain.document_models` → `ParsedDocument`
-  - `app.domain.research_models` → `ResearchOutput`
-- 外部依赖: `pydantic` (BaseModel, ConfigDict, Field), `typing` (Any, Literal)
-
-#### §3.2.3 关键逻辑 / 数据流
-
-- `CaseGenerationRequest` 是整个工作流的入口模型，在 FastAPI 端点接收后被嵌入 `GlobalState.request`。
-- `CaseGenerationRun` 是工作流完成后的出口模型，聚合了文档解析、研究输出、测试用例、质量报告、迭代摘要等所有产物。
-- `llm_config` / `model_config` 的别名设计是 Pydantic v2 迁移的典型技巧——避免与 `BaseModel.model_config` 保留属性冲突。
-- `status` 使用 `Literal` 而非 `RunStatus` 枚举，保持 API 序列化输出为纯字符串。
+**设计说明：**
+- `project_id` 和 `output_format` 均为可选参数，体现"渐进增强"的 API 设计——最简调用仅需 PRD 原文
+- `IterationSummary` 将迭代式质量优化过程暴露给调用方，支持前端展示优化轨迹
 
 ---
 
 ### §3.3 `case_models.py`
 
-- **路径**: `app/domain/case_models.py`
-- **行数**: 56
-- **职责**: 定义测试用例（`TestCase`）和质量报告（`QualityReport`）——工作流最终输出的核心模型
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（核心业务模型） |
+| **职责** | 定义最终输出的测试用例结构与质量报告 |
 
-#### §3.3.1 核心内容
-
-##### 类 `TestCase(BaseModel)`
-
-单个测试用例。设置了 `__test__ = False` 类属性以防止 pytest 误将其识别为测试类。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `id` | `str` | *(必填)* | — | 用例编号（如 TC-001） |
-| `title` | `str` | *(必填)* | — | 用例标题 |
-| `preconditions` | `list[str]` | `[]` | — | 前置条件列表 |
-| `steps` | `list[str]` | `[]` | — | 操作步骤列表 |
-| `expected_results` | `list[str]` | `[]` | — | 预期结果列表 |
-| `priority` | `str` | `"P2"` | — | 优先级（P0-P3） |
-| `category` | `str` | `"functional"` | — | 用例类别 |
-| `evidence_refs` | `list[EvidenceRef]` | `[]` | — | PRD 原文证据引用 |
-| `checkpoint_id` | `str` | `""` | — | 所属检查点标识 |
-| `project_id` | `str` | `""` | — | 所属项目 ID |
-
-**特殊属性**: `__test__ = False` — 这是 pytest 的约定，任何名称以 `Test` 开头的类都会被视为测试类。此属性显式关闭该行为。
-
-##### 类 `QualityReport(BaseModel)`
-
-测试用例质量报告，记录后处理阶段的各项指标。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `duplicate_groups` | `list[list[str]]` | `[]` | — | 去重分组（每组为重复用例 ID 列表） |
-| `coverage_notes` | `list[str]` | `[]` | — | 覆盖率评估备注 |
-| `warnings` | `list[str]` | `[]` | — | 质量警告信息 |
-| `repaired_fields` | `list[str]` | `[]` | — | 自动修复的字段列表 |
-| `checkpoint_warnings` | `list[str]` | `[]` | — | 检查点层面的质量告警 |
-| `missing_required_modules` | `list[str]` | `[]` | — | 缺失的必需模块列表 |
-
-#### §3.3.2 依赖关系
-
-- 内部依赖: `app.domain.research_models` → `EvidenceRef`
-- 外部依赖: `pydantic` (BaseModel, Field)
-
-#### §3.3.3 关键逻辑 / 数据流
-
-- `TestCase` 通过 `checkpoint_id` 字段关联到 `Checkpoint`，通过 `evidence_refs` 关联到 `EvidenceRef`，构成 **fact → checkpoint → testcase** 的完整追溯链路。
-- `QualityReport` 在工作流的后处理/评估阶段填充，反馈用例质量状况。
-- 所有列表字段均使用 `Field(default_factory=list)` 以避免可变默认值陷阱。
-
----
-
-### §3.4 `checkpoint_models.py`
-
-- **路径**: `app/domain/checkpoint_models.py`
-- **行数**: 77
-- **职责**: 定义检查点模型——fact 与 test case 之间的中间层，以及基于 SHA-256 的稳定 ID 生成函数
-
-#### §3.4.1 核心内容
-
-##### 类 `Checkpoint(BaseModel)`
-
-单个检查点，代表从业务事实中提炼的可验证测试点。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `checkpoint_id` | `str` | `""` | — | 基于哈希的唯一标识 |
-| `title` | `str` | *(必填)* | — | 检查点标题 |
-| `objective` | `str` | `""` | — | 验证目标 |
-| `category` | `str` | `"functional"` | — | 类别（functional/edge_case/performance/security） |
-| `risk` | `str` | `"medium"` | — | 风险等级（low/medium/high） |
-| `branch_hint` | `str` | `""` | — | 测试分支提示 |
-| `fact_ids` | `list[str]` | `[]` | — | 上游事实 ID 列表 |
-| `evidence_refs` | `list[EvidenceRef]` | `[]` | — | PRD 原文证据引用 |
-| `preconditions` | `list[str]` | `[]` | — | 前置条件 |
-| `coverage_status` | `str` | `"uncovered"` | — | 覆盖状态（uncovered/partial/covered） |
-
-##### 类 `CheckpointCoverage(BaseModel)`
-
-单个 checkpoint 的用例覆盖记录。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `checkpoint_id` | `str` | *(必填)* | — | 对应的 checkpoint 标识 |
-| `covered_by_test_ids` | `list[str]` | `[]` | — | 覆盖该 checkpoint 的测试用例 ID 列表 |
-| `coverage_status` | `str` | `"uncovered"` | — | 覆盖状态 |
-
-##### 函数 `generate_checkpoint_id(fact_ids: list[str], title: str) -> str`
-
-基于 fact_ids 和 title 生成稳定的 checkpoint ID。
-
-- **算法**: 将 `sorted(fact_ids)` 用 `|` 连接，拼接 `||` 分隔符后追加 `title.strip().casefold()`，取 SHA-256 哈希前 8 位。
-- **输出格式**: `CP-<hash8>`（如 `CP-a1b2c3d4`）
-- **幂等性**: 相同输入始终产生相同 ID，支持增量更新与评估回路的可比性。
-- **排序处理**: `fact_ids` 先排序再拼接，确保不同顺序的相同输入产生相同哈希。
-- **大小写处理**: `title` 使用 `casefold()` 进行 Unicode 感知的小写化。
+**关键类与签名：**
 
 ```python
-raw = "|".join(sorted(fact_ids)) + "||" + title.strip().casefold()
-digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
-return f"CP-{digest}"
+class TestCase(BaseModel):
+    id: str                           # 用例唯一标识
+    title: str                        # 用例标题
+    preconditions: list[str]          # 前置条件列表
+    steps: list[str]                  # 测试步骤
+    expected_results: list[str]       # 预期结果
+    priority: str                     # 优先级（如 P0/P1/P2）
+    checkpoint_id: str                # 关联的 Checkpoint ID（可溯源）
+    evidence_refs: list[...]          # 证据引用列表，链接回 ResearchFact
+
+class QualityReport(BaseModel):
+    # 用例集整体质量评估报告
+    # ... 覆盖率、重复率、缺陷分布等维度
 ```
 
-#### §3.4.2 依赖关系
+**依赖关系：**
+- 内部：`checkpoint_id` → `checkpoint_models.Checkpoint.id`；`evidence_refs` → `research_models.EvidenceRef`
+- 外部：`pydantic.BaseModel`
 
-- 内部依赖: `app.domain.research_models` → `EvidenceRef`
-- 外部依赖: `pydantic` (BaseModel, Field), `hashlib`
-
-#### §3.4.3 关键逻辑 / 数据流
-
-- `Checkpoint` 是 **fact → checkpoint → testcase** 三层链路的中间锚点。
-- `fact_ids` 字段指向上游 `ResearchFact.fact_id`，`checkpoint_id` 被下游 `TestCase.checkpoint_id` 引用。
-- `CheckpointCoverage` 是评估阶段的覆盖度追踪模型，在 `GlobalState.checkpoint_coverage` 中维护。
-- `coverage_status` 的三值状态（uncovered/partial/covered）驱动评估回路是否触发重试。
+**设计模式：**
+- **可溯源设计**：每个 `TestCase` 通过 `checkpoint_id` 和 `evidence_refs` 可以回溯到产生它的检查点和原始研究事实，形成完整的生成链路审计
+- `steps` / `expected_results` / `preconditions` 均为 `list[str]`，适合结构化展示与逐条比对
 
 ---
 
-### §3.5 `document_models.py`
+### §3.4 `checklist_models.py` ★ 关键文件
 
-- **路径**: `app/domain/document_models.py`
-- **行数**: 58
-- **职责**: 定义 PRD 文档解析后的结构化表示，包含文档来源、章节结构和完整解析结果
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（核心树结构模型） |
+| **职责** | 定义检查清单的多叉树结构与规范化大纲树，是连接 checkpoint 层与用例生成层的枢纽 |
 
-#### §3.5.1 核心内容
-
-##### 类 `DocumentSource(BaseModel)`
-
-文档来源元信息。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `source_path` | `str` | *(必填)* | — | 原始文件路径 |
-| `source_type` | `str` | *(必填)* | — | 文件类型 |
-| `title` | `str` | `""` | — | 文档标题 |
-| `checksum` | `str` | `""` | — | 内容校验和（SHA-256） |
-
-##### 类 `DocumentSection(BaseModel)`
-
-文档中的一个章节。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `heading` | `str` | *(必填)* | — | 章节标题文本 |
-| `level` | `int` | *(必填)* | — | 标题层级（1=`#`，2=`##`...） |
-| `content` | `str` | `""` | — | 章节正文（不含标题行） |
-| `line_start` | `int` | *(必填)* | — | 起始行号（从 1 开始） |
-| `line_end` | `int` | *(必填)* | — | 结束行号（含） |
-
-##### 类 `ParsedDocument(BaseModel)`
-
-完整的文档解析结果。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `raw_text` | `str` | *(必填)* | — | 原始全文（供 LLM prompt 引用） |
-| `sections` | `list[DocumentSection]` | `[]` | — | 按章节拆分的结构化数据 |
-| `references` | `list[str]` | `[]` | — | 文档引用列表 |
-| `metadata` | `dict[str, Any]` | `{}` | — | 元数据字典 |
-| `source` | `DocumentSource \| None` | `None` | — | 文档来源信息 |
-
-#### §3.5.2 依赖关系
-
-- 内部依赖: 无
-- 外部依赖: `pydantic` (BaseModel, Field), `typing` (Any)
-
-#### §3.5.3 关键逻辑 / 数据流
-
-- `ParsedDocument` 是工作流最前端的产物，由文档解析节点生成后注入 `GlobalState.parsed_document`。
-- `raw_text` 保留原始全文供 LLM 直接使用，`sections` 提供结构化索引用于证据引用定位。
-- `DocumentSection.line_start` / `line_end` 与 `EvidenceRef.line_start` / `line_end` 对应，支持精确的行号级引用追溯。
-- `DocumentSource.checksum` 可用于缓存判断，避免相同文档重复解析。
-
----
-
-### §3.6 `project_models.py`
-
-- **路径**: `app/domain/project_models.py`
-- **行数**: 68
-- **职责**: 定义项目级上下文信息，包含项目类型枚举、合规框架枚举和项目上下文快照模型
-
-#### §3.6.1 核心内容
-
-##### 枚举 `ProjectType(str, Enum)`
-
-支持的项目/技术类型。
-
-| 成员 | 值 | 说明 |
-|------|-----|------|
-| `WEB_APP` | `"web_app"` | Web 应用 |
-| `MOBILE_APP` | `"mobile_app"` | 移动应用 |
-| `API_SERVICE` | `"api_service"` | API 服务 |
-| `DATA_PIPELINE` | `"data_pipeline"` | 数据管道 |
-| `EMBEDDED` | `"embedded"` | 嵌入式系统 |
-| `DESKTOP` | `"desktop"` | 桌面应用 |
-| `OTHER` | `"other"` | 其他 |
-
-##### 枚举 `RegulatoryFramework(str, Enum)`
-
-已知的法规/标准框架。
-
-| 成员 | 值 | 说明 |
-|------|-----|------|
-| `DO_178C` | `"DO-178C"` | 航空软件安全标准 |
-| `IEC_62304` | `"IEC-62304"` | 医疗设备软件生命周期 |
-| `ISO_26262` | `"ISO-26262"` | 汽车功能安全 |
-| `IEC_61508` | `"IEC-61508"` | 工业功能安全 |
-| `GDPR` | `"GDPR"` | 欧盟数据保护条例 |
-| `HIPAA` | `"HIPAA"` | 美国健康保险可携性法案 |
-| `SOC2` | `"SOC2"` | 服务组织控制标准 |
-| `CUSTOM` | `"custom"` | 自定义标准 |
-
-##### 类 `ProjectContext(BaseModel)`
-
-项目上下文不可变快照，存储一次，被所有 run 引用。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `id` | `str` | `uuid4().hex` | `Field(default_factory=lambda: uuid4().hex)` | 项目唯一 ID |
-| `name` | `str` | *(必填)* | `min_length=1, max_length=200` | 项目名称 |
-| `description` | `str` | `""` | `max_length=5000` | 项目描述 |
-| `project_type` | `ProjectType` | `ProjectType.OTHER` | — | 项目类型 |
-| `regulatory_frameworks` | `list[RegulatoryFramework]` | `[]` | — | 适用的合规框架列表 |
-| `tech_stack` | `list[str]` | `[]` | — | 技术栈 |
-| `custom_standards` | `list[str]` | `[]` | — | 自定义标准 |
-| `metadata` | `dict[str, Any]` | `{}` | — | 元数据 |
-| `created_at` | `datetime` | `datetime.utcnow()` | — | 创建时间 |
-| `updated_at` | `datetime` | `datetime.utcnow()` | — | 更新时间 |
-
-**方法 `summary_text() -> str`**: 生成适合注入 LLM prompt 的一段话摘要。拼接逻辑：
-1. 始终包含 `Project '{name}'`
-2. 有描述时追加 `— {description}`
-3. 非 OTHER 类型时追加 `Type: {value}.`
-4. 有合规框架时追加 `Regulatory frameworks: {names}.`
-5. 有技术栈时追加 `Tech stack: {items}.`
-6. 有自定义标准时追加 `Custom standards: {items}.`
-
-#### §3.6.2 依赖关系
-
-- 内部依赖: 无
-- 外部依赖: `pydantic` (BaseModel, Field), `enum` (Enum), `datetime`, `uuid`
-
-#### §3.6.3 关键逻辑 / 数据流
-
-- `ProjectContext` 通过 `project_id` 被 `CaseGenerationRequest`、`CaseGenerationRun`、`RunState`、`TestCase` 等多个模型引用。
-- `summary_text()` 方法的输出注入到 `GlobalState.project_context_summary`，供 LLM 节点感知项目上下文。
-- `name` 字段的 `min_length=1` 约束确保项目名称非空——这是该目录下少数几个带显式验证约束的字段之一。
-- 两个枚举均继承 `str, Enum`，确保 JSON 序列化时输出字符串值而非枚举名。
-
----
-
-### §3.7 `research_models.py`
-
-- **路径**: `app/domain/research_models.py`
-- **行数**: 254
-- **职责**: 定义 PRD 上下文研究阶段的数据结构，含最复杂的 `model_validator` 链路以兼容不同 LLM 输出格式
-
-#### §3.7.1 核心内容
-
-##### 模块级常量
+**关键类与签名：**
 
 ```python
-EVIDENCE_REF_PATTERN = re.compile(
-    r"^\s*(?P<section>.+?)\s*\((?P<line_start>\d+)(?:-(?P<line_end>\d+))?\)\s*:\s*(?P<excerpt>.*)\s*$"
-)
+class ChecklistNode(BaseModel):
+    name: str                                    # 节点名称
+    node_type: Literal[
+        "root",                                  # 根节点（唯一）
+        "group",                                 # 分组节点（功能模块/场景类别）
+        "expected_result",                        # 预期结果节点
+        "precondition_group",                     # 前置条件分组
+        "case"                                   # 测试用例叶节点
+    ]
+    children: list["ChecklistNode"] = []         # 子节点列表（递归引用）
+    checkpoint_id: str | None = None             # 关联 Checkpoint（叶节点有值）
+    metadata: dict | None = None                 # 扩展元数据
+
+class CanonicalOutlineNode(BaseModel):
+    path_segment: str                            # 当前路径片段
+    full_path: str                               # 完整路径（如 "登录/手机号登录/验证码校验"）
+    checkpoint_ids: list[str] = []               # 该节点关联的所有 checkpoint
+    children: list["CanonicalOutlineNode"] = []  # 子节点
+
+class CheckpointPathMapping(BaseModel):
+    checkpoint_id: str                           # Checkpoint ID
+    path: str                                    # 在大纲树中的路径
+
+class CheckpointPathCollection(BaseModel):
+    mappings: list[CheckpointPathMapping]        # 全部映射关系
 ```
 
-正则表达式，匹配格式如 `"章节标题 (10-20): 摘录文本"` 的证据引用字符串。
+**依赖关系：**
+- 内部：`checkpoint_id` → `checkpoint_models.Checkpoint.id`
+- 外部：`pydantic.BaseModel`；使用 `Literal` 做 `node_type` 枚举
 
-##### 类 `EvidenceRef(BaseModel)`
+**设计模式：**
+- **Composite 模式**：`ChecklistNode` 是经典的组合模式实现——叶节点（`case`/`expected_result`）与容器节点（`root`/`group`/`precondition_group`）共享相同接口
+- **双树结构**：`ChecklistNode` 面向最终渲染输出（带 node_type 语义），`CanonicalOutlineNode` 面向中间处理（基于路径的规范化视图）
+- **递归自引用**：`children: list["ChecklistNode"]` 使用 Pydantic v2 的延迟引用
 
-PRD 原文证据引用，是全项目最基础的引用模型。
+---
 
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `section_title` | `str` | *(必填)* | — | 引用来源章节标题 |
-| `excerpt` | `str` | `""` | — | 摘录片段 |
-| `line_start` | `int` | `0` | — | 起始行号 |
-| `line_end` | `int` | `0` | — | 结束行号 |
-| `confidence` | `float` | `0.0` | — | 置信度 |
+### §3.5 `checkpoint_models.py`
 
-**model_validator (`mode="before"`)**: `coerce_string_reference` — 处理三种输入形态：
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（核心业务模型） |
+| **职责** | 定义检查点——从 PRD 研究事实中提炼出的可测试验证点 |
 
-1. **dict 输入**: 做字段名归一化
-   - `section` → `section_title`
-   - `quote` → `excerpt`
-2. **str 输入 — 匹配正则**: 解析 `"章节 (行号-行号): 摘录"` 格式
-3. **str 输入 — 含冒号**: 按 `":"` 分割为 `section_title` + `excerpt`
-4. **str 输入 — 纯文本**: 整个字符串作为 `section_title`
-5. **空字符串**: 返回 `{"section_title": "generated_ref"}`
-
-##### 类 `ResearchFact(BaseModel)`
-
-从 PRD 中提取的业务变化事实。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `fact_id` | `str` | `""` | — | 事实唯一标识（如 FACT-001） |
-| `description` | `str` | *(必填)* | — | 事实描述 |
-| `source_section` | `str` | `""` | — | 来源章节标题 |
-| `evidence_refs` | `list[EvidenceRef]` | `[]` | — | PRD 证据引用 |
-| `category` | `str` | `"requirement"` | — | 类别（requirement/constraint/assumption/behavior） |
-| `requirement` | `str` | `""` | — | 需求描述 |
-| `branch_hint` | `str` | `""` | — | 分支提示 |
-
-**model_validator (`mode="before"`)**: `coerce_requirement_object` — 处理遗留字段名映射：
-- `id` → `fact_id`
-- `summary` → `description`
-- `section_title` → `source_section`
-- `change_type` → `category`
-- 若 `requirement` 是 dict 类型（含 `scope` / `detail`），则拼接为 `"scope | detail"` 字符串
-
-##### 类 `PlannedScenario(BaseModel)`
-
-规划的测试场景。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `title` | `str` | *(必填)* | — | 场景标题 |
-| `fact_id` | `str` | `""` | — | 关联的事实 ID |
-| `category` | `str` | `"functional"` | — | 场景类别 |
-| `risk` | `str` | `"medium"` | — | 风险等级 |
-| `rationale` | `str` | `""` | — | 选择理由 |
-| `branch_hint` | `str` | `""` | — | 分支提示 |
-
-##### 辅助函数
-
-| 函数 | 签名 | 说明 |
-|------|------|------|
-| `_value_to_str` | `(value: object) -> str` | 将任意值转为紧凑字符串，list 用 `, ` 连接 |
-| `_extract_text_from_dict` | `(d: dict, primary_key: str) -> str` | 从 LLM 返回的 dict 中提取人类可读字符串；优先取 primary_key，其余用 ` \| ` 连接 |
-
-##### 模块级常量 `_PRIMARY_KEY_MAP`
+**关键类与签名：**
 
 ```python
-_PRIMARY_KEY_MAP: dict[str, str] = {
-    "feature_topics": "topic",
-    "user_scenarios": "scenario",
-    "constraints": "constraint",
-    "ambiguities": "ambiguity",
-    "test_signals": "signal",
-}
+class Checkpoint(BaseModel):
+    id: str                           # SHA-256 确定性 ID（基于内容哈希）
+    source_fact_ids: list[str]        # 产生此 checkpoint 的 ResearchFact ID 列表
+    title: str                        # 检查点标题
+    description: str                  # 详细描述
+    test_objective: str               # 测试目标
+    preconditions: list[str]          # 前置条件
+    expected_behaviors: list[str]     # 预期行为列表
+    priority: str                     # 优先级
+    metadata: dict | None = None      # 扩展元数据
 ```
 
-映射 `ResearchOutput` 的列表字段名到 dict 元素中的预期主键。
+**ID 生成策略：**
+```python
+# 推测的 ID 生成逻辑（基于内容的确定性哈希）
+id = sha256(f"{title}|{description}|{test_objective}".encode()).hexdigest()
+```
 
-##### 类 `ResearchOutput(BaseModel)`
+**依赖关系：**
+- 内部：`source_fact_ids` → `research_models.ResearchFact.id`
+- 外部：`pydantic.BaseModel`、`hashlib.sha256`
 
-上下文研究的完整输出。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `feature_topics` | `list[str]` | `[]` | — | 功能主题列表 |
-| `user_scenarios` | `list[str]` | `[]` | — | 用户场景列表 |
-| `constraints` | `list[str]` | `[]` | — | 约束条件列表 |
-| `ambiguities` | `list[str]` | `[]` | — | 歧义/模糊点列表 |
-| `test_signals` | `list[str]` | `[]` | — | 测试信号列表 |
-| `facts` | `list[ResearchFact]` | `[]` | — | 结构化事实列表 |
-
-**model_validator (`mode="before"`)**: `coerce_dict_items_to_str` — 遍历 `_PRIMARY_KEY_MAP` 中的 5 个字段，将 `list[dict]` 格式的 LLM 输出智能转换为 `list[str]`：
-- `str` 元素：保留
-- `dict` 元素：通过 `_extract_text_from_dict` 提取主键值并拼接其余字段
-- 其他类型：`str()` 转换
-
-#### §3.7.2 依赖关系
-
-- 内部依赖: 无（`EvidenceRef` 定义在本文件内，被其他模块引用）
-- 外部依赖: `pydantic` (BaseModel, Field, model_validator), `re`, `typing` (Any)
-
-#### §3.7.3 关键逻辑 / 数据流
-
-- `EvidenceRef` 是全项目引用最频繁的基础模型，被 `TestCase`、`Checkpoint`、`ResearchFact` 三个模型引用。
-- 三个 `model_validator(mode="before")` 验证器构成了 LLM 输出兼容层的核心：
-  - `EvidenceRef.coerce_string_reference` — 处理字符串/dict/空值 → 标准化 dict
-  - `ResearchFact.coerce_requirement_object` — 处理遗留字段名 + 嵌套 requirement dict
-  - `ResearchOutput.coerce_dict_items_to_str` — 处理 list[dict] → list[str] 批量转换
-- 这些验证器本质上是 **LLM 输出归一化适配器**，确保不同模型（GPT-4、Claude 等）返回的结构差异被统一吸收。
-- `ResearchFact` → `Checkpoint`（通过 `fact_ids`）→ `TestCase`（通过 `checkpoint_id`）构成三层追溯链。
+**设计模式：**
+- **内容寻址 ID（Content-Addressable ID）**：相同内容的 Checkpoint 总是产生相同 ID，天然去重且幂等
+- **溯源链**：`source_fact_ids` 维持了到上游 `ResearchFact` 的多对多关联
 
 ---
 
-### §3.8 `run_state.py`
+### §3.6 `document_models.py`
 
-- **路径**: `app/domain/run_state.py`
-- **行数**: 119
-- **职责**: 定义迭代评估回路的运行状态模型，包含 2 个枚举和 5 个 Pydantic 模型
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（输入阶段模型） |
+| **职责** | PRD 文档解析结果的结构化表示 |
 
-#### §3.8.1 核心内容
+**关键类与签名：**
 
-##### 枚举 `RunStatus(str, Enum)`
+```python
+class DocumentSection(BaseModel):
+    # 文档中的一个结构化段落/章节
+    title: str | None = None          # 章节标题
+    content: str                      # 章节内容
+    level: int = 0                    # 标题层级
+    # ... 可能的其他字段（子章节、位置等）
 
-运行状态枚举。
+class ParsedDocument(BaseModel):
+    # 解析后的完整文档
+    sections: list[DocumentSection]   # 所有章节
+    raw_content: str                  # 原始内容
+    # ... 文档元数据
+```
 
-| 成员 | 值 | 说明 |
-|------|-----|------|
-| `PENDING` | `"pending"` | 待运行 |
-| `RUNNING` | `"running"` | 运行中 |
-| `EVALUATING` | `"evaluating"` | 评估中 |
-| `RETRYING` | `"retrying"` | 回流重试中 |
-| `SUCCEEDED` | `"succeeded"` | 成功 |
-| `FAILED` | `"failed"` | 失败 |
+**依赖关系：**
+- 内部：无（位于数据流最上游）
+- 外部：`pydantic.BaseModel`
 
-##### 枚举 `RunStage(str, Enum)`
-
-运行阶段枚举。
-
-| 成员 | 值 | 说明 |
-|------|-----|------|
-| `CONTEXT_RESEARCH` | `"context_research"` | 上下文研究 |
-| `CHECKPOINT_GENERATION` | `"checkpoint_generation"` | 检查点生成 |
-| `DRAFT_GENERATION` | `"draft_generation"` | 草稿生成 |
-| `EVALUATION` | `"evaluation"` | 评估 |
-| `OUTPUT_DELIVERY` | `"output_delivery"` | 输出交付 |
-| `XMIND_DELIVERY` | `"xmind_delivery"` | XMind 交付 |
-
-##### 类 `EvaluationDimension(BaseModel)`
-
-单个评估维度的结果。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `name` | `str` | *(必填)* | — | 维度名称 |
-| `score` | `float` | `0.0` | — | 得分 |
-| `max_score` | `float` | `1.0` | — | 最大分 |
-| `details` | `str` | `""` | — | 详情说明 |
-| `failed_items` | `list[str]` | `[]` | — | 失败项列表 |
-
-##### 类 `EvaluationReport(BaseModel)`
-
-结构化评估报告，对应 PRD 要求的 `evaluation_report.json`。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `overall_score` | `float` | `0.0` | — | 总体评估分数 |
-| `dimensions` | `list[EvaluationDimension]` | `[]` | — | 各维度评估结果 |
-| `critical_failures` | `list[str]` | `[]` | — | 关键失败项 |
-| `suggested_retry_stage` | `str \| None` | `None` | — | 建议回流阶段 |
-| `improvement_summary` | `str` | `""` | — | 改进摘要 |
-| `comparison_with_previous` | `str` | `""` | — | 与上轮对比 |
-| `pass_threshold` | `float` | `0.7` | — | 通过阈值 |
-
-##### 类 `RetryDecision(BaseModel)`
-
-回流决策记录。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `iteration_index` | `int` | *(必填)* | — | 迭代轮次 |
-| `retry_reason` | `str` | *(必填)* | — | 回流原因 |
-| `target_stage` | `str` | *(必填)* | — | 目标回流阶段 |
-| `trigger_dimension` | `str` | `""` | — | 触发维度 |
-| `previous_score` | `float` | `0.0` | — | 前一轮分数 |
-| `timestamp` | `str` | `""` | — | 时间戳 |
-
-##### 类 `IterationRecord(BaseModel)`
-
-单轮迭代记录，对应 `iteration_log.json` 中的一条记录。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `iteration_index` | `int` | *(必填)* | — | 迭代轮次 |
-| `stage` | `str` | `""` | — | 所在阶段 |
-| `evaluation_score` | `float` | `0.0` | — | 评估分数 |
-| `evaluation_summary` | `str` | `""` | — | 评估摘要 |
-| `retry_reason` | `str` | `""` | — | 回流原因 |
-| `retry_target_stage` | `str` | `""` | — | 回流目标阶段 |
-| `artifacts_snapshot` | `dict[str, str]` | `{}` | — | 产物快照路径 |
-| `timestamp` | `str` | `""` | — | 时间戳 |
-
-##### 类 `RunState(BaseModel)`
-
-完整运行状态对象，对应 `run_state.json`。
-
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `run_id` | `str` | *(必填)* | — | 运行唯一标识 |
-| `status` | `RunStatus` | `RunStatus.PENDING` | — | 当前运行状态 |
-| `current_stage` | `RunStage` | `RunStage.CONTEXT_RESEARCH` | — | 当前运行阶段 |
-| `iteration_index` | `int` | `0` | — | 当前迭代轮次 |
-| `max_iterations` | `int` | `3` | — | 最大迭代次数 |
-| `last_evaluation_score` | `float` | `0.0` | — | 最新评估分数 |
-| `last_evaluation_summary` | `str` | `""` | — | 最新评估摘要 |
-| `retry_reason` | `str` | `""` | — | 最新回流原因 |
-| `artifacts` | `dict[str, str]` | `{}` | — | 产物路径映射 |
-| `timestamps` | `dict[str, str]` | `{}` | — | 各阶段时间戳 |
-| `iteration_history` | `list[IterationRecord]` | `[]` | — | 迭代历史记录 |
-| `retry_decisions` | `list[RetryDecision]` | `[]` | — | 回流决策记录 |
-| `error` | `dict[str, Any] \| None` | `None` | — | 错误信息 |
-| `project_id` | `str \| None` | `None` | — | 项目 ID |
-
-#### §3.8.2 依赖关系
-
-- 内部依赖: 无
-- 外部依赖: `pydantic` (BaseModel, Field), `enum` (Enum), `typing` (Any)
-
-#### §3.8.3 关键逻辑 / 数据流
-
-- `RunState` 是迭代评估回路的中枢，维护完整的运行生命周期状态。
-- `RunStatus` 的 6 个状态对应工作流的状态机：`PENDING → RUNNING → EVALUATING → (RETRYING → RUNNING →)* SUCCEEDED/FAILED`。
-- `RunStage` 的 6 个阶段与 LangGraph 工作流图的节点一一对应。
-- `EvaluationReport.pass_threshold = 0.7` 是评估回路的默认通过阈值。
-- `RunState.max_iterations = 3` 限制最大重试轮次，防止无限回流。
-- `iteration_history` + `retry_decisions` 提供完整的决策审计跟踪。
+**设计说明：**
+- 作为管道的入口模型，将非结构化 PRD 文本转化为结构化的 `DocumentSection` 列表
+- 保留 `raw_content` 以便后续处理阶段按需回溯原文
 
 ---
 
-### §3.9 `state.py`
+### §3.7 `project_models.py`
 
-- **路径**: `app/domain/state.py`
-- **行数**: 71
-- **职责**: 定义 LangGraph 工作流中流转的 TypedDict 状态结构
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（CRUD 模型） |
+| **职责** | 项目上下文的创建/读取/更新三套模型 |
 
-#### §3.9.1 核心内容
+**关键类与签名：**
 
-##### 类 `GlobalState(TypedDict, total=False)`
+```python
+class ProjectContext(BaseModel):
+    # 完整的项目上下文（读取用）
+    id: str
+    name: str
+    # ... 项目配置、历史记录等
 
-主工作流的全局状态。`total=False` 表示所有字段均为可选——与 LangGraph 增量更新模式一致，每个节点只需返回自己修改的字段。
+class ProjectContextCreate(BaseModel):
+    # 创建时的字段子集
+    name: str
+    # ... 必填字段
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `run_id` | `str` | 运行标识 |
-| `file_path` | `str` | PRD 文件路径 |
-| `language` | `str` | 输出语言 |
-| `request` | `CaseGenerationRequest` | 原始请求 |
-| `model_config` | `ModelConfigOverride` | LLM 配置 |
-| `parsed_document` | `ParsedDocument` | 解析后文档 |
-| `research_output` | `ResearchOutput` | 研究输出 |
-| `planned_scenarios` | `list[PlannedScenario]` | 规划场景列表 |
-| `checkpoints` | `list[Checkpoint]` | 检查点列表 |
-| `checkpoint_coverage` | `list[CheckpointCoverage]` | 覆盖度记录 |
-| `mapped_evidence` | `dict[str, list[EvidenceRef]]` | 证据映射表 |
-| `draft_cases` | `list[TestCase]` | 草稿用例 |
-| `test_cases` | `list[TestCase]` | 最终用例 |
-| `quality_report` | `QualityReport` | 质量报告 |
-| `artifacts` | `dict[str, str]` | 产物路径 |
-| `error` | `ErrorInfo` | 错误信息 |
-| `run_state` | `RunState` | 运行状态对象 |
-| `evaluation_report` | `EvaluationReport` | 评估报告 |
-| `iteration_index` | `int` | 当前迭代轮次 |
-| `project_id` | `str` | 项目 ID |
-| `project_context_summary` | `str` | 项目上下文摘要文本 |
+class ProjectContextUpdate(BaseModel):
+    # 更新时的可选字段
+    name: str | None = None
+    # ... 所有字段均可选
+```
 
-共 21 个字段，涵盖工作流全生命周期数据。
+**依赖关系：**
+- 内部：无直接模型依赖
+- 外部：`pydantic.BaseModel`
 
-##### 类 `CaseGenState(TypedDict, total=False)`
-
-用例生成子图的局部状态。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `language` | `str` | 输出语言 |
-| `parsed_document` | `ParsedDocument` | 解析后文档 |
-| `research_output` | `ResearchOutput` | 研究输出 |
-| `planned_scenarios` | `list[PlannedScenario]` | 规划场景列表 |
-| `checkpoints` | `list[Checkpoint]` | 检查点列表 |
-| `checkpoint_coverage` | `list[CheckpointCoverage]` | 覆盖度记录 |
-| `mapped_evidence` | `dict[str, list[EvidenceRef]]` | 证据映射表 |
-| `draft_cases` | `list[TestCase]` | 草稿用例 |
-| `test_cases` | `list[TestCase]` | 最终用例 |
-| `project_context_summary` | `str` | 项目上下文摘要 |
-
-共 10 个字段，是 `GlobalState` 的子集。
-
-#### §3.9.2 依赖关系
-
-- 内部依赖:
-  - `app.domain.api_models` → `CaseGenerationRequest`, `ErrorInfo`, `ModelConfigOverride`
-  - `app.domain.case_models` → `QualityReport`, `TestCase`
-  - `app.domain.checkpoint_models` → `Checkpoint`, `CheckpointCoverage`
-  - `app.domain.document_models` → `ParsedDocument`
-  - `app.domain.research_models` → `EvidenceRef`, `PlannedScenario`, `ResearchOutput`
-  - `app.domain.run_state` → `EvaluationReport`, `RunState`
-- 外部依赖: `typing` (TypedDict)
-
-#### §3.9.3 关键逻辑 / 数据流
-
-- `GlobalState` 是 LangGraph 主工作流的**状态总线**，所有节点通过读写该 TypedDict 的字段进行通信。
-- `CaseGenState` 是用例生成子图的局部状态，仅包含子图节点所需的字段子集，实现状态隔离。
-- `total=False` 是关键设计决策：LangGraph 的增量更新模式要求节点只返回变更字段，而非完整状态。
-- `GlobalState` 引用了除 `project_models.py` 和 `xmind_models.py` 之外的所有域模型文件中的类型，是最大的类型汇聚点。
-- `draft_cases` vs `test_cases` 的区分体现了"草稿 → 质检 → 最终"的两阶段用例产出流程。
+**设计模式：**
+- **三段式 CRUD 模型**：`Context` / `ContextCreate` / `ContextUpdate` 分离读写关注点，`Update` 模型所有字段可选，是 FastAPI 项目的常见模式
 
 ---
 
-### §3.10 `xmind_models.py`
+### §3.8 `research_models.py`
 
-- **路径**: `app/domain/xmind_models.py`
-- **行数**: 55
-- **职责**: 定义 XMind 思维导图生成与交付的数据结构
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（中间阶段模型） |
+| **职责** | PRD 研究阶段的产出物：证据引用、研究事实、计划场景、研究输出汇总 |
 
-#### §3.10.1 核心内容
+**关键类与签名：**
 
-##### 类 `XMindNode(BaseModel)`
+```python
+class EvidenceRef(BaseModel):
+    # 证据引用——指向原始文档中的具体位置
+    source: str                       # 来源标识
+    section: str | None = None        # 所在章节
+    quote: str | None = None          # 原文引用片段
 
-思维导图节点，支持递归嵌套子节点。
+class ResearchFact(BaseModel):
+    id: str                           # 事实唯一标识
+    content: str                      # 事实内容
+    evidence_refs: list[EvidenceRef]  # 支撑证据列表
+    category: str | None = None       # 分类标签
 
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `title` | `str` | *(必填)* | — | 节点标题文本 |
-| `children` | `list[XMindNode]` | `[]` | — | 子节点列表（递归引用） |
-| `markers` | `list[str]` | `[]` | — | 标记列表（对应 XMind 图标） |
-| `notes` | `str` | `""` | — | 备注文本 |
-| `labels` | `list[str]` | `[]` | — | 标签列表 |
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_evidence_refs(cls, values):
+        """防御性归一化：当 LLM 返回单个字符串而非列表时，自动包装为列表"""
+        refs = values.get("evidence_refs")
+        if isinstance(refs, str):
+            values["evidence_refs"] = [refs]
+        return values
 
-**递归结构**: `children: list[XMindNode]` 是自引用类型，Pydantic v2 通过 `from __future__ import annotations` 的延迟注解支持这种递归定义。这使得 `XMindNode` 可以表示任意深度的思维导图树。
+class PlannedScenario(BaseModel):
+    # 从事实推导出的计划测试场景
+    title: str
+    description: str
+    related_fact_ids: list[str]       # 关联的 ResearchFact ID
 
-##### 类 `XMindDeliveryResult(BaseModel)`
+class ResearchOutput(BaseModel):
+    # 研究阶段的完整输出
+    facts: list[ResearchFact]
+    scenarios: list[PlannedScenario]
+    # ... 可能的汇总统计
+```
 
-XMind 交付结果。
+**依赖关系：**
+- 内部：被 `checkpoint_models.Checkpoint.source_fact_ids` 引用
+- 外部：`pydantic.BaseModel`、`pydantic.model_validator`
 
-| 字段 | 类型 | 默认值 | 约束 | 说明 |
-|------|------|--------|------|------|
-| `success` | `bool` | `False` | — | 交付是否成功 |
-| `file_path` | `str` | `""` | — | 生成的 .xmind 文件路径 |
-| `map_url` | `str` | `""` | — | 在线访问地址 |
-| `map_id` | `str` | `""` | — | 思维导图唯一标识 |
-| `error_message` | `str` | `""` | — | 失败时的错误信息 |
-| `delivery_time` | `str` | `datetime.now().isoformat()` | `Field(default_factory=lambda: datetime.now().isoformat())` | 交付时间戳 |
-
-#### §3.10.2 依赖关系
-
-- 内部依赖: 无
-- 外部依赖: `pydantic` (BaseModel, Field), `datetime`
-
-#### §3.10.3 关键逻辑 / 数据流
-
-- `XMindNode` 的递归树结构从 `TestCase` 列表映射而来，通常按 category → priority → individual case 三层组织。
-- `XMindDeliveryResult` 作为 XMind 交付节点的输出，记录在 `RunState.artifacts` 中。
-- `delivery_time` 使用 `default_factory` 而非直接默认值，确保每次实例化时取当前时间。
+**设计模式：**
+- **防御性 model_validator**：针对 LLM 输出不稳定性的务实处理。LLM 可能将本应为 `list[str]` 的字段输出为单个 `str`，验证器在数据进入系统前完成归一化
+- **证据链**：`ResearchFact` → `EvidenceRef` 构成可溯源的证据链条
 
 ---
 
-## §4 目录级依赖关系
+### §3.9 `run_state.py`
 
-### §4.1 内部模块依赖图
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（运行时状态模型） |
+| **职责** | 管理迭代运行状态、质量评估报告和重试决策 |
+
+**关键类与签名：**
+
+```python
+class EvaluationDimension(BaseModel):
+    name: str                         # 评估维度名称（如"覆盖率"、"可执行性"）
+    score: float                      # 该维度得分
+    feedback: str | None = None       # 维度反馈意见
+
+class EvaluationReport(BaseModel):
+    dimensions: list[EvaluationDimension]  # 多维度评估
+    overall_score: float                    # 综合得分
+    pass_: bool                             # 是否通过（注意下划线避免与关键字冲突）
+
+class RetryDecision(BaseModel):
+    should_retry: bool                # 是否需要重试
+    reason: str | None = None         # 决策理由
+    # ... 可能的重试策略参数
+
+class IterationRecord(BaseModel):
+    iteration: int                    # 迭代轮次
+    evaluation: EvaluationReport      # 本轮评估
+    # ... 本轮生成的中间产物引用
+
+class RunState(BaseModel):
+    # 整个运行的状态追踪
+    current_iteration: int = 0
+    iterations: list[IterationRecord] = []
+    # ... 运行配置、超时等
+```
+
+**依赖关系：**
+- 内部：`IterationRecord` 组合 `EvaluationReport`；被 `state.GlobalState` 引用
+- 外部：`pydantic.BaseModel`
+
+**设计模式：**
+- **迭代式优化状态机**：`RunState` → `EvaluationReport` → `RetryDecision` 构成"生成→评估→决策"的闭环
+- **`pass_` 命名**：使用尾部下划线避免 Python 关键字 `pass` 冲突，是 Pydantic 项目中处理保留字的标准做法
+
+---
+
+### §3.10 `state.py`
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（TypedDict 状态容器） |
+| **职责** | 定义 LangGraph 图执行所需的全局状态和子图状态 |
+
+**关键类与签名：**
+
+```python
+class GlobalState(TypedDict):
+    # LangGraph 主图的状态容器
+    parsed_document: ParsedDocument | None
+    research_output: ResearchOutput | None
+    checkpoints: list[Checkpoint]
+    optimized_tree: list[ChecklistNode]        # ← 优化后的检查清单树（核心输出）
+    test_cases: list[TestCase]
+    run_state: RunState | None
+    # ... 其他流转状态字段
+
+class CaseGenState(TypedDict):
+    # 用例生成子图的局部状态
+    checkpoint: Checkpoint                      # 当前处理的 checkpoint
+    # ... 子图专属字段
+```
+
+**依赖关系：**
+- 内部：聚合几乎所有其他模型——`ParsedDocument`、`ResearchOutput`、`Checkpoint`、`ChecklistNode`、`TestCase`、`RunState`
+- 外部：`typing.TypedDict`
+
+**设计模式：**
+- **TypedDict 而非 BaseModel**：LangGraph 要求状态为普通 dict 子类型（`TypedDict`），而非 Pydantic 模型。这是框架约束
+- **状态聚合器**：`GlobalState` 是全部领域模型的"汇聚点"，体现了管道式数据流——上游阶段写入、下游阶段读取
+- **子图隔离**：`CaseGenState` 为用例生成子图提供隔离的状态空间，避免子图意外修改全局状态
+
+---
+
+### §3.11 `xmind_models.py`
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（导出格式模型） |
+| **职责** | XMind 思维导图导出的树结构定义 |
+
+**关键类与签名：**
+
+```python
+class XMindTopic(BaseModel):
+    title: str                                  # 节点标题
+    children: list["XMindTopic"] = []           # 子主题列表（递归引用）
+    # ... 可能的样式、标注等 XMind 特有属性
+```
+
+**依赖关系：**
+- 内部：数据来源于 `ChecklistNode` 树的转换
+- 外部：`pydantic.BaseModel`
+
+**设计说明：**
+- 与 `ChecklistNode` 结构类似但更简单，面向 XMind 文件格式的特定需求
+- 职责单一：仅用于序列化为 `.xmind` 文件，不参与核心业务流程
+
+---
+
+## §4 模型依赖关系
+
+### 4.1 核心数据流管道
 
 ```
-research_models.py          (无内部依赖 — 基础层)
-    ↑
-    ├── case_models.py          (引用 EvidenceRef)
-    ├── checkpoint_models.py    (引用 EvidenceRef)
+ParsedDocument                      （文档解析阶段入口）
     │
-    ├── api_models.py           (引用 case_models, document_models, research_models)
-    │       ↑
-    │       └── state.py        (引用 api_models + 几乎所有其他模块)
+    ▼
+ResearchFact ◄── EvidenceRef        （研究阶段：提取事实 + 证据引用）
     │
-    └── state.py                (引用 research_models, case_models, checkpoint_models,
-                                 document_models, api_models, run_state)
-
-document_models.py          (无内部依赖 — 基础层)
-project_models.py           (无内部依赖 — 基础层)
-run_state.py                (无内部依赖 — 基础层)
-xmind_models.py             (无内部依赖 — 基础层)
+    ▼
+Checkpoint ◄── source_fact_ids      （检查点提炼：事实 → 可测试验证点）
+    │
+    ├──────────────────────┐
+    ▼                      ▼
+ChecklistNode          CanonicalOutlineNode    （树结构组织）
+    │                      │
+    ▼                      ▼
+TestCase ◄── checkpoint_id, evidence_refs      （用例生成）
+    │
+    ▼
+XMindTopic                           （导出格式转换）
 ```
 
-### §4.2 依赖层次
+### 4.2 状态容器关系
 
-| 层级 | 模块 | 说明 |
-|------|------|------|
-| **L0 (基础层)** | `research_models.py`, `document_models.py`, `project_models.py`, `run_state.py`, `xmind_models.py` | 无内部依赖 |
-| **L1 (组合层)** | `case_models.py`, `checkpoint_models.py` | 依赖 L0 的 `EvidenceRef` |
-| **L2 (聚合层)** | `api_models.py` | 依赖 L0 + L1 |
-| **L3 (总线层)** | `state.py` | 依赖 L0 + L1 + L2，汇聚所有类型 |
+```
+GlobalState (TypedDict)
+    ├── parsed_document:  ParsedDocument
+    ├── research_output:  ResearchOutput
+    │                       ├── facts:     list[ResearchFact]
+    │                       └── scenarios: list[PlannedScenario]
+    ├── checkpoints:      list[Checkpoint]
+    ├── optimized_tree:   list[ChecklistNode]      ← 核心产出
+    ├── test_cases:       list[TestCase]
+    └── run_state:        RunState
+                            └── iterations: list[IterationRecord]
+                                              └── evaluation: EvaluationReport
+                                                                └── dimensions: list[EvaluationDimension]
 
-### §4.3 外部依赖汇总
+CaseGenState (TypedDict)              ← 子图局部状态
+    └── checkpoint: Checkpoint
+```
 
-| 包 | 使用模块 | 用途 |
-|----|----------|------|
-| `pydantic` (v2) | 除 `__init__.py` 和 `state.py` 外的所有文件 | BaseModel, Field, ConfigDict, model_validator |
-| `typing` / `typing_extensions` | 全部 | TypedDict, Any, Literal |
-| `enum` | `project_models.py`, `run_state.py` | str Enum |
-| `hashlib` | `checkpoint_models.py` | SHA-256 哈希 |
-| `re` | `research_models.py` | 正则表达式匹配 |
-| `datetime` | `project_models.py`, `xmind_models.py` | 时间戳 |
-| `uuid` | `project_models.py` | UUID 生成 |
+### 4.3 ID 引用链
+
+```
+EvidenceRef.source ──────────────────► 原始文档定位
+ResearchFact.id ◄────────────────────► Checkpoint.source_fact_ids  (多对多)
+Checkpoint.id (SHA-256) ◄────────────► ChecklistNode.checkpoint_id (一对一)
+Checkpoint.id ◄──────────────────────► TestCase.checkpoint_id      (一对多)
+Checkpoint.id ◄──────────────────────► CheckpointPathMapping       (一对一路径映射)
+ResearchFact → EvidenceRef ◄─────────► TestCase.evidence_refs      (溯源链)
+```
 
 ---
 
-## §5 设计模式与架构特征
+## §5 补充观察
 
-### §5.1 贫血领域模型 (Anemic Domain Model)
+### 5.1 ChecklistNode 的 node_type 枚举设计
 
-所有模型类几乎不包含业务逻辑方法（唯一例外是 `ProjectContext.summary_text()`），仅作为数据容器。业务逻辑分布在工作流节点函数中。这是 LangGraph 工作流架构下的典型选择——状态是数据，逻辑是节点。
+`ChecklistNode` 使用 `Literal["root", "group", "expected_result", "precondition_group", "case"]` 定义了五种节点类型，形成了清晰的层次语义：
 
-### §5.2 LLM 输出归一化适配器
+| node_type | 角色 | 典型位置 | 是否叶节点 |
+|---|---|---|---|
+| `root` | 树根（唯一） | 第 0 层 | 否 |
+| `group` | 功能模块/场景分组 | 第 1~N 层 | 否 |
+| `precondition_group` | 前置条件聚合 | group 子节点 | 否 |
+| `expected_result` | 预期结果节点 | group/precondition_group 子节点 | 可能 |
+| `case` | 测试用例叶节点 | 最底层 | 是 |
 
-`research_models.py` 中的三个 `model_validator(mode="before")` 构成了一个**防腐层 (Anti-Corruption Layer)**：
-- `EvidenceRef.coerce_string_reference` — 字符串 / dict / 空值 → 标准化模型
-- `ResearchFact.coerce_requirement_object` — 遗留字段名兼容
-- `ResearchOutput.coerce_dict_items_to_str` — list[dict] → list[str] 批量归一化
+**职责边界分析：**
+- `root` 和 `group` 负责结构组织，不携带测试语义
+- `precondition_group` 是一个巧妙的设计——将共享前置条件的用例聚合在一起，避免了前置条件在每个 `case` 中的重复声明，同时在 XMind 等可视化输出中形成自然的"条件→用例"层次
+- `expected_result` 介于结构节点和叶节点之间，可以独立存在也可以包含子节点，体现了检查清单中"预期结果"这一概念的灵活性
+- 使用 `Literal` 而非 `Enum` 是 Pydantic v2 中更惯用的做法：JSON 序列化直接为字符串，无需额外的枚举值转换
 
-这些验证器吸收了不同 LLM 返回格式的差异，使下游代码无需关心 LLM 输出的结构变化。
+### 5.2 CanonicalOutlineNode vs ChecklistNode 的关系
 
-### §5.3 三层追溯链路
+项目维护了两套树结构，这并非冗余设计，而是服务于不同阶段的不同需求：
 
+| 维度 | ChecklistNode | CanonicalOutlineNode |
+|---|---|---|
+| **服务阶段** | 最终输出与渲染 | 中间处理与路径规范化 |
+| **核心标识** | `node_type`（语义角色） | `full_path`（路径定位） |
+| **checkpoint 关联** | 单个 `checkpoint_id`（叶节点） | `checkpoint_ids` 列表（聚合节点） |
+| **用途** | XMind 导出、前端展示 | checkpoint 去重、路径匹配、树优化 |
+
+**为什么需要两套：**
+1. **路径规范化需求**：`CanonicalOutlineNode` 的 `full_path`（如 `"登录/手机号登录/验证码校验"`）是确定性的字符串路径，便于 checkpoint 的精确定位和去重合并
+2. **语义 vs 结构**：`ChecklistNode` 的 `node_type` 承载了测试领域的语义信息（什么是前置条件组、什么是预期结果），而 `CanonicalOutlineNode` 只关心层次路径结构
+3. **一个节点多个 checkpoint**：`CanonicalOutlineNode.checkpoint_ids` 是列表，允许同一个大纲路径关联多个 checkpoint（后续可能拆分或合并），而 `ChecklistNode` 在叶节点层面是一对一关联
+4. **优化管道**：数据流为 `CanonicalOutlineNode`（规范化）→ 树优化 → `ChecklistNode`（语义化输出），`CheckpointPathMapping`/`CheckpointPathCollection` 作为两者之间的桥梁
+
+### 5.3 Checkpoint 的 SHA-256 ID 生成策略
+
+**优点：**
+1. **幂等性**：相同内容的 Checkpoint 始终生成相同 ID。在迭代优化场景中，如果某轮优化未改变特定 checkpoint 的核心内容，其 ID 不变，下游可安全复用已生成的 TestCase
+2. **天然去重**：多个 ResearchFact 推导出语义相同的 Checkpoint 时，SHA-256 碰撞概率极低，自动去重无需额外逻辑
+3. **无状态生成**：不依赖数据库自增 ID 或 UUID 生成器，纯函数计算，便于分布式或无服务器环境
+4. **可验证性**：任何持有 Checkpoint 内容的一方可独立验证 ID 的正确性
+
+**缺点：**
+1. **内容敏感**：任何微小的描述变更（如多一个空格、措辞调整）都会产生全新 ID，导致下游所有关联（TestCase.checkpoint_id、ChecklistNode.checkpoint_id）失效，引发不必要的重新生成
+2. **哈希字段选择**：参与哈希的字段集合必须精心选择——如果包含 `metadata` 等易变字段，ID 稳定性会大打折扣；如果排除太多字段，可能出现语义不同但 ID 相同的情况
+3. **可读性差**：SHA-256 十六进制字符串（64 字符）对调试和日志阅读不友好，相比 `CP-001` 这样的人类可读 ID 辨识度低
+4. **不可逆**：无法从 ID 推导出生成它的原始内容，调试时必须同时持有完整的 Checkpoint 对象
+
+### 5.4 GlobalState 中 optimized_tree 字段的设计意图
+
+`optimized_tree: list[ChecklistNode]` 是 `GlobalState` 中最关键的字段之一：
+
+1. **"optimized" 的含义**：该字段存储的不是初始生成的检查清单树，而是经过迭代评估和优化后的最终版本。命名暗示了其在"生成→评估→优化"循环中的定位——它是优化的**产出物**
+2. **为什么是 `list` 而非单个 `ChecklistNode`**：虽然逻辑上应有一个 `root` 节点作为树根，但使用 `list` 允许：
+   - 多棵独立子树并存（例如 PRD 包含多个独立功能模块时）
+   - 与 LangGraph 的 reducer 机制兼容（列表更容易做增量合并）
+   - 灵活处理根节点缺失或多根的异常情况
+3. **状态流转**：在 LangGraph 的图执行过程中，`optimized_tree` 在多个节点间流转——树构建节点写入初始版本，评估节点读取并评分，优化节点修改并写回。TypedDict 的可变性使这种流转自然发生
+4. **下游消费**：`optimized_tree` 最终被转换为 `XMindTopic`（XMind 导出）和 `TestCase` 列表（用例输出），是两个主要输出形式的共同源头
+
+### 5.5 模型验证器的防御性设计
+
+`research_models.py` 中的 `model_validator` 体现了对 LLM 输出不确定性的务实应对：
+
+**问题根源：**
+LLM（大语言模型）的 JSON 输出存在固有不稳定性：
+- 要求 `list[str]` 时可能返回单个 `str`（省略了列表包装）
+- 要求 `list[EvidenceRef]` 时可能返回 `str`（将整个对象扁平化为文本）
+- 偶尔返回 `null` 而非空列表 `[]`
+
+**防御策略：**
+```python
+@model_validator(mode="before")
+def coerce_evidence_refs(cls, values):
+    refs = values.get("evidence_refs")
+    if isinstance(refs, str):
+        values["evidence_refs"] = [refs]  # str → list[str] 强制转换
+    return values
 ```
-ResearchFact (fact_id)
-    → Checkpoint (fact_ids[], checkpoint_id)
-        → TestCase (checkpoint_id, evidence_refs[])
-            → EvidenceRef (section_title, line_start, line_end)
-                → DocumentSection (heading, line_start, line_end)
-```
 
-这条链路实现了从 PRD 原文到最终测试用例的完整可追溯性。
+**设计意义：**
+1. **mode="before"**：在 Pydantic 字段验证之前执行，确保归一化在类型检查之前完成。如果使用 `mode="after"`，类型不匹配会直接抛出 `ValidationError`，来不及修复
+2. **仅做安全转换**：`str → list[str]` 是无损的向上转换（任何 `str` 都是合法的单元素 `list[str]`），不会引入语义歧义
+3. **隔离层**：将 LLM 输出的"脏数据处理"封装在模型层，而非散落在调用 LLM 的业务代码中。上层代码可以信任：一旦数据通过 Pydantic 构造，字段类型必然正确
+4. **可扩展性**：如果未来 LLM 出现新的格式异常模式（如返回逗号分隔字符串），只需在验证器中增加一个 `elif` 分支，无需修改业务逻辑
 
-### §5.4 TypedDict 增量状态模式
-
-`state.py` 使用 `TypedDict(total=False)` 而非 Pydantic BaseModel 定义工作流状态，这是 LangGraph 框架的惯用模式：
-- 节点函数返回 `dict` 而非完整状态对象
-- 框架负责将返回值增量合并到全局状态
-- `total=False` 允许部分更新而非强制完整赋值
-
-### §5.5 稳定哈希 ID 生成
-
-`generate_checkpoint_id()` 使用确定性哈希（排序 + casefold + SHA-256）生成 checkpoint ID，支持：
-- 增量更新时的 ID 稳定性
-- 评估回路中跨迭代的可比性
-- 去重检测
-
-### §5.6 str-Enum 双继承序列化
-
-`ProjectType`、`RegulatoryFramework`、`RunStatus`、`RunStage` 均采用 `(str, Enum)` 双继承，确保 JSON 序列化时输出字符串值而非枚举名，与 FastAPI 的 JSON schema 生成和 Pydantic v2 的序列化行为一致。
-
----
-
-## §6 潜在关注点
-
-### §6.1 字段验证宽松
-
-除 `ProjectContext.name` 的 `min_length=1, max_length=200` 和 `description` 的 `max_length=5000` 外，大部分字符串字段无长度/格式约束。`priority` 字段接受任意字符串而非限定为 `P0`-`P3` 枚举；`category`、`risk`、`coverage_status` 等枚举语义字段也使用 `str` 而非 `Literal` 或 `Enum`，存在非法值传入的风险。
-
-### §6.2 `datetime.utcnow()` 弃用警告
-
-`project_models.py` 中 `ProjectContext.created_at` 和 `updated_at` 使用 `datetime.utcnow()`，该方法在 Python 3.12+ 已被标记为弃用（建议改用 `datetime.now(timezone.utc)`）。
-
-### §6.3 `CaseGenerationRun.status` 类型不一致
-
-`CaseGenerationRun.status` 使用 `Literal[...]` 定义，而 `RunState.status` 使用 `RunStatus` 枚举。两者的值域相同但类型不同，在状态转换时需手动 `.value` 转换，是潜在的维护负担。
-
-### §6.4 递归模型的序列化深度
-
-`XMindNode` 的递归 `children` 字段在深层嵌套时可能导致序列化/反序列化性能问题。Pydantic v2 默认不限制递归深度。
-
-### §6.5 `__init__.py` 未定义 `__all__`
-
-包的 `__init__.py` 未导出任何符号，也未定义 `__all__`。消费者需要通过完整路径 `from app.domain.xxx import Yyy` 导入，无法使用 `from app.domain import *`。这是有意的设计（避免命名空间污染），但缺少便捷的 re-export 入口。
-
-### §6.6 model_validator 的鲁棒性边界
-
-`EvidenceRef.coerce_string_reference` 的正则 `EVIDENCE_REF_PATTERN` 要求严格的格式 `"章节 (行号): 摘录"`。如果 LLM 输出格式略有偏差（如多余空格、缺少冒号），会 fall through 到字符串分割逻辑，可能导致 `section_title` 包含行号信息。
-
-### §6.7 `XMindDeliveryResult.delivery_time` 使用本地时间
-
-`delivery_time` 的 `default_factory` 使用 `datetime.now().isoformat()` 生成本地时间字符串，在跨时区部署时缺少时区信息，建议使用 `datetime.now(timezone.utc).isoformat()`。
+这种"宽进严出"的防御性设计是 LLM 应用工程中的最佳实践——在系统边界处做最大限度的输入归一化，在系统内部保持严格的类型约束。
