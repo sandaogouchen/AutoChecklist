@@ -83,6 +83,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "checkpoints": subgraph_result.get("checkpoints", []),
             "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),
+            "checkpoint_paths": subgraph_result.get("checkpoint_paths", []),
+            "canonical_outline_nodes": subgraph_result.get("canonical_outline_nodes", []),
             "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),

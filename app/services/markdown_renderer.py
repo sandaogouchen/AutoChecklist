@@ -79,37 +79,54 @@ def _render_tree(tree: list[ChecklistNode]) -> str:
     lines = ["# 生成的测试用例（优化分组）", ""]
 
     for node in tree:
-        _render_node(node, lines)
+        _render_node(node, lines, heading_level=2)
 
     return "\n".join(lines).strip() + "\n"
 
 
-def _render_node(node: ChecklistNode, lines: list[str]) -> None:
+def _render_node(
+    node: ChecklistNode,
+    lines: list[str],
+    heading_level: int,
+) -> None:
     """递归渲染单个节点。"""
     if node.node_type == "root":
         for child in node.children:
-            _render_node(child, lines)
-    elif node.node_type == "precondition_group":
-        _render_group_node(node, lines)
+            _render_node(child, lines, heading_level=heading_level)
+    elif node.node_type in {"group", "precondition_group"}:
+        _render_group_node(node, lines, heading_level=heading_level)
+    elif node.node_type == "expected_result":
+        _render_expected_result_node(node, lines)
     elif node.node_type == "case":
         _render_case_node(node, lines, heading_level=2)
 
 
-def _render_group_node(node: ChecklistNode, lines: list[str]) -> None:
-    """渲染 precondition_group 节点。"""
-    lines.append(f"## 前置条件: {node.title}")
-    lines.append("")
-
-    if node.preconditions:
-        for pc in node.preconditions:
-            lines.append(f"- {pc}")
+def _render_group_node(
+    node: ChecklistNode,
+    lines: list[str],
+    heading_level: int,
+) -> None:
+    """渲染共享逻辑组节点。"""
+    if not node.hidden:
+        prefix = "#" * heading_level
+        title = (
+            f"前置条件: {node.title}"
+            if node.node_type == "precondition_group"
+            else node.title
+        )
+        lines.append(f"{prefix} {title}")
         lines.append("")
+        next_heading_level = heading_level + 1
+    else:
+        next_heading_level = heading_level
 
     for child in node.children:
-        if child.node_type == "case":
-            _render_case_node(child, lines, heading_level=3)
-        else:
-            _render_node(child, lines)
+        _render_node(child, lines, heading_level=next_heading_level)
+
+
+def _render_expected_result_node(node: ChecklistNode, lines: list[str]) -> None:
+    """渲染预期结果叶子。"""
+    lines.append(f"- {node.title}")
 
 
 def _render_case_node(node: ChecklistNode, lines: list[str], heading_level: int = 3) -> None:
@@ -123,9 +140,9 @@ def _render_case_node(node: ChecklistNode, lines: list[str], heading_level: int 
         lines.append(f"**Checkpoint:** {node.checkpoint_id}")
         lines.append("")
 
-    # 附加前置条件（分组后的额外条件）
+    # 树模式下保留用例完整前置条件
     if node.preconditions:
-        lines.append(f"{prefix}# 附加前置条件")
+        lines.append(f"{prefix}# 前置条件")
         lines.extend(f"- {item}" for item in node.preconditions)
         lines.append("")
 

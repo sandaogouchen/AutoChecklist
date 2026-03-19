@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from app.domain.case_models import TestCase
 from app.domain.state import CaseGenState
+from app.services.checkpoint_outline_planner import attach_expected_results_to_outline
 from app.services.text_normalizer import normalize_test_case
 
 
@@ -51,4 +52,14 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         assembled = normalize_test_case(assembled)
         assembled_cases.append(assembled)
 
-    return {"test_cases": assembled_cases}
+    optimized_tree = attach_expected_results_to_outline(
+        state.get("optimized_tree", []),
+        assembled_cases,
+        state.get("checkpoint_paths", []),
+        state.get("canonical_outline_nodes", []),
+    )
+
+    return {
+        "test_cases": assembled_cases,
+        "optimized_tree": optimized_tree,
+    }

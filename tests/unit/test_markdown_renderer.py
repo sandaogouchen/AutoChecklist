@@ -77,108 +77,104 @@ class TestFlatRender:
 
 def _group_node(
     title: str,
-    preconditions: list[str],
-    case_children: list[ChecklistNode],
+    children: list[ChecklistNode],
+    hidden: bool = False,
 ) -> ChecklistNode:
-    """Helper to build a precondition_group node."""
+    """Helper to build a group node."""
     return ChecklistNode(
         node_id=f"GRP-test",
         title=title,
-        node_type="precondition_group",
-        children=case_children,
-        preconditions=preconditions,
+        node_type="group",
+        children=children,
+        hidden=hidden,
     )
 
 
-def _case_node(
-    tc_id: str,
-    title: str = "测试",
-    preconditions: list[str] | None = None,
-    steps: list[str] | None = None,
-    expected_results: list[str] | None = None,
-    checkpoint_id: str = "",
+def _expected_leaf(
+    title: str,
 ) -> ChecklistNode:
-    """Helper to build a case node."""
+    """Helper to build an expected-result leaf."""
     return ChecklistNode(
-        node_id=f"CASE-{tc_id}",
+        node_id=f"EXP-{title}",
         title=title,
-        node_type="case",
-        test_case_ref=tc_id,
-        preconditions=preconditions or [],
-        steps=steps or ["步骤1"],
-        expected_results=expected_results or ["预期1"],
-        checkpoint_id=checkpoint_id,
+        node_type="expected_result",
     )
 
 
 class TestTreeRender:
     """Tests for tree-mode rendering."""
 
-    def test_single_group(self) -> None:
+    def test_tree_can_render_before_expected_result_leaves_exist(self) -> None:
         tree = [
             _group_node(
-                "用户已登录",
-                ["用户已登录"],
-                [_case_node("TC-001"), _case_node("TC-002")],
-            )
-        ]
-        md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "## 前置条件: 用户已登录" in md
-        assert "TC-001" in md
-        assert "TC-002" in md
-
-    def test_group_preconditions_rendered(self) -> None:
-        tree = [
-            _group_node(
-                "登录 → 网络正常",
-                ["登录", "网络正常"],
-                [_case_node("TC-001")],
-            )
-        ]
-        md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "- 登录" in md
-        assert "- 网络正常" in md
-
-    def test_additional_preconditions(self) -> None:
-        tree = [
-            _group_node(
-                "登录",
-                ["登录"],
-                [_case_node("TC-001", preconditions=["VPN连接"])],
-            )
-        ]
-        md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "附加前置条件" in md
-        assert "- VPN连接" in md
-
-    def test_multiple_groups(self) -> None:
-        tree = [
-            _group_node("条件A", ["条件A"], [_case_node("TC-001")]),
-            _group_node("条件B", ["条件B"], [_case_node("TC-002")]),
-        ]
-        md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "## 前置条件: 条件A" in md
-        assert "## 前置条件: 条件B" in md
-
-    def test_steps_and_expected_results(self) -> None:
-        tree = [
-            _group_node(
-                "登录",
-                ["登录"],
+                "Ad group",
                 [
-                    _case_node(
-                        "TC-001",
-                        steps=["打开页面", "点击按钮"],
-                        expected_results=["页面跳转", "显示成功"],
+                    _group_node(
+                        "CBO",
+                        [
+                            _group_node(
+                                "launch 前",
+                                [
+                                    _group_node("定位 `optimize goal` 区域", []),
+                                ],
+                            )
+                        ],
                     )
                 ],
             )
         ]
         md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "1. 打开页面" in md
-        assert "2. 点击按钮" in md
-        assert "- 页面跳转" in md
-        assert "- 显示成功" in md
+        assert "## Ad group" in md
+        assert "### CBO" in md
+        assert "#### launch 前" in md
+        assert "##### 定位 `optimize goal` 区域" in md
+        assert "[TC-" not in md
+
+    def test_renders_shared_logic_path_only(self) -> None:
+        tree = [
+            _group_node(
+                "系统已部署测试版本",
+                [
+                    _group_node(
+                        "用户已登录系统",
+                        [
+                            _group_node(
+                                "进入 `Create Ad Group` 页面",
+                                [
+                                    _group_node(
+                                        "定位 `optimize goal` 区域",
+                                        [
+                                            _expected_leaf("`optimize goal` 字段在创建阶段显式可见。"),
+                                            _expected_leaf("用户可主动选择 `optimize goal`。"),
+                                        ],
+                                    )
+                                ],
+                            )
+                        ],
+                    )
+                ],
+            )
+        ]
+        md = render_test_cases_markdown([], optimized_tree=tree)
+        assert "## 系统已部署测试版本" in md
+        assert "### 用户已登录系统" in md
+        assert "#### 进入 `Create Ad Group` 页面" in md
+        assert "##### 定位 `optimize goal` 区域" in md
+        assert "- `optimize goal` 字段在创建阶段显式可见。" in md
+        assert "- 用户可主动选择 `optimize goal`。" in md
+        assert "[TC-" not in md
+        assert "Checkpoint" not in md
+        assert "前置条件" not in md
+        assert "步骤" not in md
+
+    def test_multiple_groups(self) -> None:
+        tree = [
+            _group_node("条件A", [_expected_leaf("结果A")]),
+            _group_node("条件B", [_expected_leaf("结果B")]),
+        ]
+        md = render_test_cases_markdown([], optimized_tree=tree)
+        assert "## 条件A" in md
+        assert "## 条件B" in md
 
     def test_root_node_renders_children_only(self) -> None:
         """Root node is transparent — only its children appear."""
@@ -186,18 +182,8 @@ class TestTreeRender:
             node_id="root",
             title="Root",
             node_type="root",
-            children=[_case_node("TC-001", title="子用例")],
+            children=[_group_node("子路径", [_expected_leaf("子结果")])],
         )
         md = render_test_cases_markdown([], optimized_tree=[root])
-        assert "子用例" in md
-
-    def test_case_with_checkpoint_id(self) -> None:
-        tree = [
-            _group_node(
-                "登录",
-                ["登录"],
-                [_case_node("TC-001", checkpoint_id="CP-xyz")],
-            )
-        ]
-        md = render_test_cases_markdown([], optimized_tree=tree)
-        assert "**Checkpoint:** CP-xyz" in md
+        assert "子路径" in md
+        assert "子结果" in md

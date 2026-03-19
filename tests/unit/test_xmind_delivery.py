@@ -92,20 +92,39 @@ def _make_optimized_tree() -> list[ChecklistNode]:
     return [
         ChecklistNode(
             node_id="GRP-001",
-            title="用户已登录",
-            node_type="precondition_group",
-            preconditions=["用户已登录"],
+            title="系统已部署测试版本",
+            node_type="group",
             children=[
                 ChecklistNode(
-                    node_id="CASE-TC-OPT-001",
-                    title="优化树测试用例",
-                    node_type="case",
-                    test_case_ref="TC-OPT-001",
-                    preconditions=["已进入创建页"],
-                    steps=["执行步骤"],
-                    expected_results=["显示正确结果"],
-                    priority="P1",
-                    category="functional",
+                    node_id="GRP-002",
+                    title="用户已登录系统",
+                    node_type="group",
+                    children=[
+                        ChecklistNode(
+                            node_id="GRP-003",
+                            title="进入 `Create Ad Group` 页面",
+                            node_type="group",
+                            children=[
+                                ChecklistNode(
+                                    node_id="GRP-004",
+                                    title="定位 `optimize goal` 区域",
+                                    node_type="group",
+                                    children=[
+                                        ChecklistNode(
+                                            node_id="EXP-001",
+                                            title="`optimize goal` 字段在创建阶段显式可见。",
+                                            node_type="expected_result",
+                                        ),
+                                        ChecklistNode(
+                                            node_id="EXP-002",
+                                            title="用户可主动选择 `optimize goal`。",
+                                            node_type="expected_result",
+                                        ),
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
                 )
             ],
         )
@@ -314,7 +333,7 @@ class TestXMindDeliveryAgent:
     """测试 XMindDeliveryAgent 的交付流程。"""
 
     def test_uses_optimized_tree_for_xmind_output(self, tmp_path: Path) -> None:
-        """传入 optimized_tree 时，XMind 应切换到前置条件树模式。"""
+        """传入 optimized_tree 时，XMind 应切换到逻辑路径树模式。"""
         run_dir = tmp_path / "tree-run"
         connector = FileXMindConnector(output_dir=run_dir)
         builder = XMindPayloadBuilder()
@@ -339,7 +358,16 @@ class TestXMindDeliveryAgent:
             content = json.loads(zf.read("content.json"))
 
         root_children = content[0]["rootTopic"]["children"]["attached"]
-        assert root_children[0]["title"] == "[前置] 用户已登录"
+        assert root_children[0]["title"] == "系统已部署测试版本"
+        level2 = root_children[0]["children"]["attached"][0]
+        assert level2["title"] == "用户已登录系统"
+        level3 = level2["children"]["attached"][0]
+        assert level3["title"] == "进入 `Create Ad Group` 页面"
+        level4 = level3["children"]["attached"][0]
+        assert level4["title"] == "定位 `optimize goal` 区域"
+        leaf_titles = [node["title"] for node in level4["children"]["attached"]]
+        assert "`optimize goal` 字段在创建阶段显式可见。" in leaf_titles
+        assert "用户可主动选择 `optimize goal`。" in leaf_titles
 
     def test_success_delivery(self, tmp_path: Path) -> None:
         """验证完整的成功交付流程。

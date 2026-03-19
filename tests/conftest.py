@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 
 class FakeLLMClient:
     """测试用 LLM 客户端，返回预定义的结构化响应。
 
-    支持 ResearchOutput、CheckpointDraftCollection 和 DraftCaseCollection 三种模型。
+    支持 ResearchOutput、CheckpointDraftCollection、DraftCaseCollection，
+    以及 checklist 语义归一化所需的两阶段结构化模型。
     """
 
     def generate_structured(self, **kwargs):
         response_model = kwargs["response_model"]
+        user_prompt = kwargs.get("user_prompt", "")
+        checkpoint_ids = re.findall(r"Checkpoint ID:\s*(CP-[A-Za-z0-9_-]+)", user_prompt)
 
         if response_model.__name__ == "ResearchOutput":
             return response_model(
@@ -79,6 +84,179 @@ class FakeLLMClient:
                 }
             )
 
+        if response_model.__name__ == "CanonicalOutlineNodeCollection":
+            return response_model.model_validate(
+                {
+                    "canonical_nodes": [
+                        {
+                            "node_id": "node-login",
+                            "semantic_key": "login",
+                            "display_text": "短信登录",
+                            "kind": "business_object",
+                            "visibility": "visible",
+                            "aliases": ["SMS login"],
+                        },
+                        {
+                            "node_id": "node-open-login",
+                            "semantic_key": "open_login_page",
+                            "display_text": "打开登录页",
+                            "kind": "page",
+                            "visibility": "visible",
+                            "aliases": ["Open login page"],
+                        },
+                        {
+                            "node_id": "node-request-code",
+                            "semantic_key": "request_sms_code",
+                            "display_text": "请求短信验证码",
+                            "kind": "action",
+                            "visibility": "visible",
+                            "aliases": ["Request SMS code"],
+                        },
+                        {
+                            "node_id": "node-submit-valid-code",
+                            "semantic_key": "submit_valid_code",
+                            "display_text": "提交有效验证码",
+                            "kind": "action",
+                            "visibility": "visible",
+                            "aliases": ["Submit valid code"],
+                        },
+                        {
+                            "node_id": "node-code-expired",
+                            "semantic_key": "sms_code_expired",
+                            "display_text": "验证码已过期",
+                            "kind": "context",
+                            "visibility": "visible",
+                            "aliases": ["Code expired"],
+                        },
+                        {
+                            "node_id": "node-submit-expired-code",
+                            "semantic_key": "submit_expired_code",
+                            "display_text": "提交已过期验证码",
+                            "kind": "action",
+                            "visibility": "visible",
+                            "aliases": ["Submit expired code"],
+                        },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "CheckpointPathCollection":
+            return response_model.model_validate(
+                {
+                    "checkpoint_paths": [
+                        {
+                            "checkpoint_id": checkpoint_ids[0] if checkpoint_ids else "CP-test0001",
+                            "path_node_ids": [
+                                "node-login",
+                                "node-open-login",
+                                "node-request-code",
+                                "node-submit-valid-code",
+                            ],
+                        },
+                        {
+                            "checkpoint_id": checkpoint_ids[1] if len(checkpoint_ids) > 1 else "CP-test0002",
+                            "path_node_ids": [
+                                "node-login",
+                                "node-open-login",
+                                "node-code-expired",
+                                "node-submit-expired-code",
+                            ],
+                        },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "SemanticNodeCollection":
+            return response_model.model_validate(
+                {
+                    "canonical_nodes": [
+                        {
+                            "node_id": "node-registered-phone",
+                            "semantic_key": "registered_phone",
+                            "display_text": "用户有已注册手机号",
+                            "kind": "precondition",
+                            "hidden": False,
+                            "aliases": ["User has a registered phone number"],
+                        },
+                        {
+                            "node_id": "node-open-login",
+                            "semantic_key": "open_login_page",
+                            "display_text": "打开登录页",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Open login page"],
+                        },
+                        {
+                            "node_id": "node-request-code",
+                            "semantic_key": "request_sms_code",
+                            "display_text": "请求短信验证码",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Request SMS code"],
+                        },
+                        {
+                            "node_id": "node-submit-valid-code",
+                            "semantic_key": "submit_valid_code",
+                            "display_text": "提交有效验证码",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Submit valid code"],
+                        },
+                        {
+                            "node_id": "node-requested-code",
+                            "semantic_key": "requested_sms_code",
+                            "display_text": "用户已请求短信验证码",
+                            "kind": "precondition",
+                            "hidden": False,
+                            "aliases": ["User has requested an SMS code"],
+                        },
+                        {
+                            "node_id": "node-wait-expire",
+                            "semantic_key": "wait_until_expired",
+                            "display_text": "等待验证码过期",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Wait for code to expire"],
+                        },
+                        {
+                            "node_id": "node-submit-expired-code",
+                            "semantic_key": "submit_expired_code",
+                            "display_text": "提交已过期验证码",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Submit expired code"],
+                        },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "SemanticPathCollection":
+            return response_model.model_validate(
+                {
+                    "semantic_paths": [
+                        {
+                            "test_case_id": "TC-001",
+                            "path_node_ids": [
+                                "node-registered-phone",
+                                "node-open-login",
+                                "node-request-code",
+                                "node-submit-valid-code",
+                            ],
+                            "expected_results": ["User reaches the dashboard"],
+                        },
+                        {
+                            "test_case_id": "TC-002",
+                            "path_node_ids": [
+                                "node-requested-code",
+                                "node-wait-expire",
+                                "node-submit-expired-code",
+                            ],
+                            "expected_results": ["Error message is displayed"],
+                        },
+                    ]
+                }
+            )
+
         # DraftCaseCollection（默认）
         return response_model.model_validate(
             {
@@ -95,7 +273,7 @@ class FakeLLMClient:
                         "expected_results": ["User reaches the dashboard"],
                         "priority": "P1",
                         "category": "functional",
-                        "checkpoint_id": "CP-test0001",
+                        "checkpoint_id": checkpoint_ids[0] if checkpoint_ids else "CP-test0001",
                         "evidence_refs": [
                             {
                                 "section_title": "Acceptance Criteria",
@@ -117,7 +295,7 @@ class FakeLLMClient:
                         "expected_results": ["Error message is displayed"],
                         "priority": "P1",
                         "category": "edge_case",
-                        "checkpoint_id": "CP-test0002",
+                        "checkpoint_id": checkpoint_ids[1] if len(checkpoint_ids) > 1 else "CP-test0002",
                         "evidence_refs": [
                             {
                                 "section_title": "Acceptance Criteria",
@@ -200,6 +378,91 @@ class FakeLLMClientLowQuality:
                             "fact_ids": ["FACT-001"],
                             "preconditions": [],
                         },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "CanonicalOutlineNodeCollection":
+            return response_model.model_validate(
+                {
+                    "canonical_nodes": [
+                        {
+                            "node_id": "node-login",
+                            "semantic_key": "login",
+                            "display_text": "短信登录",
+                            "kind": "business_object",
+                            "visibility": "visible",
+                            "aliases": ["SMS login"],
+                        },
+                        {
+                            "node_id": "node-open-page",
+                            "semantic_key": "open_page",
+                            "display_text": "打开页面",
+                            "kind": "page",
+                            "visibility": "visible",
+                            "aliases": ["Open page"],
+                        },
+                        {
+                            "node_id": "node-click-login",
+                            "semantic_key": "click_login",
+                            "display_text": "点击登录",
+                            "kind": "action",
+                            "visibility": "visible",
+                            "aliases": ["Click login"],
+                        },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "CheckpointPathCollection":
+            return response_model.model_validate(
+                {
+                    "checkpoint_paths": [
+                        {
+                            "checkpoint_id": checkpoint_ids[0] if checkpoint_ids else "CP-test0001",
+                            "path_node_ids": [
+                                "node-login",
+                                "node-open-page",
+                                "node-click-login",
+                            ],
+                        }
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "SemanticNodeCollection":
+            return response_model.model_validate(
+                {
+                    "canonical_nodes": [
+                        {
+                            "node_id": "node-open-page",
+                            "semantic_key": "open_page",
+                            "display_text": "打开页面",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Open page"],
+                        },
+                        {
+                            "node_id": "node-click-login",
+                            "semantic_key": "click_login",
+                            "display_text": "点击登录",
+                            "kind": "action",
+                            "hidden": False,
+                            "aliases": ["Click login"],
+                        },
+                    ]
+                }
+            )
+
+        if response_model.__name__ == "SemanticPathCollection":
+            return response_model.model_validate(
+                {
+                    "semantic_paths": [
+                        {
+                            "test_case_id": "TC-001",
+                            "path_node_ids": ["node-open-page", "node-click-login"],
+                            "expected_results": [],
+                        }
                     ]
                 }
             )

@@ -12,6 +12,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.clients.llm import LLMClient
+from app.domain.checklist_models import CanonicalOutlineNode, CheckpointPathMapping
 from app.domain.case_models import TestCase
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.state import CaseGenState
@@ -21,7 +22,13 @@ _SYSTEM_PROMPT = (
     "You write concise manual QA test cases as structured JSON. "
     "Each test case MUST include an id, title, steps, expected_results, evidence_refs, "
     "and a checkpoint_id field that references the checkpoint it was generated from. "
-    "Always include ids, steps, expected_results, and evidence_refs.\n\n"
+    "Always include ids, steps, expected_results, and evidence_refs.\n"
+    "Fixed hierarchy paths are supplied by the system.\n"
+    "Do not restate or merge that hierarchy into testcase titles, preconditions, "
+    "or summary headings.\n"
+    "Do not restate merged parent phrases such as `处于 CBO 的 Ad group 配置场景`.\n"
+    "Generate only the leaf testcase title, concrete steps, and expected_results "
+    "under the supplied path.\n\n"
     "【语言要求】\n"
     "- title 字段使用中文书写，简要概括测试目标。\n"
     "- steps 字段使用中文书写操作步骤，其中 UI 元素、按钮文案、字段名等"
@@ -56,10 +63,17 @@ def build_draft_writer_node(llm_client: LLMClient):
     def draft_writer_node(state: CaseGenState) -> CaseGenState:
         """根据 checkpoint 和证据调用 LLM 生成测试用例草稿。"""
         checkpoints = state.get("checkpoints", [])
+        checkpoint_paths = state.get("checkpoint_paths", [])
+        canonical_outline_nodes = state.get("canonical_outline_nodes", [])
 
         if checkpoints:
             prompt_lines = [
-                _format_checkpoint_prompt(index, cp)
+                _format_checkpoint_prompt(
+                    index,
+                    cp,
+                    checkpoint_paths,
+                    canonical_outline_nodes,
+                )
                 for index, cp in enumerate(checkpoints, start=1)
             ]
         else:
@@ -87,7 +101,12 @@ def build_draft_writer_node(llm_client: LLMClient):
     return draft_writer_node
 
 
-def _format_checkpoint_prompt(index: int, checkpoint: Checkpoint) -> str:
+def _format_checkpoint_prompt(
+    index: int,
+    checkpoint: Checkpoint,
+    checkpoint_paths: list[CheckpointPathMapping],
+    canonical_outline_nodes: list[CanonicalOutlineNode],
+) -> str:
     """格式化单个 checkpoint 的 prompt 片段。"""
     lines = [
         f"Checkpoint {index}: {checkpoint.title}",
@@ -104,6 +123,19 @@ def _format_checkpoint_prompt(index: int, checkpoint: Checkpoint) -> str:
         lines.append("Preconditions:")
         lines.extend(f"- {pc}" for pc in checkpoint.preconditions)
 
+    path_context = _resolve_path_context(
+        checkpoint.checkpoint_id,
+        checkpoint_paths,
+        canonical_outline_nodes,
+    )
+    if path_context:
+        lines.append("Fixed hierarchy path:")
+        lines.extend(f"- {item}" for item in path_context)
+        lines.append(
+            "The hierarchy above already exists in optimized_tree. "
+            "Generate only the leaf testcase content below this path."
+        )
+
     lines.append(f"Source facts: {', '.join(checkpoint.fact_ids)}")
 
     if checkpoint.evidence_refs:
@@ -118,6 +150,29 @@ def _format_checkpoint_prompt(index: int, checkpoint: Checkpoint) -> str:
     )
 
     return "\n".join(lines)
+
+
+def _resolve_path_context(
+    checkpoint_id: str,
+    checkpoint_paths: list[CheckpointPathMapping],
+    canonical_outline_nodes: list[CanonicalOutlineNode],
+) -> list[str]:
+    path_mapping = next(
+        (item for item in checkpoint_paths if item.checkpoint_id == checkpoint_id),
+        None,
+    )
+    if path_mapping is None:
+        return []
+
+    node_lookup = {node.node_id: node for node in canonical_outline_nodes}
+    resolved: list[str] = []
+    for node_id in path_mapping.path_node_ids:
+        node = node_lookup.get(node_id)
+        if node is None or node.visibility == "hidden":
+            continue
+        resolved.append(node.display_text)
+
+    return resolved
 
 
 def _format_scenario_prompt(index: int, scenario, evidence_refs: list) -> str:

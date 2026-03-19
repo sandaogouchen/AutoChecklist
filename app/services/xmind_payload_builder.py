@@ -84,36 +84,57 @@ class XMindPayloadBuilder:
         self, root_title: str, tree: list[ChecklistNode]
     ) -> XMindNode:
         """从 optimized_tree 构建 XMind 根节点。"""
-        children = [self._build_tree_node(node) for node in tree]
+        children: list[XMindNode] = []
+        for node in tree:
+            children.extend(self._build_tree_children(node))
         return XMindNode(title=root_title, children=children)
 
-    def _build_tree_node(self, node: ChecklistNode) -> XMindNode:
-        """递归将 ChecklistNode 转为 XMindNode。"""
+    def _build_tree_children(self, node: ChecklistNode) -> list[XMindNode]:
+        """递归将 ChecklistNode 转为 XMindNode 列表。"""
         if node.node_type == "root":
-            return XMindNode(
-                title=node.title or "Root",
-                children=[self._build_tree_node(c) for c in node.children],
-            )
-        elif node.node_type == "precondition_group":
-            return self._build_group_xmind_node(node)
-        else:  # case
-            return self._build_case_xmind_node(node)
+            children: list[XMindNode] = []
+            for child in node.children:
+                children.extend(self._build_tree_children(child))
+            return children
+
+        if node.node_type in {"group", "precondition_group"}:
+            if node.hidden:
+                children: list[XMindNode] = []
+                for child in node.children:
+                    children.extend(self._build_tree_children(child))
+                return children
+            return [self._build_group_xmind_node(node)]
+
+        if node.node_type == "expected_result":
+            return [self._build_expected_result_xmind_node(node)]
+
+        return [self._build_case_xmind_node(node)]
 
     def _build_group_xmind_node(self, node: ChecklistNode) -> XMindNode:
-        """将 precondition_group 节点转为 XMindNode。"""
+        """将共享逻辑组节点转为 XMindNode。"""
         # 前置条件作为备注
         notes_parts: list[str] = []
         if node.preconditions:
             notes_parts.append("前置条件:")
             notes_parts.extend(f"  - {pc}" for pc in node.preconditions)
 
-        children = [self._build_tree_node(c) for c in node.children]
+        children: list[XMindNode] = []
+        for child in node.children:
+            children.extend(self._build_tree_children(child))
 
         return XMindNode(
-            title=f"[前置] {node.title}",
+            title=(
+                f"[前置] {node.title}"
+                if node.node_type == "precondition_group"
+                else node.title
+            ),
             children=children,
             notes="\n".join(notes_parts),
         )
+
+    def _build_expected_result_xmind_node(self, node: ChecklistNode) -> XMindNode:
+        """将预期结果叶子节点转为 XMindNode。"""
+        return XMindNode(title=node.title)
 
     def _build_case_xmind_node(self, node: ChecklistNode) -> XMindNode:
         """将 case 节点转为 XMindNode。"""
@@ -129,11 +150,11 @@ class XMindPayloadBuilder:
 
         leaf_children: list[XMindNode] = []
 
-        # 附加前置条件
+        # 树模式下保留用例完整前置条件
         if node.preconditions:
             leaf_children.append(
                 XMindNode(
-                    title="附加前置条件",
+                    title="前置条件",
                     children=[XMindNode(title=pc) for pc in node.preconditions],
                 )
             )

@@ -15,7 +15,11 @@ from typing import TypedDict
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
-from app.domain.checklist_models import ChecklistNode
+from app.domain.checklist_models import (
+    CanonicalOutlineNode,
+    ChecklistNode,
+    CheckpointPathMapping,
+)
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 from app.domain.run_state import EvaluationReport, RunState
@@ -38,6 +42,8 @@ class GlobalState(TypedDict, total=False):
     planned_scenarios: list[PlannedScenario]
     checkpoints: list[Checkpoint]
     checkpoint_coverage: list[CheckpointCoverage]
+    checkpoint_paths: list[CheckpointPathMapping]
+    canonical_outline_nodes: list[CanonicalOutlineNode]
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
@@ -69,6 +75,8 @@ class CaseGenState(TypedDict, total=False):
     planned_scenarios: list[PlannedScenario]
     checkpoints: list[Checkpoint]
     checkpoint_coverage: list[CheckpointCoverage]
+    checkpoint_paths: list[CheckpointPathMapping]
+    canonical_outline_nodes: list[CanonicalOutlineNode]
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
