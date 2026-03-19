@@ -69,6 +69,7 @@ class PlatformDispatcher:
                     test_cases=run.test_cases,
                     checkpoints=workflow_result.get("checkpoints", []),
                     research_output=run.research_summary,
+                    optimized_tree=workflow_result.get("optimized_tree", []),
                     title=run.input.file_path if run.input else "",
                     output_dir=run_dir,
                 )

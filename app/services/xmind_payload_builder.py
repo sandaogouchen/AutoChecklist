@@ -65,7 +65,7 @@ class XMindPayloadBuilder:
         Returns:
             XMind 根节点。
         """
-        root_title = title or f"测试用例 - {run_id}" if run_id else "测试用例"
+        root_title = title or (f"测试用例 - {run_id}" if run_id else "测试用例")
 
         # 优先使用 optimized_tree 模式
         if optimized_tree:
