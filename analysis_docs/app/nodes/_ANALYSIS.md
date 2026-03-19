@@ -170,7 +170,7 @@ checkpoint_outline_planner → evidence_mapper → draft_writer → structure_as
          ↓                                          ↓                    ↓
   CanonicalOutlineNode树              路径上下文注入(prompt)        挂载expected_results
          ↓                                          ↓                    ↓
-   optimized_tree                          TestCase生成            最终ChecklistNode树
+optimized_tree                          TestCase生成            最终ChecklistNode树
 ```
 
 ### §5.2 checklist_optimizer 被架空的影响分析
