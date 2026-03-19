@@ -130,35 +130,37 @@ class TestPreconditionGrouper:
         assert len(group.children) == 2
 
     def test_no_preconditions_no_group(self) -> None:
-        """Cases without preconditions are never grouped."""
+        """Cases without keywords should fall back to an '其他' bucket."""
         cases = [_tc("TC-001"), _tc("TC-002")]
         result = PreconditionGrouper().group(cases)
-        # Empty key → each case becomes independent
-        assert all(n.node_type == "case" for n in result)
+        assert len(result) == 1
+        assert result[0].node_type == "precondition_group"
+        assert result[0].title == "其他"
 
     def test_mixed_grouped_and_ungrouped(self) -> None:
-        """Mix of groupable and ungroupable cases."""
+        """Shared keyword cases group; unmatched cases go to '其他'."""
         cases = [
-            _tc("TC-001", preconditions=["登录"]),
-            _tc("TC-002", preconditions=["登录"]),
-            _tc("TC-003", preconditions=["未登录"]),
+            _tc("TC-001", preconditions=["用户已进入 `Create Ad Group` 页面", "用户已定位到 `optimize goal` 区域"]),
+            _tc("TC-002", preconditions=["系统已展示 `optimize goal` 字段", "用户可编辑 `optimize goal`"]),
+            _tc("TC-003", preconditions=["系统已部署测试版本", "用户已登录系统"]),
         ]
         result = PreconditionGrouper().group(cases)
-        types = [n.node_type for n in result]
-        assert "precondition_group" in types
-        assert "case" in types
+        titles = [n.title for n in result]
+        assert "optimize goal" in titles
+        assert "其他" in titles
 
     def test_different_preconditions_separate_groups(self) -> None:
-        """Different precondition sets → separate groups."""
+        """Different primary keywords should create separate groups."""
         cases = [
-            _tc("TC-001", preconditions=["A", "B"]),
-            _tc("TC-002", preconditions=["A", "B"]),
-            _tc("TC-003", preconditions=["C", "D"]),
-            _tc("TC-004", preconditions=["C", "D"]),
+            _tc("TC-001", preconditions=["用户可见 `optimize goal` 字段"]),
+            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段"]),
+            _tc("TC-003", preconditions=["广告主下存在 2 个可用 TTMS account"]),
+            _tc("TC-004", preconditions=["用户必须选择 TTMS account"]),
         ]
         result = PreconditionGrouper().group(cases)
         groups = [n for n in result if n.node_type == "precondition_group"]
         assert len(groups) == 2
+        assert {g.title for g in groups} == {"optimize goal", "TTMS account"}
 
     def test_punctuation_normalization_groups_together(self) -> None:
         """Chinese vs English punctuation should be treated as identical."""
@@ -170,17 +172,38 @@ class TestPreconditionGrouper:
         groups = [n for n in result if n.node_type == "precondition_group"]
         assert len(groups) == 1
 
-    def test_additional_preconditions_in_case_node(self) -> None:
-        """Case node should only contain additional preconditions."""
+    def test_shared_keyword_groups_different_preconditions_together(self) -> None:
+        """Cases should group by shared keyword even when full lists differ."""
         cases = [
-            _tc("TC-001", preconditions=["共享条件", "额外条件A"]),
-            _tc("TC-002", preconditions=["共享条件", "额外条件B"]),
+            _tc("TC-001", preconditions=["用户已定位到 `secondary goal` 区域", "系统已部署测试版本"]),
+            _tc("TC-002", preconditions=["用户可查看 `secondary goal` 选项", "广告主已启用白名单"]),
         ]
-        # Both share "共享条件" but differ on second item → not grouped
-        # (different tuple keys)
         result = PreconditionGrouper().group(cases)
-        # Each case has a unique precondition set → case nodes, not grouped
-        assert len(result) == 2
+        assert len(result) == 1
+        assert result[0].title == "secondary goal"
+        assert len(result[0].children) == 2
+
+    def test_generic_words_fall_back_to_other_group(self) -> None:
+        """Generic words like 用户/系统/页面 should not become top-level groups."""
+        cases = [
+            _tc("TC-001", preconditions=["用户已登录系统", "用户已进入页面"]),
+            _tc("TC-002", preconditions=["系统已部署测试版本", "用户已具备操作权限"]),
+        ]
+        result = PreconditionGrouper().group(cases)
+        assert len(result) == 1
+        assert result[0].title == "其他"
+
+    def test_case_preconditions_preserved_in_keyword_group(self) -> None:
+        """Case node should keep full preconditions in keyword grouping mode."""
+        cases = [
+            _tc("TC-001", preconditions=["用户已定位到 `optimize goal` 区域", "系统已部署测试版本"]),
+            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段", "用户已登录系统"]),
+        ]
+        result = PreconditionGrouper().group(cases)
+        group = result[0]
+        assert group.title == "optimize goal"
+        assert group.children[0].preconditions == cases[0].preconditions
+        assert group.children[1].preconditions == cases[1].preconditions
 
     def test_data_preservation(self) -> None:
         """Case node preserves steps, expected_results, priority, etc."""
@@ -207,8 +230,8 @@ class TestPreconditionGrouper:
     def test_node_id_formats(self) -> None:
         """Verify node_id naming conventions."""
         cases = [
-            _tc("TC-001", preconditions=["登录"]),
-            _tc("TC-002", preconditions=["登录"]),
+            _tc("TC-001", preconditions=["用户可见 `optimize goal` 字段"]),
+            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段"]),
         ]
         result = PreconditionGrouper().group(cases)
         group = result[0]

@@ -15,9 +15,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from typing import Sequence
 
 from app.domain.case_models import TestCase
@@ -30,6 +31,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _MAX_TREE_DEPTH = 3
 _MIN_GROUP_SIZE = 2
+_OTHER_GROUP_TITLE = "其他"
+
+_GENERIC_ASCII_TERMS = {
+    "create",
+    "create ad group",
+    "create ad",
+    "ad group",
+    "create creative",
+    "creative",
+    "web & app",
+    "page",
+    "field",
+    "user",
+    "system",
+    "goal",
+    "account",
+    "app",
+    "web",
+}
 
 # 中文标点 → 英文标点映射表
 _PUNCT_MAP = str.maketrans(
@@ -82,6 +102,105 @@ def _longest_common_prefix(strings: Sequence[str]) -> str:
     return shortest
 
 
+def _normalize_keyword_key(text: str) -> str:
+    """归一化关键词键，便于跨大小写和空白匹配。"""
+    return " ".join(text.split()).casefold()
+
+
+def _is_generic_ascii_candidate(candidate: str) -> bool:
+    """过滤过于通用的英文候选词。"""
+    key = _normalize_keyword_key(candidate)
+    if not key or key.isdigit():
+        return True
+    if key in _GENERIC_ASCII_TERMS:
+        return True
+
+    words = key.split()
+    if len(words) == 1:
+        token = words[0]
+        if len(token) <= 2 and not token.isupper():
+            return True
+        if not (token.isupper() or any(ch.isdigit() for ch in token) or "_" in token):
+            return True
+
+    if len(words) == 2 and key in {"web &", "& app"}:
+        return True
+    return False
+
+
+def _iter_ascii_candidates(text: str) -> list[str]:
+    """提取英文/缩写关键词候选。"""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for raw_segment in re.findall(r"[A-Za-z0-9][A-Za-z0-9_&+/\- ]*[A-Za-z0-9]", text):
+        words = re.findall(r"[A-Za-z0-9_&+/\-]+", raw_segment)
+        if not words:
+            continue
+
+        max_ngram = min(3, len(words))
+        for size in range(max_ngram, 1, -1):
+            for start in range(len(words) - size + 1):
+                phrase = " ".join(words[start:start + size]).strip()
+                if _is_generic_ascii_candidate(phrase):
+                    continue
+
+                key = _normalize_keyword_key(phrase)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(phrase)
+
+        for token in words:
+            if _is_generic_ascii_candidate(token):
+                continue
+            key = _normalize_keyword_key(token)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(token)
+
+    return candidates
+
+
+def _extract_keyword_candidates(text: str) -> list[str]:
+    """从单条前置条件中提取关键词候选。"""
+    normalized = _normalize_precondition(text)
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for phrase in re.findall(r"`([^`]+)`", normalized):
+        ascii_candidates = _iter_ascii_candidates(phrase)
+        if ascii_candidates:
+            phrase_candidates = ascii_candidates
+        elif re.search(r"[A-Za-z]", phrase):
+            phrase_candidates = [] if _is_generic_ascii_candidate(phrase) else [phrase.strip()]
+        else:
+            phrase_candidates = [phrase.strip()]
+
+        for candidate in phrase_candidates:
+            key = _normalize_keyword_key(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate.strip())
+
+    for candidate in _iter_ascii_candidates(normalized):
+        key = _normalize_keyword_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+
+    return candidates
+
+
+def _keyword_score(keyword: str, frequency: int) -> tuple[int, int, int]:
+    """为关键词排序打分。"""
+    words = keyword.split()
+    return (frequency, len(words), len(keyword))
+
+
 # ---------------------------------------------------------------------------
 # 分组引擎
 # ---------------------------------------------------------------------------
@@ -89,7 +208,7 @@ def _longest_common_prefix(strings: Sequence[str]) -> str:
 class PreconditionGrouper:
     """前置条件分组引擎。
 
-    将 list[TestCase] 按 preconditions 相同性分组，
+    将 list[TestCase] 按主关键词单归属分组，
     返回 list[ChecklistNode]（根节点的 children）。
     """
 
@@ -106,38 +225,88 @@ class PreconditionGrouper:
         if not test_cases:
             return []
 
-        buckets = self._bucket_by_preconditions(test_cases)
+        buckets = self._bucket_by_keyword(test_cases)
         return self._build_grouped_tree(buckets)
 
     # ----- 内部方法 -----
 
-    def _bucket_by_preconditions(
+    def _bucket_by_keyword(
         self, test_cases: list[TestCase]
-    ) -> OrderedDict[tuple[str, ...], list[TestCase]]:
-        """按规范化后的 precondition tuple 分桶，保持插入顺序。"""
-        buckets: OrderedDict[tuple[str, ...], list[TestCase]] = OrderedDict()
+    ) -> OrderedDict[str, list[TestCase]]:
+        """按主关键词单归属分桶，保持插入顺序。"""
+        keyword_display: OrderedDict[str, str] = OrderedDict()
+        per_case_candidates: list[set[str]] = []
+        frequencies: Counter[str] = Counter()
+
         for tc in test_cases:
-            key = _normalize_precondition_list(tc.preconditions)
-            buckets.setdefault(key, []).append(tc)
+            candidates: set[str] = set()
+            for precondition in tc.preconditions:
+                for candidate in _extract_keyword_candidates(precondition):
+                    key = _normalize_keyword_key(candidate)
+                    keyword_display.setdefault(key, candidate)
+                    candidates.add(key)
+            per_case_candidates.append(candidates)
+            frequencies.update(candidates)
+
+        raw_buckets: OrderedDict[str, list[TestCase]] = OrderedDict()
+        other_cases: list[TestCase] = []
+
+        for tc, candidate_keys in zip(test_cases, per_case_candidates):
+            shared_candidates = [
+                key for key in candidate_keys
+                if frequencies[key] >= _MIN_GROUP_SIZE
+            ]
+
+            if not shared_candidates:
+                other_cases.append(tc)
+                continue
+
+            primary_keyword = max(
+                shared_candidates,
+                key=lambda key: _keyword_score(
+                    keyword_display.get(key, key), frequencies[key]
+                ),
+            )
+            display = keyword_display.get(primary_keyword, primary_keyword)
+            raw_buckets.setdefault(display, []).append(tc)
+
+        buckets: OrderedDict[str, list[TestCase]] = OrderedDict()
+        for display, cases in raw_buckets.items():
+            if len(cases) < _MIN_GROUP_SIZE:
+                other_cases.extend(cases)
+                continue
+            buckets[display] = cases
+
+        if other_cases and (buckets or len(other_cases) >= _MIN_GROUP_SIZE):
+            buckets[_OTHER_GROUP_TITLE] = other_cases
+        elif other_cases:
+            for tc in other_cases:
+                buckets.setdefault(tc.id, []).append(tc)
+
         return buckets
 
     def _build_grouped_tree(
-        self, buckets: OrderedDict[tuple[str, ...], list[TestCase]]
+        self, buckets: OrderedDict[str, list[TestCase]]
     ) -> list[ChecklistNode]:
         """将分桶结果构建为 ChecklistNode 列表。
 
         规则：
-        - 桶内用例数 < _MIN_GROUP_SIZE：每条用例作为独立 case 节点
-        - 桶内用例数 ≥ _MIN_GROUP_SIZE：创建 precondition_group 节点
-        - 空前置条件桶：用例作为独立 case 节点（不创建分组）
+        - 命中主关键词的桶：创建 precondition_group 节点
+        - 未命中共享关键词的用例：收敛到“其他”桶
+        - 仅单条、且无任何可分组上下文时：保持独立 case 节点
         """
         children: list[ChecklistNode] = []
 
         for key, cases in buckets.items():
-            if not key or len(cases) < _MIN_GROUP_SIZE:
+            if key == _OTHER_GROUP_TITLE:
+                group_node = self._build_precondition_group(key, cases)
+                children.append(group_node)
+                continue
+
+            if len(cases) < _MIN_GROUP_SIZE:
                 # 不分组，每条用例直接作为 case 节点
                 for tc in cases:
-                    children.append(self._build_case_node(tc, shared_preconditions=()))
+                    children.append(self._build_case_node(tc))
                 continue
 
             # 创建分组节点
@@ -148,15 +317,15 @@ class PreconditionGrouper:
 
     def _build_precondition_group(
         self,
-        precondition_key: tuple[str, ...],
+        keyword: str,
         cases: list[TestCase],
     ) -> ChecklistNode:
-        """构建一个 precondition_group 节点。"""
-        group_title = " \u2192 ".join(precondition_key)
+        """构建一个关键词分组节点。"""
+        group_title = keyword
         group_id = f"GRP-{uuid.uuid4().hex[:8]}"
 
         case_children = [
-            self._build_case_node(tc, shared_preconditions=precondition_key)
+            self._build_case_node(tc)
             for tc in cases
         ]
 
@@ -165,33 +334,23 @@ class PreconditionGrouper:
             title=group_title,
             node_type="precondition_group",
             children=case_children,
-            preconditions=list(precondition_key),
+            preconditions=[],
         )
 
     def _build_case_node(
         self,
         tc: TestCase,
-        shared_preconditions: tuple[str, ...] = (),
     ) -> ChecklistNode:
         """构建一个 case 叶子节点。
 
-        如果存在 shared_preconditions，则 case 节点的 preconditions 字段
-        仅包含"附加前置条件"（即不在 shared 集合中的条件）。
+        关键词分组模式下，case 节点保留完整前置条件。
         """
-        shared_set = set(shared_preconditions)
-        # 计算附加前置条件：原始条件规范化后不在 shared 中的
-        additional = []
-        for p in tc.preconditions:
-            normalized = _normalize_precondition(p)
-            if normalized not in shared_set:
-                additional.append(p)  # 保留原始文本
-
         return ChecklistNode(
             node_id=f"CASE-{tc.id}",
             title=tc.title,
             node_type="case",
             test_case_ref=tc.id,
-            preconditions=additional,
+            preconditions=list(tc.preconditions),
             steps=list(tc.steps),
             expected_results=list(tc.expected_results),
             priority=tc.priority,

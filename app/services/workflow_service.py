@@ -62,7 +62,7 @@ class WorkflowService:
         state_repository: RunStateRepository | None = None,
         iteration_controller: IterationController | None = None,
         platform_dispatcher: PlatformDispatcher | None = None,
-        enable_xmind: bool = False,
+        enable_xmind: bool = True,
         project_context_service: ProjectContextService | None = None,
     ) -> None:
         self.settings = settings

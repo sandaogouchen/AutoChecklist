@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 
 from app.api.routes import router
@@ -36,14 +38,25 @@ def create_app(
     app.state.settings = app_settings
 
     # 项目上下文服务
-    project_repo = ProjectRepository()
-    project_context_service = ProjectContextService(project_repo)
-    app.state.project_context_service = project_context_service
-
-    app.state.workflow_service = workflow_service or WorkflowService(
-        app_settings,
-        project_context_service=project_context_service,
+    project_db_path = Path(app_settings.output_dir) / "projects.sqlite3"
+    default_project_service = ProjectContextService(
+        ProjectRepository(db_path=project_db_path)
     )
+
+    if workflow_service is not None:
+        project_context_service = (
+            workflow_service.project_context_service or default_project_service
+        )
+        workflow_service.project_context_service = project_context_service
+        app.state.workflow_service = workflow_service
+    else:
+        project_context_service = default_project_service
+        app.state.workflow_service = WorkflowService(
+            app_settings,
+            project_context_service=project_context_service,
+        )
+
+    app.state.project_context_service = project_context_service
 
     app.include_router(router)
     app.include_router(project_router)
