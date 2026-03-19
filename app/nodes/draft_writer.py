@@ -3,8 +3,10 @@
 调用 LLM 根据 checkpoint 列表和关联证据，生成初始版本的测试用例草稿。
 每个生成的测试用例会携带对应的 checkpoint_id，建立可追溯的链路。
 
-变更：在 _SYSTEM_PROMPT 中新增前置条件编写规范（5 条规则），
-引导 LLM 生成高质量、可分组的 preconditions。
+变更：
+- 在 _SYSTEM_PROMPT 中新增前置条件编写规范（5 条规则），
+  引导 LLM 生成高质量、可分组的 preconditions。
+- 新增模版字段继承：TestCase 自动继承关联 checkpoint 的模版绑定信息。
 """
 
 from __future__ import annotations
@@ -61,10 +63,18 @@ def build_draft_writer_node(llm_client: LLMClient):
     """构建草稿编写节点的工厂函数。"""
 
     def draft_writer_node(state: CaseGenState) -> CaseGenState:
-        """根据 checkpoint 和证据调用 LLM 生成测试用例草稿。"""
+        """根据 checkpoint 和证据调用 LLM 生成测试用例草稿。
+
+        变更：LLM 返回后，自动从关联的 checkpoint 继承模版绑定字段。
+        """
         checkpoints = state.get("checkpoints", [])
         checkpoint_paths = state.get("checkpoint_paths", [])
         canonical_outline_nodes = state.get("canonical_outline_nodes", [])
+
+        # 构建 checkpoint_id → Checkpoint 的查找表，用于模版字段继承
+        cp_lookup: dict[str, Checkpoint] = {
+            cp.checkpoint_id: cp for cp in checkpoints if cp.checkpoint_id
+        }
 
         if checkpoints:
             prompt_lines = [
@@ -96,7 +106,25 @@ def build_draft_writer_node(llm_client: LLMClient):
             user_prompt="\n\n".join(prompt_lines),
             response_model=DraftCaseCollection,
         )
-        return {"draft_cases": response.test_cases}
+
+        # ---- 模版字段继承：从 checkpoint 继承到 TestCase ----
+        enriched_cases: list[TestCase] = []
+        for case in response.test_cases:
+            if case.checkpoint_id and case.checkpoint_id in cp_lookup:
+                cp = cp_lookup[case.checkpoint_id]
+                if cp.template_leaf_id and not case.template_leaf_id:
+                    case = case.model_copy(
+                        update={
+                            "template_leaf_id": cp.template_leaf_id,
+                            "template_path_ids": cp.template_path_ids,
+                            "template_path_titles": cp.template_path_titles,
+                            "template_match_confidence": cp.template_match_confidence,
+                            "template_match_low_confidence": cp.template_match_low_confidence,
+                        }
+                    )
+            enriched_cases.append(case)
+
+        return {"draft_cases": enriched_cases}
 
     return draft_writer_node
 
@@ -107,7 +135,10 @@ def _format_checkpoint_prompt(
     checkpoint_paths: list[CheckpointPathMapping],
     canonical_outline_nodes: list[CanonicalOutlineNode],
 ) -> str:
-    """格式化单个 checkpoint 的 prompt 片段。"""
+    """格式化单个 checkpoint 的 prompt 片段。
+
+    变更：注入模版路径上下文和低置信度警告。
+    """
     lines = [
         f"Checkpoint {index}: {checkpoint.title}",
         f"Checkpoint ID: {checkpoint.checkpoint_id}",
@@ -122,6 +153,15 @@ def _format_checkpoint_prompt(
     if checkpoint.preconditions:
         lines.append("Preconditions:")
         lines.extend(f"- {pc}" for pc in checkpoint.preconditions)
+
+    # 注入模版路径上下文
+    if checkpoint.template_leaf_id:
+        template_path_text = " > ".join(checkpoint.template_path_titles)
+        lines.append(f"Template path: {template_path_text}")
+        if checkpoint.template_match_low_confidence:
+            lines.append(
+                "⚠️ 模版匹配置信度较低，请在生成用例时注意验证归类是否合理。"
+            )
 
     path_context = _resolve_path_context(
         checkpoint.checkpoint_id,
