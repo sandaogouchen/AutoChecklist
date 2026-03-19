@@ -10,7 +10,7 @@ AutoChecklist 是一个基于 FastAPI 的自动化测试用例生成服务。它
 
 ### §1.2 技术栈
 | 类别 | 技术 | 版本/说明 |
-|------|------|-----------|
+|------|------|----------|
 | Web 框架 | FastAPI | ASGI 异步框架 |
 | 工作流引擎 | LangGraph | 基于 StateGraph 的有向图编排 |
 | 数据模型 | Pydantic v2 | BaseModel + TypedDict 双模式 |
@@ -85,6 +85,18 @@ AutoChecklist/
 | 16 | [`tests/integration/_ANALYSIS.md`](./tests/integration/_ANALYSIS.md) | `tests/integration/` | 4 | 测试 | API/工作流集成测试 |
 | 17 | [`tests/unit/_ANALYSIS_1.md`](./tests/unit/_ANALYSIS_1.md) | `tests/unit/` (1/2) | 9 | 测试 | 单元测试 Part 1 |
 | 18 | [`tests/unit/_ANALYSIS_2.md`](./tests/unit/_ANALYSIS_2.md) | `tests/unit/` (2/2) | 8 | 测试 | 单元测试 Part 2 |
+
+### §3.1 PR #15 新增分析文件 (Checklist 优化 F1-F5)
+
+| # | 分析文件路径 | 源文件 | 功能编号 | 核心关注点 |
+|---|-------------|--------|---------|----------|
+| 19 | [`app/domain/checklist_models_ANALYSIS.md`](./app/domain/checklist_models_ANALYSIS.md) | `app/domain/checklist_models.py` | F1 | ChecklistNode 递归 Pydantic v2 模型、model_rebuild() |
+| 20 | [`app/services/checklist_merger_ANALYSIS.md`](./app/services/checklist_merger_ANALYSIS.md) | `app/services/checklist_merger.py` | F1 | Trie 合并算法、归一化、单子链剪枝、_MAX_DEPTH=10 |
+| 21 | [`app/nodes/checklist_optimizer_ANALYSIS.md`](./app/nodes/checklist_optimizer_ANALYSIS.md) | `app/nodes/checklist_optimizer.py` | F5/F1/F2 | LangGraph 节点、两步处理(refine→merge)、graceful degradation |
+| 22 | [`app/services/markdown_renderer_ANALYSIS.md`](./app/services/markdown_renderer_ANALYSIS.md) | `app/services/markdown_renderer.py` | F4 | 共享 Markdown 渲染、flat + tree 模式、DRY 修复 |
+| 23 | [`tests/unit/test_checklist_merger_ANALYSIS.md`](./tests/unit/test_checklist_merger_ANALYSIS.md) | `tests/unit/test_checklist_merger.py` | F1 | FakeTestCase 替身、归一化/合并/剪枝/深度限制测试 |
+| 24 | [`tests/unit/test_checklist_optimizer_ANALYSIS.md`](./tests/unit/test_checklist_optimizer_ANALYSIS.md) | `tests/unit/test_checklist_optimizer.py` | F5 | mock patch 策略、正常流/降级/异常测试 |
+| 25 | [`tests/unit/test_text_refiner_ANALYSIS.md`](./tests/unit/test_text_refiner_ANALYSIS.md) | `tests/unit/test_text_refiner.py` | F2 | 中英文精炼、标识符保护、长度约束、冗余步骤合并测试 |
 
 ## §4 模块依赖全景
 
