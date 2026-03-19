@@ -32,9 +32,6 @@ class Settings(BaseSettings):
     # 用于 run_id 生成时的时间格式化，默认 UTC+8（Asia/Shanghai）
     timezone: str = "Asia/Shanghai"
 
-    # ---- Checklist 优化配置 ----
-    enable_checklist_optimization: bool = True
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

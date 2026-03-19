@@ -4,10 +4,6 @@
   input_parser → context_research → case_generation（子图） → reflection
 
 每个节点接收并返回 ``GlobalState``，通过增量更新的方式传递数据。
-
-F5 变更：桥接节点新增 ``optimized_tree`` 字段的转发，使子图中
-checklist_optimizer 的合并结果能透传回 GlobalState，供下游
-PlatformDispatcher 用于 Markdown / XMind 渲染。
 """
 
 from __future__ import annotations
@@ -72,8 +68,6 @@ def _build_case_generation_bridge(case_generation_subgraph):
 
     这种桥接模式将主图与子图的状态结构解耦，
     使两者可以独立演化而不互相影响。
-
-    F5 变更：新增 ``optimized_tree`` 字段的转发。
     """
 
     def case_generation_node(state: GlobalState) -> GlobalState:
@@ -95,8 +89,6 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),
-            # F5: 转发 checklist_optimizer 的合并结果
-            "optimized_tree": subgraph_result.get("optimized_tree", []),
         }
 
     return case_generation_node
