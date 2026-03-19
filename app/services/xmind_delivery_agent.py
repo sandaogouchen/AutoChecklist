@@ -18,6 +18,7 @@ from app.services.xmind_payload_builder import XMindPayloadBuilder
 
 if TYPE_CHECKING:
     from app.domain.case_models import TestCase
+    from app.domain.checklist_models import ChecklistNode
     from app.domain.checkpoint_models import Checkpoint
     from app.domain.research_models import ResearchOutput
 
@@ -58,6 +59,7 @@ class XMindDeliveryAgent:
         test_cases: list[TestCase],
         checkpoints: list[Checkpoint],
         research_output: ResearchOutput | None = None,
+        optimized_tree: list[ChecklistNode] | None = None,
         title: str = "",
         output_dir: str | Path | None = None,
     ) -> XMindDeliveryResult:
@@ -71,6 +73,7 @@ class XMindDeliveryAgent:
             test_cases: 测试用例列表。
             checkpoints: 检查点列表。
             research_output: 研究输出（可选）。
+            optimized_tree: 优化后的 checklist 树（可选）。
             title: 思维导图标题。
             output_dir: 可选的运行级别输出目录。传入时 XMind 文件将
                 输出到该目录下，而非 connector 的默认目录。
@@ -94,6 +97,7 @@ class XMindDeliveryAgent:
                 research_output=research_output,
                 run_id=run_id,
                 title=title,
+                optimized_tree=optimized_tree,
             )
 
             # 生成 .xmind 文件

@@ -1,19 +1,24 @@
 """Unit tests for app.repositories.project_repository."""
 
+from pathlib import Path
+
 from app.domain.project_models import ProjectContext
 from app.repositories.project_repository import ProjectRepository
 
 
 class TestProjectRepository:
 
-    def _make_repo(self) -> ProjectRepository:
-        return ProjectRepository()
+    def _make_repo(self, db_path: Path | None = None) -> ProjectRepository:
+        return ProjectRepository(db_path=db_path)
 
     def test_save_and_get(self):
         repo = self._make_repo()
         ctx = ProjectContext(name="Test")
         repo.save(ctx)
-        assert repo.get(ctx.id) is ctx
+        loaded = repo.get(ctx.id)
+        assert loaded is not None
+        assert loaded.id == ctx.id
+        assert loaded.name == ctx.name
 
     def test_get_missing_returns_none(self):
         repo = self._make_repo()
@@ -39,3 +44,17 @@ class TestProjectRepository:
     def test_delete_missing(self):
         repo = self._make_repo()
         assert repo.delete("nope") is False
+
+    def test_persists_across_repository_instances(self, tmp_path):
+        db_path = tmp_path / "projects.sqlite3"
+
+        repo_a = self._make_repo(db_path)
+        ctx = ProjectContext(name="Persistent")
+        repo_a.save(ctx)
+
+        repo_b = self._make_repo(db_path)
+        loaded = repo_b.get(ctx.id)
+
+        assert loaded is not None
+        assert loaded.id == ctx.id
+        assert loaded.name == "Persistent"

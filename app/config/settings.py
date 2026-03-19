@@ -1,7 +1,7 @@
 """应用配置模块。
 
 通过 pydantic-settings 从 .env 文件和环境变量中加载配置。
-新增迭代评估回路相关配置项。
+新增 enable_checklist_optimization 配置项。
 """
 
 from __future__ import annotations
@@ -28,8 +28,10 @@ class Settings(BaseSettings):
     max_iterations: int = 3
     evaluation_pass_threshold: float = 0.7
 
+    # ---- Checklist 优化配置 ----
+    enable_checklist_optimization: bool = True
+
     # ---- 时区配置 ----
-    # 用于 run_id 生成时的时间格式化，默认 UTC+8（Asia/Shanghai）
     timezone: str = "Asia/Shanghai"
 
     model_config = SettingsConfigDict(

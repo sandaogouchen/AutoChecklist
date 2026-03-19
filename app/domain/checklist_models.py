@@ -1,0 +1,79 @@
+"""Checklist 树与大纲规划相关模型。"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from app.domain.research_models import EvidenceRef
+
+
+class ChecklistNode(BaseModel):
+    """Checklist 树节点。
+
+    node_type 决定节点语义：
+    - root：虚拟根节点，仅作为子节点容器
+    - group：共享前置/操作节点
+    - expected_result：预期结果叶子节点
+
+    同时保留旧的 ``precondition_group`` / ``case``，便于兼容已有
+    渲染或历史数据。
+    """
+
+    node_id: str = ""
+    title: str = ""
+    node_type: Literal[
+        "root",
+        "group",
+        "expected_result",
+        "precondition_group",
+        "case",
+    ] = "group"
+    children: list[ChecklistNode] = Field(default_factory=list)
+    hidden: bool = False
+
+    # ---- case 节点专属字段 ----
+    test_case_ref: str = ""
+    source_test_case_refs: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    expected_results: list[str] = Field(default_factory=list)
+    priority: str = "P2"
+    category: str = "functional"
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    checkpoint_id: str = ""
+
+
+class CanonicalOutlineNode(BaseModel):
+    """Checkpoint 大纲规划阶段的规范节点定义。"""
+
+    node_id: str
+    semantic_key: str = ""
+    display_text: str
+    kind: Literal["business_object", "context", "page", "action"] = "context"
+    visibility: Literal["visible", "required", "hidden"] = "visible"
+    aliases: list[str] = Field(default_factory=list)
+
+
+class CanonicalOutlineNodeCollection(BaseModel):
+    """规范大纲节点集合。"""
+
+    canonical_nodes: list[CanonicalOutlineNode] = Field(default_factory=list)
+
+
+class CheckpointPathMapping(BaseModel):
+    """单个 checkpoint 对应的固定层级路径。"""
+
+    checkpoint_id: str
+    path_node_ids: list[str] = Field(default_factory=list)
+
+
+class CheckpointPathCollection(BaseModel):
+    """Checkpoint 路径映射集合。"""
+
+    checkpoint_paths: list[CheckpointPathMapping] = Field(default_factory=list)
+
+
+# Pydantic v2 要求显式 rebuild 以支持自引用
+ChecklistNode.model_rebuild()
