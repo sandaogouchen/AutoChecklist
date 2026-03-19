@@ -1,48 +1,97 @@
-# test_checklist_optimizer.py 分析
+> **Auto-generated analysis** — PR #17 (Checklist 前置条件分组优化 V2)
+> Replaces PR #15 version
+> Generated: 2026-03-19
 
-## 概述
+# `test_checklist_optimizer.py` — Checklist Optimizer Node 单元测试
 
-`tests/unit/test_checklist_optimizer.py` 是 `checklist_optimizer_node` LangGraph 节点函数的单元测试文件。使用 `unittest.mock.patch` 对 `refine_test_case` 和 `ChecklistMerger` 进行 mock，覆盖正常流、空输入、单步降级和全局降级等场景。
+---
 
-该文件位于 `tests/unit/` 测试目录，为 F5（工作流集成）和优雅降级策略提供测试保障。
+## §1 File Overview
 
-## 依赖关系
+| Attribute | Value |
+|-----------|-------|
+| **Path** | `tests/unit/test_checklist_optimizer.py` |
+| **Lines** | 93 |
+| **Role** | Unit tests for `checklist_optimizer_node` LangGraph node |
+| **PR** | #17 (V2 — updated to match new single-step PreconditionGrouper approach) |
+| **Test count** | 6 tests in 1 test class |
+| **Mocking** | `@patch` for `get_settings` and `PreconditionGrouper` |
 
-- 上游依赖:
-  - `pytest`
-  - `unittest.mock` (`patch`, `MagicMock`)
-  - `app.domain.checklist_models.ChecklistNode`
-  - `app.nodes.checklist_optimizer.checklist_optimizer_node`
-- 下游消费者: 无（测试文件）
+---
 
-## 核心实现
+## §2 Core Content
 
-### FakeTestCase 替身
+### 2.1 Helper Function
 
-与 `test_checklist_merger.py` 类似的轻量 TestCase 模拟类，带 `__test__ = False` 标记。
+```python
+def _tc(tc_id: str, preconditions: list[str] | None = None) -> TestCase:
+    """Helper to build a minimal TestCase."""
+```
 
-### TestChecklistOptimizerNode 测试类
+### 2.2 `TestChecklistOptimizerNode` — 6 Tests
 
-- **`test_empty_test_cases`**: 空 test_cases 输入返回空列表和空树
-- **`test_missing_test_cases_key`**: state 中无 test_cases 键时安全返回空结果
-- **`test_normal_flow`**: 正常流测试
-  - mock `refine_test_case` 返回精炼后的用例
-  - mock `ChecklistMerger` 返回预设的 ChecklistNode 树
-  - 验证 `test_cases` 为精炼后结果，`optimized_tree` 为 mock 树
-  - 验证调用参数正确（language 传递等）
-- **`test_refine_failure_keeps_original`**: refine_test_case 抛出 ValueError 时，保留原始用例继续处理
-- **`test_merger_failure_returns_empty_tree`**: ChecklistMerger.merge 抛出 RuntimeError 时，test_cases 正常返回，optimized_tree 为空列表
+| Test | Mocks | Key Assertion |
+|------|-------|--------------|
+| `test_empty_test_cases` | None | `{}` state with empty test_cases → `optimized_tree=[]`, no error |
+| `test_missing_test_cases_key` | None | `{}` state (missing key) → treated as empty, `optimized_tree=[]` |
+| `test_config_disabled` | `get_settings` | `enable_checklist_optimization=False` → `optimized_tree=[]`, test_cases passed through |
+| `test_normal_grouping` | `get_settings` | 2 cases with shared preconditions → `len(optimized_tree) > 0` |
+| `test_graceful_degradation` | `get_settings`, `PreconditionGrouper` | `PreconditionGrouper.group()` raises `RuntimeError` → `optimized_tree=[]`, no crash |
+| `test_does_not_modify_test_cases` | `get_settings` | Input list IDs before == IDs after (immutability check) |
 
-### Mock 策略
+---
 
-- `@patch("app.nodes.checklist_optimizer.refine_test_case")`: 在节点模块的命名空间中 mock，确保 patch 正确
-- `@patch("app.nodes.checklist_optimizer.ChecklistMerger")`: mock 整个类，通过 `MockMerger.return_value` 控制实例行为
+## §3 Dependencies
 
-## 关联需求
+### Internal
+| Import | Purpose |
+|--------|---------|
+| `app.domain.case_models.TestCase` | Test data construction |
+| `app.nodes.checklist_optimizer.checklist_optimizer_node` | SUT |
 
-- PRD: Checklist 同前置操作整合与表达精炼优化
-- 功能编号: F5（工作流集成 — 节点测试）、F1/F2（降级策略测试）
+### External
+| Package | Usage |
+|---------|-------|
+| `pytest` | Test framework |
+| `unittest.mock.MagicMock` | Mock for settings object |
+| `unittest.mock.patch` | Patching `get_settings` and `PreconditionGrouper` |
 
-## 变更历史
+---
 
-- PR #15: 初始创建
+## §4 Key Logic / Data Flow
+
+### Mocking Strategy
+
+- **`get_settings`**: Patched at `app.nodes.checklist_optimizer.get_settings` to control `enable_checklist_optimization` flag
+- **`PreconditionGrouper`**: Patched at `app.nodes.checklist_optimizer.PreconditionGrouper` only in `test_graceful_degradation` to simulate `RuntimeError`
+
+### Coverage Matrix
+
+| Scenario | Test |
+|----------|------|
+| Empty input | `test_empty_test_cases` |
+| Missing state key | `test_missing_test_cases_key` |
+| Feature disabled | `test_config_disabled` |
+| Happy path | `test_normal_grouping` |
+| Exception handling | `test_graceful_degradation` |
+| Input immutability | `test_does_not_modify_test_cases` |
+
+---
+
+## §5 Design Patterns
+
+| Pattern | Application |
+|---------|------------|
+| **Arrange-Act-Assert** | Each test follows clear AAA structure |
+| **Mock isolation** | `@patch` decorators isolate SUT from settings and grouper |
+| **Boundary testing** | Empty, missing key, disabled config |
+| **Defensive testing** | Graceful degradation + immutability |
+
+---
+
+## §6 Potential Concerns
+
+| # | Concern | Severity | Notes |
+|---|---------|----------|-------|
+| 1 | `test_normal_grouping` uses real `PreconditionGrouper` (not mocked) | Low | Provides integration-style confidence; mock used only for failure test |
+| 2 | No test for `test_cases` being `None` in state | Low | `state.get("test_cases", [])` handles it; could add explicit test |

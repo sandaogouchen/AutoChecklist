@@ -1,51 +1,119 @@
-# checklist_optimizer.py 分析
+> **Auto-generated analysis** — PR #17 (Checklist 前置条件分组优化 V2)
+> Replaces PR #15 version (two-step refine→merge approach reverted in PR #16)
+> Generated: 2026-03-19
 
-## 概述
+# `checklist_optimizer.py` — Checklist 前置条件分组优化节点
 
-`app/nodes/checklist_optimizer.py` 是一个 LangGraph 节点函数，位于用例生成子图（case_generation subgraph）中 `structure_assembler` 之后、`END` 之前。该节点执行两步优化处理：(1) 文本精炼（F2）和 (2) 前置操作合并（F1），并采用 graceful degradation 策略确保任一步骤异常时不会中断整个流水线。
+---
 
-该文件位于 `app/nodes/` 工作流节点层，是 F5（工作流集成）功能的核心实现，将 F1 和 F2 能力串联到主流水线中。
+## §1 File Overview
 
-## 依赖关系
+| Attribute | Value |
+|-----------|-------|
+| **Path** | `app/nodes/checklist_optimizer.py` |
+| **Lines** | 51 |
+| **Role** | LangGraph node: groups `test_cases` into `optimized_tree` via `PreconditionGrouper` |
+| **PR** | #17 (V2 — single-step grouping, no LLM; replaces PR #15 two-step refine→merge) |
+| **Position in graph** | After `structure_assembler`, before `END` in `case_generation` subgraph |
 
-- 上游依赖:
-  - `app.services.text_normalizer.refine_test_case` — F2 文本精炼函数
-  - `app.services.checklist_merger.ChecklistMerger` — F1 Trie 合并器
-  - `app.domain.state.CaseGenState` — 子图状态类型定义
-  - 标准库: `logging`
-- 下游消费者:
-  - `app.graphs.case_generation` — 在子图构建中注册为 `"checklist_optimizer"` 节点
+---
 
-## 核心实现
+## §2 Core Content
 
-### checklist_optimizer_node(state: CaseGenState) -> dict[str, Any]
+### 2.1 `checklist_optimizer_node(state: CaseGenState) -> dict[str, Any]`
 
-节点函数签名遵循 LangGraph 约定，接收状态字典，返回增量更新字典。
+Single exported function — the LangGraph node callable.
 
-**执行流程：**
+#### Flow
 
-1. **空输入快速返回**: 当 `test_cases` 为空或不存在时，直接返回 `{"test_cases": [], "optimized_tree": []}`
-2. **Step 1 — 文本精炼 (F2)**:
-   - 遍历每个 TestCase，调用 `refine_test_case(case, language=language)`
-   - **Per-case graceful degradation**: 单个用例精炼失败时，`logger.warning` 记录并保留原始用例，继续处理下一条
-3. **Step 2 — 前置操作合并 (F1)**:
-   - 实例化 `ChecklistMerger()` 并调用 `merge(refined_cases)`
-   - **Top-level graceful degradation**: 合并器异常时返回空树 `[]`，下游自动回退到扁平模式
-4. **返回**: `{"test_cases": refined_cases, "optimized_tree": optimized_tree}`
+```python
+def checklist_optimizer_node(state: CaseGenState) -> dict[str, Any]:
+    test_cases = state.get("test_cases", [])
 
-**降级策略汇总：**
+    # Guard 1: empty input
+    if not test_cases:
+        return {"test_cases": test_cases, "optimized_tree": []}
 
-| 异常场景 | 降级行为 |
-|---------|----------|
-| 单用例精炼失败 | 保留原文本，继续处理下一条 |
-| 合并器异常 | 返回空树，下游回退到扁平模式 |
-| 整个节点异常（理论上不发生） | 由 LangGraph 框架兜底 |
+    # Guard 2: config disabled
+    settings = get_settings()
+    if not settings.enable_checklist_optimization:
+        return {"test_cases": test_cases, "optimized_tree": []}
 
-## 关联需求
+    # Main path
+    try:
+        grouper = PreconditionGrouper()
+        optimized_tree = grouper.group(test_cases)
+    except Exception:
+        logger.warning("PreconditionGrouper.group() failed; returning empty tree", exc_info=True)
+        optimized_tree = []
 
-- PRD: Checklist 同前置操作整合与表达精炼优化
-- 功能编号: F5（工作流集成）、F1（前置操作合并）、F2（文本精炼）
+    return {"test_cases": test_cases, "optimized_tree": optimized_tree}
+```
 
-## 变更历史
+#### Return Contract
 
-- PR #15: 初始创建
+| Key | Type | Description |
+|-----|------|-------------|
+| `test_cases` | `list[TestCase]` | Pass-through, unmodified |
+| `optimized_tree` | `list[ChecklistNode]` | Grouped tree (or empty on error/disabled) |
+
+---
+
+## §3 Dependencies
+
+### Internal
+| Import | Purpose |
+|--------|---------|
+| `app.config.settings.get_settings` | Read `enable_checklist_optimization` flag |
+| `app.domain.state.CaseGenState` | Node input type |
+| `app.services.precondition_grouper.PreconditionGrouper` | Core grouping engine |
+
+### External
+| Package | Usage |
+|---------|-------|
+| `logging` | `logger.warning` for graceful degradation |
+| `typing.Any` | Return type hint |
+
+---
+
+## §4 Key Logic / Data Flow
+
+### V2 vs V1 Comparison
+
+| Aspect | V1 (PR #15, reverted) | V2 (PR #17) |
+|--------|----------------------|-------------|
+| Steps | 2 (text_refiner → checklist_merger) | 1 (PreconditionGrouper.group) |
+| LLM usage | Yes (text_refiner) | None |
+| Algorithm | Trie-based merging | Bucket-by-precondition |
+| Error handling | Partial | Full try-except with graceful degradation |
+| Config check | None | `enable_checklist_optimization` |
+
+### Graceful Degradation
+
+The `try-except Exception` block catches **any** error from `PreconditionGrouper.group()` and:
+1. Logs a `WARNING` with full traceback (`exc_info=True`)
+2. Returns `optimized_tree=[]`
+3. Downstream renderers see empty tree → fall back to flat rendering
+
+This ensures the optimization is **fail-safe**: a bug in grouping never breaks the overall workflow.
+
+---
+
+## §5 Design Patterns
+
+| Pattern | Application |
+|---------|------------|
+| **Graceful degradation** | try-except → empty tree → flat rendering fallback |
+| **Feature flag** | `settings.enable_checklist_optimization` toggles the entire node |
+| **Immutability** | `test_cases` list is passed through without mutation |
+| **Single responsibility** | Node only orchestrates; grouping logic lives in `PreconditionGrouper` |
+
+---
+
+## §6 Potential Concerns
+
+| # | Concern | Severity | Notes |
+|---|---------|----------|-------|
+| 1 | Catches `Exception` broadly | Low | Intentional for fail-safe behavior; logged with traceback for debugging |
+| 2 | `get_settings()` called on every invocation | Low | Pydantic-settings typically caches; acceptable for single node call |
+| 3 | No partial failure handling | Low | Either full tree or empty — no partial grouping result on error |

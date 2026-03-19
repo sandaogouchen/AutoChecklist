@@ -1,52 +1,145 @@
-# markdown_renderer.py 分析
+> **Auto-generated analysis** — PR #17 (Checklist 前置条件分组优化 V2)
+> Replaces PR #15 version
+> Generated: 2026-03-19
 
-## 概述
+# `markdown_renderer.py` — 统一 Markdown 渲染器
 
-`app/services/markdown_renderer.py` 提供统一的 Markdown 渲染入口，支持扁平模式（flat）和树形模式（tree）两种渲染策略。该模块消除了原先在 `platform_dispatcher.py` 和 `workflow_service.py` 中重复定义的 `_render_test_cases_markdown` 函数，实现了 DRY（Don't Repeat Yourself）修复。
+---
 
-该文件位于 `app/services/` 业务服务层，是 F4（Markdown 输出适配）功能的核心实现。
+## §1 File Overview
 
-## 依赖关系
+| Attribute | Value |
+|-----------|-------|
+| **Path** | `app/services/markdown_renderer.py` |
+| **Lines** | 142 |
+| **Role** | Unified Markdown renderer for test cases — DRY fix replacing duplicate functions in `platform_dispatcher` and `workflow_service` |
+| **PR** | #17 (V2 — enhanced with tree rendering mode) |
+| **Key property** | Two modes: flat (backward compatible) and tree (grouped by preconditions) |
 
-- 上游依赖:
-  - `app.domain.case_models.TestCase` — 扁平模式渲染消费（TYPE_CHECKING 导入）
-  - `app.domain.checklist_models.ChecklistNode` — 树形模式渲染消费（TYPE_CHECKING 导入）
-- 下游消费者:
-  - `app.services.platform_dispatcher` — 在 `_persist_local_artifacts` 中调用 `render_test_cases_markdown()`
+---
 
-## 核心实现
+## §2 Core Content
 
-### 常量
+### 2.1 Public API
 
-- `_MAX_HEADING_DEPTH = 6`: Markdown 标题最大深度限制（HTML 标准 h1-h6）
+```python
+def render_test_cases_markdown(
+    test_cases: list[TestCase],
+    optimized_tree: list[ChecklistNode] | None = None,
+) -> str:
+```
 
-### 公开 API
+**Mode selection**:
+- If `optimized_tree` is truthy (non-empty list) → tree mode (`_render_tree`)
+- Otherwise → flat mode (`_flat_render`)
 
-- **`render_test_cases_markdown(test_cases, optimized_tree=None) -> str`**: 统一入口。当 `optimized_tree` 非空时使用树形渲染，否则回退到扁平渲染。保证向后兼容。
+### 2.2 Flat Mode — `_flat_render(test_cases)`
 
-- **`flat_render(test_cases) -> str`**: 扁平模式渲染，与原 `_render_test_cases_markdown` 实现完全一致。中文标题。空列表时返回「暂无测试用例」占位文本。
+Identical to the original `_render_test_cases_markdown` that previously lived in both `platform_dispatcher.py` and `workflow_service.py`.
 
-### 树形渲染
+| Element | Format |
+|---------|--------|
+| Empty input | `"# 生成的测试用例\n\n暂无测试用例。\n"` |
+| Case heading | `## {tc.id} {tc.title}` |
+| Checkpoint | `**Checkpoint:** {tc.checkpoint_id}` (only if non-empty) |
+| Preconditions | `### 前置条件` + `- {item}` list (or `- 无` if empty) |
+| Steps | `### 步骤` + `{i}. {step}` numbered list |
+| Expected results | `### 预期结果` + `- {item}` list |
 
-- **`_render_tree(tree) -> str`**: 将 ChecklistNode 树渲染为层级 Markdown，根标题为「生成的测试用例（树形视图）」
+### 2.3 Tree Mode — `_render_tree(tree)` + Recursive Helpers
 
-- **`_render_node(node, depth, lines)`**: 递归渲染分发器，根据 `node_type` 分发到 group 或 case 渲染函数
+#### Functions
 
-- **`_render_group_node(node, depth, lines)`**: 渲染 group 节点为 Markdown 标题，深度受 `_MAX_HEADING_DEPTH` 限制，递归渲染子节点
+| Function | Purpose |
+|----------|--------|
+| `_render_tree(tree)` | Entry point: header + iterate root-level nodes |
+| `_render_node(node, lines)` | Dispatcher: routes by `node_type` |
+| `_render_group_node(node, lines)` | Renders `precondition_group` nodes |
+| `_render_case_node(node, lines, heading_level)` | Renders `case` leaf nodes |
 
-- **`_render_case_node(node, depth, lines)`**: 渲染 case 叶子节点，包含标题、Checkpoint 标注、remaining_steps（有序列表）、expected_results（无序列表）
+#### Tree Mode Output Format
 
-### DRY 修复说明
+| Element | Format |
+|---------|--------|
+| Document title | `# 生成的测试用例（优化分组）` |
+| Group heading | `## 前置条件: {node.title}` |
+| Group preconditions | `- {pc}` list |
+| Case heading (in group) | `### {ref_label} {node.title}` (heading_level=3) |
+| Case heading (standalone) | `## {ref_label} {node.title}` (heading_level=2) |
+| Additional preconditions | `####  附加前置条件` + `- {item}` (level = heading_level + 1) |
+| Steps | `#### 步骤` + `{i}. {step}` |
+| Expected results | `#### 预期结果` + `- {item}` |
+| Checkpoint | `**Checkpoint:** {node.checkpoint_id}` |
 
-原先 `platform_dispatcher.py` 和 `workflow_service.py` 各自定义了完全相同的 `_render_test_cases_markdown` 函数。PR #15 将该逻辑提取到本模块：
-- `platform_dispatcher.py` 改为导入 `render_test_cases_markdown`（-38 行）
-- `workflow_service.py` 移除重复函数（-37 行）
+**Dynamic heading levels**: `_render_case_node` receives `heading_level` parameter. Inside a group it is 3, standalone it is 2. Sub-sections use `heading_level + 1`.
 
-## 关联需求
+#### Root Node Transparency
 
-- PRD: Checklist 同前置操作整合与表达精炼优化
-- 功能编号: F4（Markdown 输出适配 — 共享渲染 + DRY 修复）
+When `node_type == "root"`, the renderer skips the node itself and only renders its children — the root is transparent/virtual.
 
-## 变更历史
+---
 
-- PR #15: 初始创建
+## §3 Dependencies
+
+### Internal
+| Import | Purpose |
+|--------|---------|
+| `app.domain.case_models.TestCase` | Flat mode input type |
+| `app.domain.checklist_models.ChecklistNode` | Tree mode input type |
+
+### External
+None — pure string manipulation.
+
+---
+
+## §4 Key Logic / Data Flow
+
+### DRY Fix
+
+**Before PR #17**:
+- `platform_dispatcher.py` had its own `_render_test_cases_markdown()`
+- `workflow_service.py` had an identical copy
+
+**After PR #17**:
+- Both modules import and call `render_test_cases_markdown()` from this shared module
+- `platform_dispatcher.py` passes `optimized_tree` from `workflow_result`
+- `workflow_service.py` removes its copy entirely
+
+### Rendering Pipeline
+
+```
+render_test_cases_markdown(test_cases, optimized_tree)
+  │
+  ├─ optimized_tree is truthy?
+  │   ├─ YES → _render_tree(optimized_tree)
+  │   │         → _render_node() for each root-level node
+  │   │           → _render_group_node() or _render_case_node()
+  │   │
+  │   └─ NO → _flat_render(test_cases)
+  │           → identical to original _render_test_cases_markdown
+  │
+  └─ return Markdown string
+```
+
+---
+
+## §5 Design Patterns
+
+| Pattern | Application |
+|---------|------------|
+| **Strategy** | Two rendering strategies (flat/tree) behind one entry point |
+| **Composite visitor** | Recursive `_render_node` dispatches by `node_type` |
+| **DRY** | Single shared module replaces duplicated code in 2 files |
+| **Backward compatibility** | Empty/None `optimized_tree` → flat mode, identical to pre-V2 output |
+| **Parameterized heading** | `heading_level` enables context-sensitive nesting depth |
+
+---
+
+## §6 Potential Concerns
+
+| # | Concern | Severity | Notes |
+|---|---------|----------|-------|
+| 1 | No escaping of Markdown special characters in titles | Low | TestCase titles are LLM-generated, unlikely to contain `#` or `*` |
+| 2 | `ref_label` falls back to `node_id` if `test_case_ref` empty | Low | Defensive; should not happen in normal flow |
+| 3 | Deeply nested groups would produce `#####+` headings | Low | `_MAX_TREE_DEPTH=3` in grouper prevents this structurally |
+| 4 | Flat mode `or ["- 无"]` uses list-level fallback | Low | Works correctly for rendering but is a non-obvious pattern |
