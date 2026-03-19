@@ -15,6 +15,7 @@ from typing import TypedDict
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
+from app.domain.checklist_models import ChecklistNode
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 from app.domain.run_state import EvaluationReport, RunState
@@ -24,9 +25,7 @@ class GlobalState(TypedDict, total=False):
     """主工作流全局状态。
 
     新增字段：
-    - run_state: 运行状态对象，记录迭代进度和评估结果
-    - evaluation_report: 最新的结构化评估报告
-    - iteration_index: 当前迭代轮次
+    - optimized_tree: 前置条件分组优化后的 ChecklistNode 树
     """
 
     run_id: str
@@ -42,22 +41,27 @@ class GlobalState(TypedDict, total=False):
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
+    optimized_tree: list[ChecklistNode]
     quality_report: QualityReport
     artifacts: dict[str, str]
     error: ErrorInfo
 
-    # ---- 迭代评估回路新增字段 ----
+    # ---- 迭代评估回路字段 ----
     run_state: RunState
     evaluation_report: EvaluationReport
     iteration_index: int
 
-    # ---- 项目上下文新增字段 ----
+    # ---- 项目上下文字段 ----
     project_id: str
     project_context_summary: str
 
 
 class CaseGenState(TypedDict, total=False):
-    """用例生成子图状态。"""
+    """用例生成子图状态。
+
+    新增字段：
+    - optimized_tree: 前置条件分组优化后的 ChecklistNode 树
+    """
 
     language: str
     parsed_document: ParsedDocument
@@ -68,4 +72,5 @@ class CaseGenState(TypedDict, total=False):
     mapped_evidence: dict[str, list[EvidenceRef]]
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
+    optimized_tree: list[ChecklistNode]
     project_context_summary: str
