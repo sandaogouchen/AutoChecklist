@@ -1,611 +1,919 @@
-# app/services/ 目录分析
+# app/services/_ANALYSIS.md — 服务层分析
 
-> 生成时间: 2026-03-18 | 源文件数: 9 | 分析策略: Business logic / service layer analysis
+> 分析分支自动生成 · 源分支 `main`
 
-## §1 目录职责
+---
 
-`app/services/` 是 AutoChecklist 项目的**核心业务逻辑层**，位于 API 层与底层基础设施（仓储、LLM 客户端、LangGraph 工作流引擎）之间。该目录承担以下关键职责：
+## §1 目录概述
 
-1. **工作流编排** — `WorkflowService` 作为中央协调者，串联运行创建、迭代评估回路、产物持久化的完整生命周期。
-2. **迭代控制** — `IterationController` 实现基于质量阈值的多轮评估决策引擎（pass/retry/fail），包含无改进连续检测（no-improvement-streak）。
-3. **平台分发** — `PlatformDispatcher` 统一管理本地产物持久化和可选的 XMind 思维导图交付，采用容错设计确保 XMind 失败不阻断主流程。
-4. **XMind 交付链** — `XMindPayloadBuilder` → `XMindDeliveryAgent` → `XMindConnector` 三级流水线，将测试用例层次结构序列化为 `.xmind` ZIP 归档文件。
-5. **文本规范化** — `TextNormalizer` 提供中英文混排场景下的术语翻译，保护代码标识符不被误替换。
-6. **项目上下文管理** — `ProjectContextService` 封装项目 CRUD 操作的薄业务层。
+| 维度 | 值 |
+|------|-----|
+| 路径 | `app/services/` |
+| 文件数 | 14 |
+| 分析文件 | 13（排除 `__init__.py`） |
+| 目录职责 | 业务服务层：Checklist 整合、工作流编排、输出渲染、平台分发 |
+
+本目录是 AutoChecklist 项目的**核心业务逻辑层**，承载了从 checkpoint 输入到最终 checklist 输出的全部服务编排、树结构构建、文本归一化、输出渲染及平台分发能力。其中 Checklist 整合方案（即 checkpoint → 结构化 checklist 树的转换过程）是整个系统质量的关键决定因素。
+
+---
 
 ## §2 文件清单
 
-| # | 文件名 | 行数 | 主要导出 | 职责概要 |
-|---|--------|------|----------|----------|
-| 1 | `__init__.py` | 1 | — | 包声明，标记 `services` 为 Python 子包 |
-| 2 | `iteration_controller.py` | 251 | `IterationDecision`, `IterationController` | 迭代评估决策引擎：pass/retry/fail/no-improvement-streak |
-| 3 | `platform_dispatcher.py` | 247 | `PlatformDispatcher` | 产物持久化 + 可选 XMind 交付的统一分发器 |
-| 4 | `project_context_service.py` | 64 | `ProjectContextService` | 项目上下文 CRUD 薄服务层 |
-| 5 | `text_normalizer.py` | 193 | `normalize_text()`, `normalize_test_case()` | 中英文混排文本规范化（含保护模式） |
-| 6 | `workflow_service.py` | 437 | `WorkflowService` | 工作流编排中枢，管理完整迭代生命周期 |
-| 7 | `xmind_connector.py` | 218 | `XMindConnector` (Protocol), `FileXMindConnector` | XMind 连接器协议及基于文件的 ZIP 归档实现 |
-| 8 | `xmind_delivery_agent.py` | 170 | `XMindDeliveryAgent` | XMind 交付代理，防御性错误处理 |
-| 9 | `xmind_payload_builder.py` | 227 | `XMindPayloadBuilder` | XMind 层次节点树构建器 |
-
-## §3 文件详细分析
-
-### §3.1 `__init__.py`
-
-- **路径**: `app/services/__init__.py`
-- **行数**: 1
-- **职责**: 包声明文件，仅含文档字符串 `"""业务服务子包。"""`，标记目录为可导入的 Python 子包。
-
-#### §3.1.1 核心内容
-
-空包初始化文件，无导出符号，无 `__all__` 定义。
-
-#### §3.1.2 依赖关系
-
-无任何导入。
-
-#### §3.1.3 关键逻辑 / 数据流
-
-无逻辑，纯结构性文件。
+| # | 文件名 | 大小 | 核心类/函数 | 职责摘要 |
+|---|--------|------|-------------|----------|
+| 1 | `checklist_merger.py` | ~5KB | `ChecklistMerger` | Trie 树合并 NormalizedChecklistPath → ChecklistNode 树 |
+| 2 | `checkpoint_outline_planner.py` | ~15KB | `CheckpointOutlinePlanner` | LLM 驱动的 outline 层级规划 + expected_results 挂载 |
+| 3 | `semantic_path_normalizer.py` | ~8.5KB | `SemanticPathNormalizer` | LLM 两阶段路径归一化 |
+| 4 | `precondition_grouper.py` | ~11.5KB | `PreconditionGrouper` | 基于前置条件关键词的测试用例分桶分组 |
+| 5 | `workflow_service.py` | ~13.3KB | `WorkflowService` | 主编排服务：LangGraph 构建 + 迭代执行 + 输出渲染 |
+| 6 | `iteration_controller.py` | ~8.6KB | `IterationController` | 多轮评估迭代控制：evaluate_and_decide → IterationDecision |
+| 7 | `text_normalizer.py` | ~7.6KB | `normalize_text()` / `normalize_test_case()` | 中英文文本归一化（空白、标点、编码修复） |
+| 8 | `markdown_renderer.py` | ~5.3KB | `render_test_cases_markdown()` | Markdown 渲染：扁平列表模式 + 树模式 |
+| 9 | `platform_dispatcher.py` | ~5.7KB | `PlatformDispatcher` | 多平台输出分发（markdown / xmind） |
+| 10 | `xmind_connector.py` | ~3KB | `XMindConnector` (Protocol) / `FileXMindConnector` | XMind 连接器协议 + 文件实现 |
+| 11 | `xmind_delivery_agent.py` | ~3KB | `XMindDeliveryAgent` | XMind 交付代理：防御性错误处理 |
+| 12 | `xmind_payload_builder.py` | ~4KB | `XMindPayloadBuilder` | ChecklistNode 树 → XMind topic 树构建 |
+| 13 | `project_context_service.py` | ~4KB | `ProjectContextService` | 项目上下文 CRUD（SQLite 持久化） |
 
 ---
 
-### §3.2 `iteration_controller.py`
+## §3 逐文件分析
 
-- **路径**: `app/services/iteration_controller.py`
-- **行数**: 251
-- **职责**: 迭代评估回路的控制引擎，管理运行状态的生命周期，在每轮评估后决策下一步动作。
+### §3.1 `checklist_merger.py` — ChecklistMerger
 
-#### §3.2.1 核心内容
+**核心类**: `ChecklistMerger`
 
-**类 `IterationDecision`** — 迭代决策结果值对象：
-- `action`: `Literal["pass", "retry", "fail"]` — 三种决策类型
-- `reason`: `str` — 决策原因说明
-- `target_stage`: `str` — retry 时的回流目标阶段
+**职责**: 将一组 `NormalizedChecklistPath` 对象通过 trie 树结构合并为 `ChecklistNode` 层级树。
 
-**类 `IterationController`** — 核心控制器：
-- 构造参数: `max_iterations=3`, `pass_threshold=0.7`, `min_improvement=0.03`
-- `initialize_state(run_id)` → 创建 `RunState`，初始阶段为 `CONTEXT_RESEARCH`
-- `decide(state, evaluation)` → 四级决策链:
-  1. `score >= pass_threshold` → **pass**
-  2. `iteration_index >= max_iterations - 1` → **fail**（达到上限）
-  3. `_no_improvement_streak()` → **fail**（连续两轮改进幅度 < `min_improvement`）
-  4. 其余情况 → **retry**，目标阶段取自 `evaluation.suggested_retry_stage`
-- `update_state_after_evaluation(state, evaluation, decision, artifacts_snapshot)` → 根据决策更新状态（记录迭代日志、回流决策、时间戳）
-- `mark_error(state, exception)` → 标记不可恢复错误
+**关键方法**:
 
-**辅助方法**:
-- `_no_improvement_streak()`: 检查最近两轮改进是否都低于 `min_improvement`
-- `_build_retry_reason()`: 从评估维度中提取不达标项构建原因
-- `_find_weakest_dimension()`: 选取得分最低的评估维度名
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `merge()` | `merge(paths: list[NormalizedChecklistPath]) → list[ChecklistNode]` | 公开入口，调用内部 trie 构建与转换 |
+| `_build_trie()` | 内部方法 | 将路径列表插入 trie 数据结构，每个路径段作为一个 trie 节点 |
+| `_trie_to_checklist()` | 内部方法 | 将 trie 递归转换为 `ChecklistNode` 树，根据深度分配节点类型 |
 
-**模块级函数**:
-- `_now_iso()`: 返回 UTC ISO 格式时间字符串
+**节点类型映射**:
+- 深度 0 → `root` 节点
+- 中间层 → `group` 节点
+- 叶节点 → `expected_result` 节点
 
-#### §3.2.2 依赖关系
+**设计特点**:
+- 纯算法实现，不依赖 LLM
+- 合并质量完全取决于输入路径的归一化质量
+- 当路径层级不一致时，trie 可能产生不平衡的树结构
 
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.run_state` | `EvaluationReport`, `IterationRecord`, `RetryDecision`, `RunStage`, `RunState`, `RunStatus` |
-| `datetime` (stdlib) | `datetime`, `timezone` |
-| `typing` (stdlib) | `Literal` |
-
-仅依赖领域模型层，无外部库依赖。
-
-#### §3.2.3 关键逻辑 / 数据流
-
-```
-EvaluationReport ─────→ decide() ─────→ IterationDecision
-       │                    │                    │
-       ▼                    ▼                    ▼
-  overall_score        四级优先级链          action: pass/retry/fail
-  dimensions[]        (阈值→上限→         reason: 详细说明
-  suggested_retry_     连续无改进→         target_stage: 回流目标
-    stage              回流)
-```
-
-**no-improvement-streak 检测逻辑**: 要求 `iteration_history` 至少有 2 条记录，检查 `current_score - history[-1].score` 和 `history[-1].score - history[-2].score` 是否均低于 `min_improvement`。
-
-**回流阶段映射**: `context_research` / `checkpoint_generation` / `draft_generation` → 对应 `RunStage` 枚举，默认回流到 `DRAFT_GENERATION`。
+**当前状态**: 属于**方案 A**（已弃用）的组件，与 `SemanticPathNormalizer` 配合使用。
 
 ---
 
-### §3.3 `platform_dispatcher.py`
+### §3.2 `checkpoint_outline_planner.py` — CheckpointOutlinePlanner
 
-- **路径**: `app/services/platform_dispatcher.py`
-- **行数**: 247
-- **职责**: 统一管理运行产物的本地持久化和可选的多平台交付（当前支持 XMind）。
+**核心类**: `CheckpointOutlinePlanner`
 
-#### §3.3.1 核心内容
+**职责**: 使用 LLM 对 checkpoint 列表进行层级 outline 规划，再将 expected_results 挂载为叶节点，产出完整的 `ChecklistNode` 树。
 
-**类 `PlatformDispatcher`**:
-- 构造参数: `repository: FileRunRepository`, `xmind_agent: XMindDeliveryAgent | None`, `xmind_agent_factory: Callable[[Path], XMindDeliveryAgent] | None`
-- 支持两种 XMind 交付模式: 直接实例（向后兼容）和工厂函数（per-run 动态创建）
-- `dispatch(run_id, run, workflow_result)` → 核心分发方法:
-  1. 调用 `_persist_local_artifacts()` 持久化本地产物
-  2. 获取 `run_dir` 路径
-  3. 优先用工厂函数创建 agent，否则使用直接实例
-  4. 执行 XMind 交付（失败不阻断主流程，仅 log warning）
-  5. 返回合并的产物路径字典
+**关键方法**:
 
-**`_persist_local_artifacts()`** — 持久化 7 类产物:
-- `parsed_document.json` — 文档解析结果
-- `research_output.json` — 研究输出
-- `checkpoints.json` — 检查点列表
-- `checkpoint_coverage.json` — 检查点覆盖率
-- `test_cases.json` — 测试用例 JSON
-- `test_cases.md` — 测试用例 Markdown
-- `quality_report.json` — 质量报告
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `plan()` | `plan(checkpoints) → list[CanonicalOutlineNode]` | 将 checkpoint 标题/描述输入 LLM，获取结构化的 outline JSON |
+| `attach_expected_results_to_outline()` | `(outline_nodes, checkpoints) → list[ChecklistNode]` | 遍历 outline 叶节点，将 checkpoint 的 expected_behaviors 匹配挂载 |
+| `_find_group_node()` | 内部 helper | 在树中按名称查找 group 节点，用于 expected_results 的定位挂载 |
 
-**模块级函数 `_render_test_cases_markdown()`**: 将 `TestCase` 列表渲染为中文 Markdown 文档，包含前置条件、步骤、预期结果。
+**工作流程**:
+1. **Step 1 — LLM Outline 规划**: 将所有 checkpoint 的标题组装为 prompt，要求 LLM 返回层级化的 `CanonicalOutlineNode` JSON 数组
+2. **Step 2 — Expected Results 挂载**: 遍历 outline 的每个叶节点，根据 checkpoint 的 expected_behaviors 字段匹配并创建 `expected_result` 类型的子节点
 
-#### §3.3.2 依赖关系
+**约束与限制**:
+- LLM 单次调用处理所有 checkpoints，存在 context window 和规划质量的瓶颈
+- outline JSON 解析依赖 LLM 严格遵循格式约定
+- expected_results 挂载使用字符串匹配，可能出现漏挂或错挂
 
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.case_models` | `TestCase` |
-| `app.domain.api_models` | `CaseGenerationRun` (TYPE_CHECKING) |
-| `app.repositories.run_repository` | `FileRunRepository` (TYPE_CHECKING) |
-| `app.services.xmind_delivery_agent` | `XMindDeliveryAgent` (TYPE_CHECKING) |
-| `logging`, `pathlib`, `typing` (stdlib) | 标准库组件 |
-
-#### §3.3.3 关键逻辑 / 数据流
-
-```
-dispatch()
-  ├── _persist_local_artifacts()
-  │     ├── repository.save() × N  → JSON 文件
-  │     └── repository.save_text() → Markdown 文件
-  └── XMind 交付（可选）
-        ├── xmind_agent_factory(run_dir) [优先]
-        │   或 xmind_agent [向后兼容]
-        └── agent.deliver() → XMindDeliveryResult
-              ├── success → artifacts["xmind_file"]
-              └── failure → logger.warning()（不阻断）
-```
-
-**容错设计要点**: XMind 相关的所有操作均被 `try/except` 包裹，包括工厂函数创建、`deliver()` 调用。任何异常仅 `logger.exception()` 记录，不向上传播。
+**当前状态**: 属于**方案 B**（当前使用）的核心组件。
 
 ---
 
-### §3.4 `project_context_service.py`
+### §3.3 `semantic_path_normalizer.py` — SemanticPathNormalizer
 
-- **路径**: `app/services/project_context_service.py`
-- **行数**: 64
-- **职责**: 项目上下文的 CRUD 业务服务层，位于 API 层和仓储层之间。
+**核心类**: `SemanticPathNormalizer`
 
-#### §3.4.1 核心内容
+**职责**: 通过 LLM 两阶段处理，将 checkpoint 的标题和描述归一化为标准的路径形式（`NormalizedChecklistPath`）。
 
-**类 `ProjectContextService`**:
-- 构造参数: `repo: Optional[ProjectRepository]`，默认创建新 `ProjectRepository` 实例
-- **命令方法**:
-  - `create_project(name, description, project_type, regulatory_frameworks, tech_stack, custom_standards, metadata)` → 创建 `ProjectContext` 并持久化
-  - `update_project(project_id, **updates)` → 加载 → 合并更新 → 重建 → 保存，不存在时抛 `KeyError`
-  - `delete_project(project_id)` → 委托仓储删除
-- **查询方法**:
-  - `get_project(project_id)` → 按 ID 查找
-  - `list_projects()` → 列出全部
+**两阶段流程**:
 
-#### §3.4.2 依赖关系
+| 阶段 | 输入 | 输出 | 说明 |
+|------|------|------|------|
+| Phase 1 — 原始路径提取 | checkpoint 标题 + 描述 | 原始路径字符串列表 | 从非结构化文本中提取层级路径 |
+| Phase 2 — 路径归一化 | 原始路径列表 | `NormalizedChecklistPath` 对象列表 | LLM 将路径标准化为统一的命名和层级 |
 
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.project_models` | `ProjectContext`, `ProjectType`, `RegulatoryFramework` |
-| `app.repositories.project_repository` | `ProjectRepository` |
-| `datetime` (stdlib) | `datetime` |
+**输出格式**: `NormalizedChecklistPath` 包含有序的路径段列表，如 `["登录模块", "正常流程", "用户名密码登录"]`
 
-#### §3.4.3 关键逻辑 / 数据流
+**问题分析**:
+- Phase 1 的路径提取高度依赖 checkpoint 描述的质量和格式
+- Phase 2 归一化时，LLM 对同义词的统一处理不一致（如"登录"/"登陆"/"Sign In"）
+- 两次 LLM 调用增加延迟和成本
+- 输出格式不一致导致下游 ChecklistMerger 合并异常
 
-`update_project` 采用 **load-merge-rebuild** 模式：通过 `model_dump()` 序列化现有对象，合并 `**updates` 后重新构造 `ProjectContext` 实例。注意 `updated_at` 使用 `datetime.utcnow()` 手动设置（未使用 timezone-aware 方式）。
+**当前状态**: 属于**方案 A**（已弃用）的组件。
 
 ---
 
-### §3.5 `text_normalizer.py`
+### §3.4 `precondition_grouper.py` — PreconditionGrouper
 
-- **路径**: `app/services/text_normalizer.py`
-- **行数**: 193
-- **职责**: 中英文混排场景下的文本规范化处理，将英文操作动词和结构性术语替换为中文等价词，同时保护代码标识符。
+**核心类**: `PreconditionGrouper`
 
-#### §3.5.1 核心内容
+**职责**: 基于测试用例的前置条件（precondition）关键词，将用例分桶并在 `ChecklistNode` 树中插入 `precondition_group` 节点。
 
-**保护模式 (Protected Patterns)** — 7 类不应被替换的内容（按优先级排列）:
-1. `_RE_BACKTICK` — 反引号包裹内容 `` `...` ``
-2. `_RE_URL` — HTTP/HTTPS URL
-3. `_RE_DOT_PATH` — 点号分隔路径（如 `response.data.items`）
-4. `_RE_SNAKE_CASE` — snake_case 标识符（至少含一个 `_`）
-5. `_RE_CAMEL_CASE` — camelCase 标识符
-6. `_RE_PASCAL_CASE` — PascalCase 标识符
-7. `_RE_ALL_CAPS` — 全大写缩写词（API, URL, JSON 等）
+**工作机制**:
+1. **关键词提取**: 从每个测试用例的 precondition 字段提取中文关键词
+2. **相似度匹配**: 使用关键词交集/并集的相似度算法对用例进行分桶
+3. **节点插入**: 在 ChecklistNode 树的适当层级插入 `precondition_group` 类型节点，将同组用例聚集为其子节点
 
-**占位符机制**: 使用 `\x00PH{index}\x00` 作为唯一占位符，先替换保护内容，处理完映射后再还原。
+**设计特点**:
+- 不依赖 LLM，使用纯关键词匹配
+- 支持中文分词和关键词提取
+- 分组粒度由相似度阈值控制
 
-**动作词映射 (`_ACTION_MAP`)** — 30 组英文→中文映射:
-- Navigate, Click, Select, Input, Enter, Check, Verify, Confirm, Create, Submit, Delete, Remove, Open, Close, Save, Cancel, Edit, Update, Search, Login, Logout, Upload, Download, Refresh 等
-- 部分支持复合形式（如 `Double-click` → `双击`, `Right-click` → `右键点击`）
+**局限性**:
+- 关键词匹配无法处理语义等价但措辞不同的前置条件（如"用户已登录"vs"登录状态下"）
+- 中文分词质量影响关键词提取精度
+- 阈值需要人工调优，缺乏自适应能力
 
-**结构性术语映射 (`_STRUCTURAL_MAP`)** — 7 组:
-- Preconditions → 前置条件, Steps → 步骤, Expected Results → 预期结果, Main branch → 主分支, Edge cases → 边界场景, Exception/Error branch → 异常分支
+**当前状态**: 属于**方案 B**（当前使用）的后处理组件。
+
+---
+
+### §3.5 `workflow_service.py` — WorkflowService
+
+**核心类**: `WorkflowService`
+
+**职责**: 主编排服务，负责构建 LangGraph 子图、执行迭代循环、协调输出渲染。
+
+**关键方法**:
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `compile_and_run()` | 主入口方法 | 构建 LangGraph → invoke 执行 → 迭代循环 → 输出渲染 |
+
+**编排流程**:
+```
+compile_and_run()
+  ├── 构建 LangGraph subgraph
+  │     ├── checkpoint_outline_planner node
+  │     ├── evidence_mapper node
+  │     ├── draft_writer node
+  │     └── structure_assembler node
+  ├── invoke subgraph（含迭代循环）
+  │     └── IterationController.evaluate_and_decide()
+  └── 输出渲染
+        ├── MarkdownRenderer → markdown 文件
+        └── PlatformDispatcher → xmind 等
+```
+
+**设计特点**:
+- 基于 LangGraph 的声明式工作流定义
+- 迭代循环由 `IterationController` 控制终止条件
+- 输出渲染支持多格式（markdown + xmind）
+
+---
+
+### §3.6 `iteration_controller.py` — IterationController
+
+**核心类**: `IterationController`
+
+**职责**: 管理 checklist 生成的多轮评估迭代，决定是否继续迭代、通过或终止。
+
+**关键方法**:
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `evaluate_and_decide()` | → `IterationDecision` | 评估当前轮次结果，返回 pass/retry/abort 决策 |
+
+**返回值**: `IterationDecision` 枚举
+- `pass` — 质量达标，终止迭代
+- `retry` — 需要改进，进入下一轮
+- `abort` — 达到最大轮次或不可恢复错误，终止
+
+**追踪机制**: 使用 `IterationRecords` 记录每轮迭代的评估结果和决策原因，便于调试和回溯。
+
+---
+
+### §3.7 `text_normalizer.py` — 文本归一化
 
 **核心函数**:
-- `normalize_text(text)` → 四步处理: 保护 → 动作词替换 → 术语替换 → 还原
-- `normalize_test_case(case)` → 使用 `model_copy(update=...)` 对 TestCase 的 title/preconditions/steps/expected_results 进行规范化，不修改原对象
 
-#### §3.5.2 依赖关系
+| 函数 | 说明 |
+|------|------|
+| `normalize_text(text: str) → str` | 通用文本归一化：空白字符统一、中英文标点标准化、编码修复 |
+| `normalize_test_case(case: TestCase) → TestCase` | 将归一化应用到 TestCase 的各字段（标题、步骤、预期结果等） |
 
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.case_models` | `TestCase` (TYPE_CHECKING) |
-| `re` (stdlib) | 正则表达式 |
+**处理内容**:
+- 全角/半角标点统一
+- 多余空白字符压缩
+- 中英文混排间距标准化
+- Unicode 编码异常修复
+- 首尾空白去除
 
-零运行时外部依赖，仅依赖标准库 `re`。
-
-#### §3.5.3 关键逻辑 / 数据流
-
-```
-normalize_text(text)
-  │
-  ├── 快速短路: 空文本或无 ASCII 字母 → 直接返回
-  │
-  ├── Step 1: 保护模式扫描
-  │     7 个正则按优先级依次匹配
-  │     匹配内容存入 protected[] 列表，原文替换为 \x00PH{idx}\x00
-  │
-  ├── Step 2: _ACTION_MAP 逐项 sub()
-  │
-  ├── Step 3: _STRUCTURAL_MAP 逐项 sub()
-  │
-  └── Step 4: 遍历 protected[] 还原占位符
-```
-
-**注意**: 替换采用线性扫描（30 + 7 = 37 次正则替换），对大规模文本性能可能成为瓶颈。
+**作用**: 确保下游处理（LLM 输入、关键词提取、字符串匹配）不受文本格式差异干扰。
 
 ---
 
-### §3.6 `workflow_service.py`
+### §3.8 `markdown_renderer.py` — Markdown 渲染
 
-- **路径**: `app/services/workflow_service.py`
-- **行数**: 437
-- **职责**: 系统的**中央编排服务**，集成迭代评估回路，协调 LangGraph 工作流引擎、评估节点、迭代控制器和平台分发器。
+**核心函数**: `render_test_cases_markdown()`
 
-#### §3.6.1 核心内容
+**两种渲染模式**:
 
-**类 `WorkflowService`** — 核心编排服务:
+| 模式 | 输入 | 输出 | 说明 |
+|------|------|------|------|
+| 扁平列表模式 | `list[TestCase]` | Markdown 表格或列表 | 简单的编号列表输出 |
+| 树模式 | `list[ChecklistNode]` | 层级 Markdown 标题 | 按 ChecklistNode 树结构渲染多级标题和子项 |
 
-**构造函数参数** (8 个):
-- `settings: Settings` — 全局配置
-- `repository: FileRunRepository | None` — 运行记录仓储
-- `llm_client: LLMClient | None` — LLM 客户端
-- `state_repository: RunStateRepository | None` — 运行状态仓储
-- `iteration_controller: IterationController | None` — 迭代控制器
-- `platform_dispatcher: PlatformDispatcher | None` — 平台分发器
-- `enable_xmind: bool = False` — XMind 交付开关
-- `project_context_service: ProjectContextService | None` — 项目上下文服务
-
-**核心公开方法**:
-- `create_run(request)` → 完整运行创建与执行:
-  1. `generate_run_id()` 生成 UTC+8 时间戳 ID
-  2. 持久化 `request.json`
-  3. `initialize_state()` 创建初始运行状态
-  4. `_execute_with_iteration()` 执行迭代评估回路
-  5. 构建 `CaseGenerationRun` 结果对象
-  6. `_persist_run_artifacts()` 持久化所有产物
-  7. 异常时: `mark_error()` 记录错误，仍然持久化失败运行
-- `get_run(run_id)` → 查询: 内存缓存 → 文件系统 → 补充迭代摘要
-
-**核心私有方法**:
-- `_execute_with_iteration()` — 迭代评估回路主循环:
-  ```
-  while True:
-      设置状态 RUNNING → 执行 workflow.invoke() → 设置状态 EVALUATING
-      → evaluate() → save_evaluation_report() → decide()
-      → update_state_after_evaluation() → save_run_state()
-      → if pass/fail: break; if retry: continue
-  ```
-- `_prepare_retry_input()` — 回流时保留上游结果的策略:
-  - `CONTEXT_RESEARCH`: 从头重跑
-  - `CHECKPOINT_GENERATION`: 保留 parsed_document + research_output
-  - `DRAFT_GENERATION`: 保留所有中间结果
-- `_get_workflow()` — 懒加载 + 缓存 LangGraph 工作流实例
-- `_get_llm_client()` — 懒加载 + 缓存 LLM 客户端
-- `_create_xmind_agent_factory()` — 返回工厂闭包，per-run 创建 XMind 交付链
-- `_build_iteration_summary()` — 从 RunState 构建轻量 IterationSummary
-- `_persist_run_artifacts()` — 通过 PlatformDispatcher 持久化，补充状态/评估/日志路径
-
-#### §3.6.2 依赖关系
-
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.clients.llm` | `LLMClient`, `LLMClientConfig`, `OpenAICompatibleLLMClient` |
-| `app.config.settings` | `Settings` |
-| `app.domain.api_models` | `CaseGenerationRequest`, `CaseGenerationRun`, `ErrorInfo`, `IterationSummary` |
-| `app.domain.case_models` | `QualityReport`, `TestCase` |
-| `app.domain.run_state` | `RunStage`, `RunStatus` |
-| `app.graphs.main_workflow` | `build_workflow` |
-| `app.nodes.evaluation` | `evaluate` |
-| `app.nodes.project_context_loader` | `build_project_context_loader` |
-| `app.repositories.run_repository` | `FileRunRepository` |
-| `app.repositories.run_state_repository` | `RunStateRepository` |
-| `app.services.iteration_controller` | `IterationController` |
-| `app.services.platform_dispatcher` | `PlatformDispatcher` |
-| `app.services.project_context_service` | `ProjectContextService` |
-| `app.services.xmind_connector` | `FileXMindConnector` |
-| `app.services.xmind_delivery_agent` | `XMindDeliveryAgent` |
-| `app.services.xmind_payload_builder` | `XMindPayloadBuilder` |
-| `app.utils.run_id` | `generate_run_id` |
-
-**最高扇入/扇出的文件**: 导入跨越 5 个内部子包（clients, config, domain, graphs, nodes, repositories, services, utils），是整个系统依赖最密集的模块。
-
-#### §3.6.3 关键逻辑 / 数据流
-
-```
-create_run(request)
-  │
-  ├─ generate_run_id() ──────────────────────────── run_id
-  ├─ repository.save(request.json) ───────────────── 持久化请求
-  ├─ iteration_controller.initialize_state() ─────── RunState
-  │
-  ├─ _execute_with_iteration() ◄─── 核心迭代回路
-  │   │
-  │   ├── [Loop] workflow.invoke(input) ──────────── LangGraph 执行
-  │   │     ├── evaluate(test_cases, checkpoints, ...) ─── 结构化评估
-  │   │     ├── save_evaluation_report() ───────────── 持久化评估
-  │   │     ├── decide(state, evaluation) ──────────── 迭代决策
-  │   │     ├── update_state_after_evaluation() ──────── 更新状态
-  │   │     └── pass/fail → break | retry → continue
-  │   │
-  │   └── _prepare_retry_input() ──── 回流时保留上游结果
-  │
-  ├─ CaseGenerationRun() ────────────────────── 构建结果对象
-  │
-  └─ _persist_run_artifacts()
-        └── platform_dispatcher.dispatch() ──────── 本地持久化 + XMind
-```
+**树模式渲染规则**:
+- `root` 节点 → `#` 一级标题
+- `group` 节点 → `##`/`###` 等对应层级标题
+- `expected_result` 叶节点 → 列表项
+- TestCase 内容嵌套在叶节点下方
 
 ---
 
-### §3.7 `xmind_connector.py`
+### §3.9 `platform_dispatcher.py` — PlatformDispatcher
 
-- **路径**: `app/services/xmind_connector.py`
-- **行数**: 218
-- **职责**: 定义 XMind 连接器的协议接口和基于文件系统的默认实现（ZIP 归档 `.xmind` 文件生成）。
+**核心类**: `PlatformDispatcher`
 
-#### §3.7.1 核心内容
+**职责**: 根据配置将生成结果分发到不同输出平台。
 
-**Protocol `XMindConnector`** (runtime_checkable):
-- `create_map(root_node: XMindNode, title: str) → XMindDeliveryResult`
-- `health_check() → bool`
+**支持的输出**:
+- **Markdown**: 调用 `MarkdownRenderer` 生成 `.md` 文件
+- **XMind**: 通过 `XMindPayloadBuilder` → `XMindDeliveryAgent` → `XMindConnector` 链路生成 `.xmind` 文件
 
-**类 `FileXMindConnector`** — Protocol 的文件系统实现:
-- `__init__(output_dir)` — 确保输出目录存在
-- `create_map(root_node, title)` → 生成 `.xmind` ZIP 文件:
-  1. 固定文件名 `checklist.xmind`
-  2. `_node_to_topic()` 递归转换节点树
-  3. 构建 `content.json`（sheet + rootTopic）、`metadata.json`（creator info）、`manifest.json`（文件清单）
-  4. 使用 `zipfile.ZipFile(ZIP_DEFLATED)` 写入
-- `health_check()` → 在输出目录写/删临时文件检测可写性
-
-**辅助函数**:
-- `_node_to_topic(node: XMindNode)` → 递归将 `XMindNode` 转换为 XMind JSON topic 字典（处理 children/markers/notes/labels）
-- `_sanitize_filename(name)` → 安全文件名转换（保留备用，当前未使用）
-
-**常量**: `XMIND_DEFAULT_FILENAME = "checklist.xmind"`
-
-#### §3.7.2 依赖关系
-
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.xmind_models` | `XMindDeliveryResult`, `XMindNode` |
-| `json`, `zipfile`, `pathlib`, `uuid` (stdlib) | 标准库组件 |
-
-#### §3.7.3 关键逻辑 / 数据流
-
-```
-XMindNode (tree)
-  │
-  ▼
-_node_to_topic() ──── 递归转换
-  │
-  ▼
-content.json = [{id, class:"sheet", title, rootTopic: {...}}]
-metadata.json = {creator: {name:"AutoChecklist", version:"0.1.0"}}
-manifest.json = {file-entries: {...}}
-  │
-  ▼
-zipfile.ZipFile("checklist.xmind", "w", ZIP_DEFLATED)
-  └── writestr() × 3 个 JSON 文件
-```
-
-XMind 文件格式兼容 XMind 8/Zen，本质是 ZIP 归档包含 JSON 描述。
+**设计特点**:
+- 基于策略模式，便于扩展新的输出格式
+- 输出格式可通过配置独立开关
 
 ---
 
-### §3.8 `xmind_delivery_agent.py`
+### §3.10 `xmind_connector.py` — XMind 连接器
 
-- **路径**: `app/services/xmind_delivery_agent.py`
-- **行数**: 170
-- **职责**: XMind 思维导图的构建与交付代理，编排 PayloadBuilder 和 Connector 的完整流程，并提供防御性错误处理。
+**核心定义**:
+- `XMindConnector` — Protocol（接口协议），定义 XMind 输出的标准契约
+- `FileXMindConnector` — 基于文件系统的实现，将 XMind 数据写入本地 `.xmind` 文件
 
-#### §3.8.1 核心内容
-
-**类 `XMindDeliveryAgent`**:
-- 构造参数: `connector: XMindConnector`, `payload_builder: XMindPayloadBuilder`, `output_dir: str | Path`
-- `deliver(run_id, test_cases, checkpoints, research_output, title, output_dir)`:
-  1. 如果指定 `output_dir` 且 connector 是 `FileXMindConnector`，动态更新其 `output_dir`
-  2. `payload_builder.build()` 构建 `XMindNode` 树
-  3. `connector.create_map()` 生成 `.xmind` 文件
-  4. 更新 `delivery_time`
-  5. `_save_delivery_artifact()` 保存 `xmind_delivery.json` 元数据
-  6. **外层 try/except 全捕获**: 失败时构造错误 `XMindDeliveryResult`，并尽力保存错误元数据
-
-- `_save_delivery_artifact(run_id, result, base_dir)`:
-  - 智能路径判断: 如果 `base_dir.name == run_id` 则直接写入，否则在 `base_dir/run_id/` 下写入
-  - 输出 `xmind_delivery.json`
-
-#### §3.8.2 依赖关系
-
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.xmind_models` | `XMindDeliveryResult`, `XMindNode` |
-| `app.services.xmind_connector` | `XMindConnector`, `FileXMindConnector` (运行时) |
-| `app.services.xmind_payload_builder` | `XMindPayloadBuilder` |
-| `app.domain.case_models` | `TestCase` (TYPE_CHECKING) |
-| `app.domain.checkpoint_models` | `Checkpoint` (TYPE_CHECKING) |
-| `app.domain.research_models` | `ResearchOutput` (TYPE_CHECKING) |
-
-#### §3.8.3 关键逻辑 / 数据流
-
-```
-deliver()
-  │
-  ├── [可选] 动态更新 connector.output_dir
-  │
-  ├── payload_builder.build()
-  │     test_cases + checkpoints + research_output
-  │     → XMindNode (root)
-  │
-  ├── connector.create_map(root_node, title)
-  │     → XMindDeliveryResult
-  │
-  ├── _save_delivery_artifact()
-  │     → xmind_delivery.json
-  │
-  └── [异常] → XMindDeliveryResult(success=False)
-              → 尽力保存错误元数据
-```
-
-**防御性设计**: `deliver()` 方法绝不抛出异常。外层 `try/except Exception` 捕获所有错误，内层的元数据保存也有独立的 `try/except`。
+**设计特点**: Protocol-based 设计，支持替换为网络上传或其他 XMind 后端实现。
 
 ---
 
-### §3.9 `xmind_payload_builder.py`
+### §3.11 `xmind_delivery_agent.py` — XMind 交付代理
 
-- **路径**: `app/services/xmind_payload_builder.py`
-- **行数**: 227
-- **职责**: 将测试用例、检查点和研究输出映射为 XMind 思维导图的 `XMindNode` 层次结构。
+**核心类**: `XMindDeliveryAgent`
 
-#### §3.9.1 核心内容
+**职责**: 封装 XMind 交付过程的防御性错误处理，确保 XMind 输出失败不会导致整体流程崩溃。
 
-**常量映射**:
-- `_CATEGORY_MARKERS`: 分类 → XMind 星标颜色 (functional→blue, edge_case→orange, performance→green, security→red, usability→purple)
-- `_PRIORITY_MARKERS`: 优先级 → XMind 优先级标记 (P0→priority-1 ... P3→priority-4)
+**错误处理策略**:
+- 捕获并记录所有 XMind 相关异常
+- 失败时回退到仅 Markdown 输出
+- 提供详细的错误日志便于排查
 
-**类 `XMindPayloadBuilder`**:
-- `build(test_cases, checkpoints, research_output, run_id, title)`:
-  1. 构建 `checkpoint_id → Checkpoint` 查找表
-  2. 按 `checkpoint_id` 对测试用例分组（无关联的归入 ungrouped）
-  3. 构建一级节点: 每个 checkpoint 一个分组节点
-  4. 未关联用例归到「其他用例」节点
-  5. 检测未覆盖的 fact（通过 `fact_ids` 集合差集），生成「未覆盖的事实」节点（红旗标记）
-  6. 返回根节点 `XMindNode`
+---
 
-- `_build_checkpoint_node(checkpoint, cases)` → checkpoint 级节点:
-  - markers: 按分类选择星标颜色
-  - notes: 聚合目标描述和证据引用（section_title + line_range + excerpt）
-  - labels: [risk, category]
-  - children: 测试用例节点列表
+### §3.12 `xmind_payload_builder.py` — XMind Payload 构建
 
-- `_build_case_node(case)` → 测试用例级节点:
-  - labels: [priority]
-  - markers: 优先级图标
-  - children: 前置条件节点 + 步骤节点（带编号）+ 预期结果节点
+**核心类**: `XMindPayloadBuilder`
 
-#### §3.9.2 依赖关系
+**职责**: 将 `ChecklistNode` 树转换为 XMind 的 topic 树数据结构。
 
-| 依赖目标 | 导入内容 |
-|----------|----------|
-| `app.domain.xmind_models` | `XMindNode` |
-| `app.domain.case_models` | `TestCase` (TYPE_CHECKING) |
-| `app.domain.checkpoint_models` | `Checkpoint` (TYPE_CHECKING) |
-| `app.domain.research_models` | `ResearchOutput` (TYPE_CHECKING) |
+**转换规则**:
+- `ChecklistNode` → XMind Topic
+- 子节点递归转换为子 Topic
+- 支持 checkpoint fallback：当 ChecklistNode 树不完整时，直接从 checkpoint 数据构建 topic
 
-#### §3.9.3 关键逻辑 / 数据流
+**Checkpoint Fallback**: 当主流程的树结构构建失败时，可绕过 outline 直接从原始 checkpoint 构建扁平的 XMind 结构。
+
+---
+
+### §3.13 `project_context_service.py` — 项目上下文服务
+
+**核心类**: `ProjectContextService`
+
+**职责**: 项目上下文的 CRUD 操作，通过 SQLite 持久化存储。
+
+**功能**:
+- 创建/更新项目上下文
+- 查询项目上下文
+- 删除项目上下文
+
+**用途**: 在多轮对话或跨会话场景下保持项目级别的配置和状态。
+
+---
+
+## §4 服务依赖图
+
+### §4.1 调用链全景
 
 ```
-build()
+┌──────────────────────────────────────────────────────────────────┐
+│                      WorkflowService                             │
+│                    (主编排 · LangGraph)                           │
+│                                                                  │
+│  ┌──────────────────┐    ┌──────────────────┐                    │
+│  │ IterationController│   │ ProjectContext   │                    │
+│  │  (迭代控制)        │   │   Service        │                    │
+│  └────────┬─────────┘    └──────────────────┘                    │
+│           │                                                      │
+│  ┌────────▼──────────────────────────────────────┐               │
+│  │            LangGraph Subgraph Nodes            │              │
+│  │                                                │              │
+│  │  ┌─────────────────────┐  ┌────────────────┐  │              │
+│  │  │ CheckpointOutline   │  │ EvidenceMapper │  │              │
+│  │  │ Planner (方案 B)    │  │   (graph 层)    │  │              │
+│  │  └────────┬────────────┘  └────────────────┘  │              │
+│  │           │                                    │              │
+│  │  ┌────────▼────────────┐  ┌────────────────┐  │              │
+│  │  │ PreconditionGrouper │  │  DraftWriter   │  │              │
+│  │  │  (前置条件分组)      │  │  (graph 层)    │  │              │
+│  │  └────────┬────────────┘  └────────────────┘  │              │
+│  │           │                                    │              │
+│  │  ┌────────▼────────────────────────────────┐   │              │
+│  │  │       StructureAssembler (graph 层)     │   │              │
+│  │  └────────┬────────────────────────────────┘   │              │
+│  └───────────┼────────────────────────────────────┘              │
+│              │                                                   │
+│  ┌───────────▼───────────────────────────────────────┐           │
+│  │              PlatformDispatcher                    │           │
+│  │                                                    │           │
+│  │  ┌──────────────────┐  ┌────────────────────────┐ │           │
+│  │  │ MarkdownRenderer │  │ XMindPayloadBuilder    │ │           │
+│  │  └──────────────────┘  └──────────┬─────────────┘ │           │
+│  │                                   │                │           │
+│  │                        ┌──────────▼─────────────┐ │           │
+│  │                        │ XMindDeliveryAgent     │ │           │
+│  │                        └──────────┬─────────────┘ │           │
+│  │                                   │                │           │
+│  │                        ┌──────────▼─────────────┐ │           │
+│  │                        │ FileXMindConnector     │ │           │
+│  │                        └────────────────────────┘ │           │
+│  └────────────────────────────────────────────────────┘           │
+│                                                                  │
+│  ┌───────────────────────────────────────────────────┐           │
+│  │  TextNormalizer (横切关注点 · 各节点均可调用)       │           │
+│  └───────────────────────────────────────────────────┘           │
+│                                                                  │
+│  ══════════════ 已弃用组件（方案 A）══════════════               │
+│  ┌─────────────────────┐  ┌──────────────────┐                   │
+│  │ SemanticPath         │→│ ChecklistMerger  │                   │
+│  │ Normalizer           │  │  (trie 合并)     │                   │
+│  └─────────────────────┘  └──────────────────┘                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### §4.2 数据流向
+
+```
+Checkpoints (输入)
+    │
+    ▼
+CheckpointOutlinePlanner.plan()
+    │  LLM → CanonicalOutlineNode JSON
+    ▼
+attach_expected_results_to_outline()
+    │  checkpoint.expected_behaviors → 叶节点
+    ▼
+PreconditionGrouper
+    │  关键词分桶 → precondition_group 节点插入
+    ▼
+ChecklistNode 树 (核心中间数据结构)
+    │
+    ├──→ MarkdownRenderer → .md 文件
+    └──→ XMindPayloadBuilder → XMindDeliveryAgent → .xmind 文件
+```
+
+### §4.3 横切依赖
+
+| 服务 | 被依赖者 | 说明 |
+|------|---------|------|
+| `TextNormalizer` | 几乎所有节点 | 文本归一化作为预处理步骤被广泛调用 |
+| `ProjectContextService` | `WorkflowService` | 提供项目级配置上下文 |
+| `IterationController` | `WorkflowService` | 控制迭代循环的终止条件 |
+
+---
+
+## §5 Checklist 整合方案深度分析
+
+> **这是整个分析的核心部分。** Checklist 整合——即将散乱的 checkpoint 列表转化为结构清晰、层级合理的 checklist 树——是 AutoChecklist 系统最关键、也是当前效果最需提升的环节。以下从架构、代码路径、问题根因、改进方向四个维度展开深入分析。
+
+---
+
+### §5.1 现有方案架构
+
+当前系统中存在**两套并行的 Checklist 整合方案**，方案 A 已弃用但代码仍保留，方案 B 为当前生产路径。
+
+#### 方案 A（已弃用）: SemanticPathNormalizer → ChecklistMerger
+
+**设计思路**: 先归一化，后合并。将每个 checkpoint 的语义信息提取为标准化路径，再通过 trie 树结构自动合并为层级树。
+
+**流程**:
+```
+Checkpoints
+    │
+    ▼
+SemanticPathNormalizer
+    │  Phase 1: 从 title + description 提取原始路径
+    │  Phase 2: LLM 将原始路径归一化为标准形式
+    ▼
+list[NormalizedChecklistPath]
+    │  例: ["登录模块", "正常流程", "用户名密码登录"]
+    │      ["登录模块", "正常流程", "手机号验证码登录"]
+    │      ["登录模块", "异常流程", "密码错误"]
+    ▼
+ChecklistMerger._build_trie()
+    │  将路径段逐层插入 trie 节点
+    ▼
+ChecklistMerger._trie_to_checklist()
+    │  trie 递归转换为 ChecklistNode 树
+    ▼
+list[ChecklistNode]
+```
+
+**优点**:
+- 路径归一化的抽象层次正确：将非结构化的 checkpoint 信息转化为结构化路径是合理的中间表示
+- Trie 合并是确定性算法，可预测、可调试
+- 路径粒度可控：通过控制路径段数量来控制树的深度
+
+**弃用原因**:
+1. **路径归一化质量不稳定**: LLM 对不同 checkpoint 生成的路径层级深度不一致（有的 2 层，有的 5 层），导致 trie 树极度不平衡
+2. **LLM 输出格式不一致**: Phase 2 的归一化结果偶发性地不遵循约定格式（如混入自然语言描述而非纯路径），导致解析失败
+3. **同义词统一困难**: "登录"/"登陆"/"Sign In"/"用户认证" 等语义等价的路径段被 trie 视为不同分支，产生冗余
+4. **Trie 合并产生过深/过浅的层级**: 缺乏全局视角，纯局部合并容易产生退化的树结构（如单链退化或根节点下直接挂叶子）
+
+---
+
+#### 方案 B（当前使用）: CheckpointOutlinePlanner → PreconditionGrouper
+
+**设计思路**: 先规划整体骨架，后挂载叶节点。用 LLM 一次性理解所有 checkpoint 并生成层级 outline，再将具体的 expected_results 挂载到 outline 叶节点。
+
+**流程**:
+```
+Checkpoints
+    │
+    ▼
+CheckpointOutlinePlanner.plan(checkpoints)
+    │  将所有 checkpoint 标题组装为 prompt
+    │  LLM 返回 CanonicalOutlineNode JSON
+    │  ┌──────────────────────────────────┐
+    │  │ CanonicalOutlineNode 结构:        │
+    │  │   name: "登录功能"                │
+    │  │   children:                       │
+    │  │     - name: "正常登录"             │
+    │  │       children:                   │
+    │  │         - name: "用户名密码"       │
+    │  │         - name: "手机号验证码"     │
+    │  │     - name: "异常登录"             │
+    │  │       children:                   │
+    │  │         - name: "密码错误"         │
+    │  └──────────────────────────────────┘
+    ▼
+attach_expected_results_to_outline(outline_nodes, checkpoints)
+    │  遍历 outline 叶节点
+    │  对每个叶节点：
+    │    1. 在 checkpoints 中查找匹配的 checkpoint
+    │    2. 将 checkpoint.expected_behaviors 作为 expected_result 子节点挂载
+    ▼
+ChecklistNode 树 (含 expected_result 叶节点)
+    │
+    ▼
+PreconditionGrouper
+    │  遍历树中的 expected_result 节点
+    │  提取关联 TestCase 的 precondition 字段
+    │  基于中文关键词的相似度进行分桶
+    │  在原层级中插入 precondition_group 节点
+    ▼
+最终 ChecklistNode 树
+```
+
+**优点**:
+- LLM 具有全局视角，能理解 checkpoint 之间的逻辑关系
+- 一次调用产出完整的层级结构，避免了逐个路径合并的碎片化问题
+- PreconditionGrouper 补充了按前置条件的横切分组维度
+
+**现存问题** (详见 §5.3):
+1. LLM 单次处理大量 checkpoint 时层级规划质量下降
+2. PreconditionGrouper 使用关键词匹配而非语义理解，分组精度有限
+3. expected_results 挂载是简单的字符串匹配，可能遗漏或错配
+4. 缺乏对 outline 质量的自动评估和反馈机制
+
+---
+
+### §5.2 关键代码路径分析
+
+#### §5.2.1 主流程调用链
+
+以下为从 `WorkflowService` 入口到最终 ChecklistNode 树产出的完整代码路径：
+
+```
+WorkflowService.compile_and_run()
   │
-  ├── checkpoint_id → Checkpoint 查找表
-  ├── test_cases 按 checkpoint_id 分组
-  │     ├── grouped: {cp_id: [cases...]}
-  │     └── ungrouped: [cases...]
+  ├── 1. 构建 LangGraph subgraph
+  │     └── 定义节点: outline_planner → evidence_mapper → draft_writer → structure_assembler
   │
-  ├── 一级节点构建:
-  │     ├── [CP-001] checkpoint_title
-  │     │     └── [TC-001] case_title
-  │     │           ├── 前置条件 → [子节点...]
-  │     │           ├── 步骤 → [1. xxx, 2. yyy...]
-  │     │           └── 预期结果 → [子节点...]
-  │     ├── 其他用例
-  │     └── 未覆盖的事实 (N) 🚩
+  ├── 2. invoke subgraph（迭代执行）
+  │     │
+  │     ├── [Node] checkpoint_outline_planner
+  │     │     │
+  │     │     ├── CheckpointOutlinePlanner.plan(checkpoints)
+  │     │     │     ├── 组装 prompt: checkpoint 标题列表 + 层级规划指令
+  │     │     │     ├── LLM 调用: → JSON 响应
+  │     │     │     ├── JSON 解析: → list[CanonicalOutlineNode]
+  │     │     │     └── 返回 outline 骨架
+  │     │     │
+  │     │     └── attach_expected_results_to_outline(outline, checkpoints)
+  │     │           ├── 遍历 outline 叶节点
+  │     │           ├── 对每个叶节点:
+  │     │           │     ├── 在 checkpoints 中按名称查找匹配项
+  │     │           │     ├── 提取 checkpoint.expected_behaviors
+  │     │           │     └── 创建 expected_result 子节点挂载
+  │     │           └── 返回 list[ChecklistNode]（含 expected_result 叶节点）
+  │     │
+  │     ├── [Node] evidence_mapper
+  │     │     └── 将 evidence 映射到 ChecklistNode 节点（graph 层实现）
+  │     │
+  │     ├── [Node] draft_writer
+  │     │     ├── _resolve_path_context(optimized_tree)
+  │     │     │     └── 为每个叶节点注入完整的层级路径上下文
+  │     │     │         例: "登录功能 > 正常登录 > 用户名密码"
+  │     │     └── LLM 调用: 基于路径上下文 + evidence 生成 TestCase
+  │     │
+  │     └── [Node] structure_assembler
+  │           ├── 收集所有 draft_writer 产出的 TestCase
+  │           ├── attach_expected_results_to_outline()  ← 再次调用，最终版本
+  │           │     └── 将最终的 TestCase 挂载到 ChecklistNode 树
+  │           └── PreconditionGrouper 后处理
+  │                 ├── 提取各 TestCase 的 precondition 字段
+  │                 ├── 中文关键词提取
+  │                 ├── 关键词相似度分桶
+  │                 └── 插入 precondition_group 节点
   │
-  └── XMindNode(title=root_title, children=[...])
-
-层次结构: Root → Checkpoint → TestCase → Steps/Results
+  ├── 3. IterationController.evaluate_and_decide()
+  │     ├── 评估当前轮次的 ChecklistNode 树质量
+  │     └── 返回 IterationDecision: pass / retry / abort
+  │
+  └── 4. 输出渲染
+        ├── MarkdownRenderer → render_test_cases_markdown(tree_mode)
+        └── PlatformDispatcher
+              └── XMindPayloadBuilder → XMindDeliveryAgent → FileXMindConnector
 ```
 
-## §4 目录级依赖关系
+#### §5.2.2 关键数据变换节点
 
-### 内部依赖（services 目录内）
+| 变换节点 | 输入 | 输出 | 变换类型 |
+|----------|------|------|----------|
+| `plan()` | `list[Checkpoint]` | `list[CanonicalOutlineNode]` | LLM 生成（非确定性） |
+| `attach_expected_results` | `outline + checkpoints` | `list[ChecklistNode]` | 规则匹配（确定性） |
+| `_resolve_path_context` | `ChecklistNode tree` | 带路径上下文的树 | 树遍历（确定性） |
+| `draft_writer LLM` | 路径上下文 + evidence | `list[TestCase]` | LLM 生成（非确定性） |
+| `PreconditionGrouper` | `ChecklistNode tree` | 增强的树（含分组节点） | 关键词匹配（确定性） |
+
+#### §5.2.3 `attach_expected_results_to_outline` 匹配逻辑详解
+
+这是连接 outline 骨架和 checkpoint 实际内容的桥梁，匹配逻辑的精度直接影响最终 checklist 的完整性：
 
 ```
-workflow_service.py ──────┬──→ iteration_controller.py
-                          ├──→ platform_dispatcher.py
-                          ├──→ project_context_service.py
-                          ├──→ xmind_connector.py (FileXMindConnector)
-                          ├──→ xmind_delivery_agent.py
-                          └──→ xmind_payload_builder.py
-
-platform_dispatcher.py ───┬──→ xmind_delivery_agent.py (TYPE_CHECKING)
-                          └──→ run_repository.py (TYPE_CHECKING)
-
-xmind_delivery_agent.py ──┬──→ xmind_connector.py
-                          └──→ xmind_payload_builder.py
+对每个 outline 叶节点 leaf:
+  1. 在 checkpoints 中查找 checkpoint.title 包含 leaf.name 的匹配项
+     或 leaf.name 包含 checkpoint.title 的匹配项
+  2. 如果找到匹配:
+     - 遍历 checkpoint.expected_behaviors
+     - 为每个 expected_behavior 创建一个 expected_result 类型的 ChecklistNode
+     - 作为 leaf 的子节点挂载
+  3. 如果未找到匹配:
+     - leaf 保持无子节点（空叶节点）
+     - 后续可能被 draft_writer 兜底处理
 ```
 
-### 外部依赖（依赖其他子包）
+**匹配失败的典型场景**:
+- LLM outline 中使用了概括性名称（如"登录验证"），而 checkpoint 标题是具体描述（如"使用正确的用户名和密码登录系统"）
+- 一个 checkpoint 的 expected_behaviors 应该分散到多个 outline 叶节点下，但当前是一对一匹配
+- 多个 checkpoint 的 expected_behaviors 有重叠，导致同一条 expected_result 出现在多个叶节点下
 
-| 被依赖子包 | 依赖文件 |
-|-----------|--------|
-| `app.domain.*` | 所有 service 文件（领域模型是核心数据载体） |
-| `app.repositories.*` | `workflow_service`, `platform_dispatcher` |
-| `app.clients.llm` | `workflow_service` |
-| `app.config.settings` | `workflow_service` |
-| `app.graphs.main_workflow` | `workflow_service` |
-| `app.nodes.*` | `workflow_service` |
-| `app.utils.run_id` | `workflow_service` |
+---
 
-### 反向依赖（谁依赖 services）
+### §5.3 效果不佳的根本原因分析
 
-预期被 `app/api/` 层（FastAPI 路由）调用。
+#### §5.3.1 单次 LLM 规划的信息瓶颈
 
-## §5 设计模式与架构特征
+**问题描述**: `CheckpointOutlinePlanner.plan()` 将所有 checkpoint 的标题一次性输入 LLM，要求其返回完整的层级 outline。
 
-1. **Strategy Pattern（策略模式）** — `XMindConnector` Protocol 定义连接器接口，`FileXMindConnector` 提供文件系统实现，可替换为云端 API 实现。
+**影响**:
+- 当 checkpoint 数量超过 **20-30 个**时，LLM 的注意力分散，产生的层级结构趋于扁平（大量节点直接挂在根下）或过度嵌套（不必要的中间层级）
+- checkpoint 之间的微妙逻辑关系（如"登录→权限→操作"的因果链）在大量输入中被淹没
+- LLM 倾向于按表面词汇相似度而非业务逻辑进行分组
 
-2. **Factory Method（工厂方法）** — `WorkflowService._create_xmind_agent_factory()` 返回闭包工厂函数，实现 per-run 的 XMind Agent 动态创建。
+**量化表现**:
+- 10 个以下 checkpoint: outline 质量通常可接受
+- 10-30 个 checkpoint: 质量不稳定，部分层级合理、部分混乱
+- 30 个以上 checkpoint: 质量显著下降，常出现"杂项"/"其他"兜底分组
 
-3. **Chain of Responsibility（职责链）** — `IterationController.decide()` 的四级优先级链：阈值通过 → 达到上限 → 无改进连续 → 回流重试。
+**根因**: 单次 LLM 调用缺乏分治机制，将 O(n) 复杂度的结构化任务压缩为单次推理。
 
-4. **Mediator Pattern（中介者模式）** — `WorkflowService` 充当中央协调者，编排 `IterationController`、`PlatformDispatcher`、LangGraph 工作流等多个组件。
+---
 
-5. **Defensive Programming（防御性编程）** — XMind 交付链的三层错误隔离: `PlatformDispatcher` → `XMindDeliveryAgent` → `XMindConnector`，每层独立 try/except，确保交付失败不影响主流程。
+#### §5.3.2 缺乏领域知识锚定
 
-6. **Placeholder-Protect-Replace Pattern（占位符保护替换模式）** — `text_normalizer.py` 的四步处理流程：保护 → 替换 → 替换 → 还原，确保代码标识符在文本规范化过程中不被误修改。
+**问题描述**: outline 规划完全依赖 LLM 的通用知识，未利用已有的结构化信息（如 PRD 原文的章节结构、PlannedScenario 的分组信息）作为锚点。
 
-7. **Lazy Initialization（延迟初始化）** — `WorkflowService` 的 `_workflow` 和 `_llm_client` 使用懒加载 + 缓存模式。
+**影响**:
+- LLM "发明"的层级结构可能与 PRD 的实际模块划分不一致
+- 同一组 checkpoint 在不同运行中可能产生不同的 outline 结构（非幂等性）
+- 缺乏业务约束导致 LLM 可能按技术维度（如"前端测试"/"后端测试"）而非业务维度（如"用户管理"/"订单管理"）分组
 
-8. **命令/查询分离 (CQS)** — `ProjectContextService` 明确分离命令方法（create/update/delete）和查询方法（get/list）。
+**根因**: prompt 中缺少结构化的领域锚点信息，LLM 只能依靠 checkpoint 标题的文本特征进行推理。
 
-## §6 潜在关注点
+---
 
-1. **`workflow_service.py` 依赖过重** — 437 行代码导入 17 个内部模块，扇出度极高。建议考虑拆分为独立的 RunFactory、IterationLoop、ArtifactPersister 等更细粒度的组件。
+#### §5.3.3 前置条件分组过于机械
 
-2. **`_render_test_cases_markdown()` 重复定义** — 该函数在 `platform_dispatcher.py` 和 `workflow_service.py` 中各定义了一份完全相同的实现，违反 DRY 原则。应提取到共享工具模块。
+**问题描述**: `PreconditionGrouper` 基于中文关键词的桶分配策略，使用关键词交集/并集比值作为相似度指标。
 
-3. **`text_normalizer.py` 性能隐患** — 每次 `normalize_text()` 调用执行 7 次保护模式正则扫描 + 37 次替换正则扫描，合计 44 次正则操作。对批量处理大量测试用例场景可能成为瓶颈。
+**典型失败案例**:
 
-4. **`project_context_service.py` 使用 `datetime.utcnow()`** — 已被 Python 3.12 标记为 deprecated，建议统一使用 `datetime.now(timezone.utc)`（与 `iteration_controller.py` 中的 `_now_iso()` 保持一致）。
+| 前置条件 A | 前置条件 B | 实际关系 | 系统判断 |
+|-----------|-----------|---------|----------|
+| "用户已登录" | "登录状态下" | 语义等价 | **未分为同组**（关键词不同） |
+| "用户已登录" | "用户已登录且为 VIP" | 包含关系 | 可能同组或不同组（取决于阈值） |
+| "已创建订单" | "订单已存在" | 语义等价 | **未分为同组**（关键词不同） |
+| "网络正常" | "网络连接正常" | 语义等价 | 可能同组（共享"网络"关键词） |
 
-5. **`xmind_delivery_agent.py` 中的 `isinstance` 检查** — `deliver()` 方法在运行时检查 `isinstance(self.connector, FileXMindConnector)` 来决定是否可以动态更新 `output_dir`，打破了 Protocol 的多态性。建议将 `output_dir` 设为 Protocol 的可选属性或通过构造函数注入。
+**根因**: 关键词匹配只能捕获词汇级别的相似性，无法理解语义级别的等价关系。中文的表达灵活性使得同义异构的情况极为普遍。
 
-6. **内存缓存无上限** — `WorkflowService._run_registry` 为 `dict[str, CaseGenerationRun]`，无 TTL 或容量限制，长时间运行可能导致内存增长。
+---
 
-7. **XMind 固定文件名** — `XMIND_DEFAULT_FILENAME = "checklist.xmind"` 意味着同一 run 目录只能有一个 XMind 文件。如果未来支持增量更新或多版本，需要调整命名策略。
+#### §5.3.4 expected_results 挂载逻辑脆弱
+
+**问题描述**: `attach_expected_results_to_outline()` 使用名称包含关系进行匹配，这种简单的字符串匹配策略存在多种失败模式。
+
+**失败模式分析**:
+
+| 失败模式 | 描述 | 频率 |
+|---------|------|------|
+| **遗漏** | checkpoint 标题与 outline 叶节点名称无交集，导致 expected_results 未被挂载 | 高 |
+| **错配** | 包含关系匹配到错误的叶节点（如"登录"匹配到"登录日志"而非"用户登录"） | 中 |
+| **重复** | 一个 checkpoint 的 expected_results 被挂载到多个匹配的叶节点 | 中 |
+| **空叶节点** | outline 叶节点未匹配到任何 checkpoint，成为空壳 | 高 |
+
+**多对多关系问题**: 现实中 checkpoint 与 outline 叶节点之间是多对多关系：
+- 一个 checkpoint 可能涉及多个功能模块（应拆分到多个叶节点）
+- 一个 outline 叶节点可能对应多个 checkpoint 的 expected_results（应聚合）
+
+当前的一对一匹配模型无法处理这种关系。
+
+---
+
+#### §5.3.5 缺乏反馈循环
+
+**问题描述**: outline 生成后没有质量验证环节。`IterationController` 的评估粒度在最终 TestCase 层面，而非 outline 结构层面。
+
+**影响**:
+- outline 结构缺陷（如遗漏模块、层级混乱）会无声地传播到下游
+- draft_writer 在有缺陷的 outline 上生成 TestCase，质量受限但不报错
+- 迭代控制器可能将 outline 结构问题误判为 TestCase 质量问题，导致无效的重试
+
+**根因**: 评估体系缺少 outline 层面的质量指标，如覆盖率（outline 是否涵盖所有 checkpoint）、平衡度（层级深度分布是否合理）、一致性（命名风格是否统一）。
+
+---
+
+### §5.4 方案 A 与方案 B 的对比总结
+
+| 维度 | 方案 A (弃用) | 方案 B (当前) |
+|------|-------------|-------------|
+| **核心思路** | 自底向上：路径归一化 → trie 合并 | 自顶向下：LLM 整体规划 → 叶节点挂载 |
+| **LLM 使用** | 两次（路径提取 + 归一化） | 一次（outline 规划） |
+| **确定性** | 合并步骤确定性，归一化非确定性 | 规划非确定性，挂载确定性 |
+| **可调试性** | 中（可检查中间路径） | 低（outline 为黑盒输出） |
+| **扩展性** | 路径数量增长时 trie 性能稳定 | checkpoint 数量增长时 LLM 质量下降 |
+| **层级合理性** | 差（取决于路径归一化质量） | 中（取决于 LLM 理解深度） |
+| **覆盖完整性** | 高（每个 checkpoint 必有路径） | 中（可能遗漏未匹配的 checkpoint） |
+| **弃用/选用原因** | 路径归一化质量不稳定 | LLM 全局视角优于局部合并 |
+
+**关键洞察**: 两套方案各有优劣，**混合使用可能优于任一单独方案**。方案 A 的路径归一化提供了结构化的中间表示，方案 B 的 LLM 规划提供了全局视角。
+
+---
+
+### §5.5 改进建议
+
+#### 短期改进（Low-hanging Fruit · 1-2 周）
+
+##### 建议 1: PRD 章节锚定
+
+**思路**: 将 PRD 的一级/二级标题作为 outline 的顶层结构骨架，LLM 只需填充细分层级。
+
+**实施方式**:
+```
+当前 prompt:
+  "根据以下 checkpoint 列表，生成层级化的 outline..."
+
+改进 prompt:
+  "以下是 PRD 的章节结构：
+   1. 用户管理
+      1.1 注册
+      1.2 登录
+   2. 订单管理
+      2.1 创建订单
+      2.2 支付
+   请将以下 checkpoint 分配到对应的 PRD 章节下，并在需要时创建子层级..."
+```
+
+**预期效果**: outline 的顶层结构与 PRD 对齐，LLM 的规划空间减小，输出质量提升。
+
+**风险**: 需要确保 PRD 章节信息可用且格式可解析。
+
+---
+
+##### 建议 2: 分批规划
+
+**思路**: 将 checkpoints 按已有的 `PlannedScenario` 分组，每组独立调用 LLM 规划子 outline，最后合并。
+
+**实施方式**:
+```python
+def plan_batched(self, checkpoints, scenarios):
+    sub_outlines = []
+    for scenario in scenarios:
+        scenario_cps = [cp for cp in checkpoints if cp.scenario_id == scenario.id]
+        sub_outline = self.plan(scenario_cps)  # 小规模调用
+        sub_outlines.append((scenario.name, sub_outline))
+    return self._merge_sub_outlines(sub_outlines)
+```
+
+**预期效果**: 每次 LLM 调用处理的 checkpoint 数量可控（通常 < 10），规划质量稳定。
+
+**风险**: 需要处理跨 scenario 的 checkpoint 以及子 outline 合并时的命名冲突。
+
+---
+
+##### 建议 3: PreconditionGrouper 升级
+
+**思路**: 引入 embedding 向量计算语义相似度，替代纯关键词匹配。
+
+**实施方式**:
+```python
+# 当前: 关键词交集/并集
+similarity = len(kw_a & kw_b) / len(kw_a | kw_b)
+
+# 改进: embedding cosine similarity
+embedding_a = embed_model.encode(precondition_a)
+embedding_b = embed_model.encode(precondition_b)
+similarity = cosine_similarity(embedding_a, embedding_b)
+```
+
+**预期效果**: "用户已登录" 和 "登录状态下" 能被正确识别为语义等价。
+
+**风险**: 增加 embedding 模型依赖和调用延迟。可考虑使用轻量级本地模型（如 text2vec-chinese）。
+
+---
+
+#### 中期改进（架构调整 · 2-4 周）
+
+##### 建议 4: 恢复并改进方案 A
+
+**思路**: `SemanticPathNormalizer` 的两阶段归一化思路正确，弃用的原因在于执行质量而非设计方向。通过以下改进可显著提升质量：
+
+**改进项**:
+
+| 改进 | 当前问题 | 解决方案 |
+|------|---------|----------|
+| Few-shot 示例 | LLM 输出格式不稳定 | 提供 10+ 高质量的路径归一化示例，覆盖各种边界情况 |
+| 路径验证步骤 | 生成的路径可能不合理 | 增加后置验证：层级深度 2-5、段名长度 2-20 字、无重复段 |
+| 同义词词典 | "登录"/"登陆" 等不统一 | 维护领域同义词表，在归一化后统一替换 |
+| Trie 深度限制 | 树可能过深 | `ChecklistMerger` 增加 max_depth 参数，超深路径自动截断 |
+| 节点合并策略 | 相似节点未合并 | 在 trie 构建后增加相似节点合并步骤（编辑距离 < 阈值的兄弟节点合并） |
+
+---
+
+##### 建议 5: 混合方案 (A+B)
+
+**思路**: 结合方案 A 的结构化路径和方案 B 的 LLM 全局规划，取长补短。
+
+**流程设计**:
+```
+Phase 1 — 路径预处理（方案 A 改进版）:
+  checkpoints → SemanticPathNormalizer (改进版) → NormalizedChecklistPath 列表
+
+Phase 2 — LLM 精调（方案 B 适配版）:
+  将归一化路径列表输入 LLM，要求其：
+  1. 审查路径的合理性（修正不合理的归一化结果）
+  2. 补充缺失的中间层级
+  3. 统一命名风格
+  → 输出修正后的路径列表
+
+Phase 3 — 确定性合并:
+  修正后的路径 → ChecklistMerger (增强版) → ChecklistNode 树
+
+Phase 4 — 后处理:
+  → PreconditionGrouper (embedding 版) → 最终 ChecklistNode 树
+```
+
+**优势**: LLM 的工作从"从零生成 outline"降级为"审查和修正已有路径"，任务难度显著降低，输出质量更可控。
+
+---
+
+##### 建议 6: 增加 Outline 评估节点
+
+**思路**: 在 outline 生成后、TestCase 生成前，增加一个专门的评估节点，检查 outline 的结构质量。
+
+**评估指标**:
+
+| 指标 | 计算方式 | 合格阈值 |
+|------|---------|----------|
+| **覆盖率** | 已匹配 checkpoint 数 / 总 checkpoint 数 | ≥ 0.95 |
+| **平衡度** | std(各子树叶节点数) / mean(各子树叶节点数) | ≤ 1.5 |
+| **深度合理性** | max_depth / log2(叶节点数) | 0.5 - 3.0 |
+| **空叶节点率** | 无子节点的叶节点数 / 总叶节点数 | ≤ 0.1 |
+| **命名一致性** | 同层节点命名风格相似度 | ≥ 0.7 |
+
+**不合格时的处理**:
+- 覆盖率不足 → 找到未匹配的 checkpoint，追加为新叶节点
+- 平衡度失衡 → 将过大的子树拆分，过小的子树合并
+- 深度不合理 → 压缩过深路径或展开过浅路径
+
+---
+
+#### 长期改进（能力升级 · 1-3 个月）
+
+##### 建议 7: 多轮迭代 Outline
+
+**思路**: 借鉴当前 TestCase 生成的 `IterationController` 迭代评估循环，对 outline 也实施多轮优化。
+
+**迭代流程**:
+```
+Round 1: LLM 生成初始 outline → 评估节点打分
+  → 如果不合格:
+Round 2: 将评估结果 + 初始 outline 反馈给 LLM → 修正版 outline → 评估
+  → 如果不合格:
+Round 3: 进一步修正 → 评估
+  → 最多 N 轮后 abort（使用最高分版本）
+```
+
+**关键设计**: 每轮迭代的 prompt 需要明确指出上轮的问题所在（如"以下 5 个 checkpoint 未被覆盖"），避免 LLM 盲目修改。
+
+---
+
+##### 建议 8: 用户反馈闭环
+
+**思路**: 记录用户对生成的 outline/checklist 的手动修改，作为后续规划的参考信号。
+
+**数据收集**:
+- 用户在 XMind 中调整的节点移动/重命名/删除/新增操作
+- 用户对 Markdown checklist 的编辑 diff
+- 显式的满意度评分
+
+**应用方式**:
+- 构建"项目类型 → 常用 outline 模板"的映射
+- 将用户修改频率最高的节点作为 few-shot 负例
+- 训练轻量级的 outline 质量预测模型
+
+---
+
+##### 建议 9: 结构化知识库
+
+**思路**: 构建测试场景的标准分类体系，作为 outline 规划的参考模板。
+
+**知识库结构**:
+```
+测试场景分类体系:
+├── 功能测试
+│   ├── 用户管理 (注册/登录/权限/个人信息)
+│   ├── 核心业务流程 (按行业/产品类型细分)
+│   ├── 数据管理 (CRUD/导入导出/搜索过滤)
+│   └── 系统集成 (第三方API/消息队列/文件系统)
+├── 非功能测试
+│   ├── 性能 (响应时间/并发/容量)
+│   ├── 安全 (认证/授权/输入验证/数据加密)
+│   └── 兼容性 (浏览器/设备/操作系统)
+└── 边界与异常
+    ├── 输入边界 (空值/极值/特殊字符)
+    ├── 状态异常 (网络断开/超时/并发冲突)
+    └── 数据异常 (格式错误/缺失字段/重复数据)
+```
+
+**应用**: 在 outline 规划时，LLM 可参考知识库中的标准分类，确保覆盖常见的测试维度，同时保持与具体产品特性的适配。
+
+---
+
+### §5.6 优先级排序与实施路线图
+
+| 优先级 | 建议 | 预期收益 | 实施成本 | 风险 |
+|--------|------|---------|---------|------|
+| **P0** | 建议 1: PRD 章节锚定 | 高 — outline 顶层结构稳定 | 低 — 仅修改 prompt | 低 |
+| **P0** | 建议 2: 分批规划 | 高 — 解决大规模 checkpoint 问题 | 低 — 增加循环逻辑 | 中 — 需处理跨组边界 |
+| **P1** | 建议 6: Outline 评估节点 | 高 — 提前拦截结构缺陷 | 中 — 新增评估逻辑 | 低 |
+| **P1** | 建议 3: PreconditionGrouper 升级 | 中 — 分组精度提升 | 中 — 引入 embedding 模型 | 低 |
+| **P2** | 建议 5: 混合方案 (A+B) | 高 — 综合两套方案优势 | 高 — 重构整合流程 | 中 — 复杂度增加 |
+| **P2** | 建议 4: 恢复改进方案 A | 中 — 恢复结构化中间表示 | 中 — 改进现有代码 | 中 — 方案 A 曾失败 |
+| **P3** | 建议 7: 多轮迭代 Outline | 高 — 系统性质量提升 | 高 — 新增迭代框架 | 中 — 增加延迟和成本 |
+| **P3** | 建议 8: 用户反馈闭环 | 长期高 — 持续改进 | 高 — 需要前端配合 | 低 |
+| **P3** | 建议 9: 结构化知识库 | 长期高 — 标准化能力 | 高 — 需要领域专家参与 | 中 — 维护成本 |
+
+**推荐实施顺序**: P0 建议 1 + 2 → P1 建议 6 → P1 建议 3 → P2 建议 5 → P3 建议 7-9
+
+---
+
+*分析完成 · 服务层 13 个文件 · 重点: Checklist 整合方案深度分析*
