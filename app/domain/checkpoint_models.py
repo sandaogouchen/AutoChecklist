@@ -3,6 +3,8 @@
 定义了 fact 与 test case 之间的中间层数据结构，包括：
 - ``Checkpoint``：从业务事实中提炼出的可验证测试点
 - ``CheckpointCoverage``：单个 checkpoint 的用例覆盖状态
+
+新增模版绑定字段，支持将 checkpoint 强制归类到项目级 Checklist 模版的叶子节点。
 """
 
 from __future__ import annotations
@@ -31,6 +33,12 @@ class Checkpoint(BaseModel):
         evidence_refs: 关联的 PRD 原文证据引用。
         preconditions: 验证该检查点前需满足的前置条件。
         coverage_status: 覆盖状态（uncovered / partial / covered）。
+        template_leaf_id: 绑定的模版叶子节点 ID（为空表示未绑定模版）。
+        template_path_ids: 从模版根到叶子的节点 ID 路径。
+        template_path_titles: 从模版根到叶子的节点标题路径。
+        template_match_confidence: 模版匹配置信度（0.0-1.0）。
+        template_match_reason: 模版匹配的理由说明。
+        template_match_low_confidence: 低置信度标记，True 表示匹配不可靠。
     """
 
     checkpoint_id: str = ""
@@ -43,6 +51,14 @@ class Checkpoint(BaseModel):
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
     coverage_status: str = "uncovered"
+
+    # ---- 模版绑定字段 ----
+    template_leaf_id: str = ""
+    template_path_ids: list[str] = Field(default_factory=list)
+    template_path_titles: list[str] = Field(default_factory=list)
+    template_match_confidence: float = 0.0
+    template_match_reason: str = ""
+    template_match_low_confidence: bool = False
 
 
 class CheckpointCoverage(BaseModel):

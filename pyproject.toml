@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.11.0",
     "python-dotenv>=1.1.0",
     "python-multipart>=0.0.20",
+    "pyyaml>=6.0.1",
     "uvicorn>=0.34.2",
 ]
 
