@@ -14,7 +14,6 @@ from typing import TypedDict
 
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
-from app.domain.checklist_models import ChecklistNode
 from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
@@ -28,7 +27,6 @@ class GlobalState(TypedDict, total=False):
     - run_state: 运行状态对象，记录迭代进度和评估结果
     - evaluation_report: 最新的结构化评估报告
     - iteration_index: 当前迭代轮次
-    - optimized_tree: Checklist 合并后的树形结构
     """
 
     run_id: str
@@ -57,9 +55,6 @@ class GlobalState(TypedDict, total=False):
     project_id: str
     project_context_summary: str
 
-    # ---- Checklist 优化新增字段 ----
-    optimized_tree: list[ChecklistNode]
-
 
 class CaseGenState(TypedDict, total=False):
     """用例生成子图状态。"""
@@ -74,6 +69,3 @@ class CaseGenState(TypedDict, total=False):
     draft_cases: list[TestCase]
     test_cases: list[TestCase]
     project_context_summary: str
-
-    # ---- Checklist 优化新增字段 ----
-    optimized_tree: list[ChecklistNode]
