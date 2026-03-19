@@ -10,6 +10,7 @@
 变更：
 - 移除模块级 _render_test_cases_markdown 函数（DRY 修复，使用 markdown_renderer）
 - 移除 TestCase 导入（不再直接使用）
+- 新增 template_file_path 传递到工作流输入
 """
 
 from __future__ import annotations
@@ -167,7 +168,10 @@ class WorkflowService:
         request: CaseGenerationRequest,
         run_state,
     ) -> dict:
-        """执行带迭代评估回路的工作流。"""
+        """执行带迭代评估回路的工作流。
+
+        变更：新增 template_file_path 传递到工作流输入。
+        """
         workflow = self._get_workflow()
         result: dict = {}
 
@@ -184,6 +188,11 @@ class WorkflowService:
                 "iteration_index": run_state.iteration_index,
                 "project_id": getattr(request, 'project_id', None) or "",
             }
+
+            # ---- 传递模版文件路径 ----
+            template_file_path = getattr(request, 'template_file_path', None)
+            if template_file_path:
+                workflow_input["template_file_path"] = template_file_path
 
             if run_state.iteration_index > 0 and result:
                 workflow_input = self._prepare_retry_input(
