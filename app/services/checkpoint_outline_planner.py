@@ -4,6 +4,10 @@
 1. 先产出可复用的规范大纲节点
 2. 再将每个 checkpoint 映射到固定路径
 3. 最后确定性构建共享 ``optimized_tree``
+
+新增强制骨架约束：
+- 当存在 mandatory_skeleton 时，将强制骨架注入 LLM prompt
+- LLM 输出后执行确定性后处理修复，确保强制层级 100% 合规
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from app.domain.checklist_models import (
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.research_models import ResearchOutput
 from app.domain.state import CaseGenState
+from app.domain.template_models import MandatorySkeletonNode
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,22 @@ Hard constraints:
 - do not generate expected results in this stage
 
 The output must be an ordered path from broad business object to specific operation.
+""".strip()
+
+_MANDATORY_CONSTRAINT_TEMPLATE = """
+## 强制模版约束
+
+以下是本次生成必须严格遵循的模版骨架结构。标记为 [MANDATORY] 的节点是强制节点，
+你不可以增加、删除、修改或重命名这些节点。
+
+强制骨架：
+{skeleton_text}
+
+约束规则：
+1. 强制层级的节点必须与上述骨架完全一致
+2. 所有 checkpoint 必须被分配到上述骨架节点的某个子路径下
+3. 在非强制层级，你可以自由创建子节点来进一步组织 checkpoint
+4. 输出的 JSON 中，强制节点必须保留原始 id 和 title，不可更改
 """.strip()
 
 
@@ -120,6 +141,7 @@ class CheckpointOutlinePlanner:
         self,
         research_output: ResearchOutput,
         checkpoints: list[Checkpoint],
+        mandatory_skeleton: MandatorySkeletonNode | None = None,
     ) -> CheckpointOutlinePlan:
         if not checkpoints:
             return CheckpointOutlinePlan([], [], [])
@@ -145,8 +167,14 @@ class CheckpointOutlinePlanner:
             for checkpoint in checkpoints
         ]
 
+        # 构建 system prompt（含可选的强制约束）
+        outline_system = _OUTLINE_SYSTEM_PROMPT
+        if mandatory_skeleton:
+            constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
+            outline_system = outline_system + "\n\n" + constraint
+
         canonical_response = self.llm_client.generate_structured(
-            system_prompt=_OUTLINE_SYSTEM_PROMPT,
+            system_prompt=outline_system,
             user_prompt=(
                 "[Facts]\n"
                 f"{json.dumps(facts_payload, ensure_ascii=False, indent=2)}\n\n"
@@ -156,8 +184,13 @@ class CheckpointOutlinePlanner:
             response_model=CanonicalOutlineNodeCollection,
         )
 
+        path_system = _PATH_SYSTEM_PROMPT
+        if mandatory_skeleton:
+            constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
+            path_system = path_system + "\n\n" + constraint
+
         path_response = self.llm_client.generate_structured(
-            system_prompt=_PATH_SYSTEM_PROMPT,
+            system_prompt=path_system,
             user_prompt=self._build_path_prompt(
                 checkpoints,
                 canonical_response.canonical_nodes,
@@ -171,11 +204,131 @@ class CheckpointOutlinePlanner:
             canonical_response.canonical_nodes,
         )
 
+        optimized_tree = self._build_outline_tree(resolved_paths)
+
+        # 如果存在强制骨架，执行后处理修复
+        if mandatory_skeleton:
+            optimized_tree = self._enforce_mandatory_skeleton(
+                optimized_tree, mandatory_skeleton
+            )
+
         return CheckpointOutlinePlan(
             canonical_outline_nodes=canonical_response.canonical_nodes,
             checkpoint_paths=path_response.checkpoint_paths,
-            optimized_tree=self._build_outline_tree(resolved_paths),
+            optimized_tree=optimized_tree,
         )
+
+    def _build_mandatory_constraint_prompt(
+        self, skeleton: MandatorySkeletonNode
+    ) -> str:
+        """将强制骨架序列化为约束 prompt 文本。"""
+        skeleton_text = self._serialize_skeleton(skeleton, indent=0)
+        return _MANDATORY_CONSTRAINT_TEMPLATE.format(skeleton_text=skeleton_text)
+
+    def _serialize_skeleton(
+        self, node: MandatorySkeletonNode, indent: int
+    ) -> str:
+        """将骨架节点树序列化为缩进文本。"""
+        lines: list[str] = []
+        if node.id != "__mandatory_root__":
+            prefix = "  " * indent
+            mandatory_tag = " [MANDATORY]" if node.is_mandatory else ""
+            lines.append(f"{prefix}- {node.id}: {node.title}{mandatory_tag}")
+        for child in node.children:
+            lines.extend(
+                self._serialize_skeleton(child, indent + (0 if node.id == "__mandatory_root__" else 1)).splitlines()
+            )
+        return "\n".join(lines)
+
+    def _enforce_mandatory_skeleton(
+        self,
+        optimized_tree: list[ChecklistNode],
+        skeleton: MandatorySkeletonNode,
+    ) -> list[ChecklistNode]:
+        """后处理修复：确保 optimized_tree 的强制层级与骨架一致。
+
+        策略：以强制骨架为 ground truth，将骨架中的强制节点
+        与 LLM 生成的树进行合并。骨架节点保留 LLM 为其生成的子节点。
+        """
+        if not skeleton or not skeleton.children:
+            return optimized_tree
+
+        # 建立 LLM 生成树的 node_id 索引
+        llm_lookup: dict[str, ChecklistNode] = {}
+        for node in optimized_tree:
+            self._index_nodes(node, llm_lookup)
+
+        result: list[ChecklistNode] = []
+        for skeleton_child in skeleton.children:
+            merged = self._merge_skeleton_node(skeleton_child, llm_lookup)
+            result.append(merged)
+
+        # 收集未被骨架覆盖的 LLM 节点（非强制层级的额外节点）
+        skeleton_ids = self._collect_skeleton_ids(skeleton)
+        for node in optimized_tree:
+            if node.node_id not in skeleton_ids and node.node_id not in {
+                n.node_id for n in result
+            }:
+                result.append(node)
+
+        logger.info(
+            "强制约束后处理完成: 骨架节点=%d, 最终树根节点=%d",
+            len(skeleton.children),
+            len(result),
+        )
+        return result
+
+    def _merge_skeleton_node(
+        self,
+        skeleton_node: MandatorySkeletonNode,
+        llm_lookup: dict[str, ChecklistNode],
+    ) -> ChecklistNode:
+        """将骨架节点与 LLM 生成的对应节点合并。"""
+        llm_node = llm_lookup.get(skeleton_node.id)
+
+        # 递归处理子节点
+        merged_children: list[ChecklistNode] = []
+        skeleton_child_ids = {c.id for c in skeleton_node.children}
+
+        for skeleton_child in skeleton_node.children:
+            merged_children.append(
+                self._merge_skeleton_node(skeleton_child, llm_lookup)
+            )
+
+        # 保留 LLM 为该节点生成的非骨架子节点
+        if llm_node:
+            for llm_child in llm_node.children:
+                if llm_child.node_id not in skeleton_child_ids:
+                    merged_children.append(llm_child)
+
+        priority = skeleton_node.original_metadata.get("priority", "P2")
+
+        return ChecklistNode(
+            node_id=skeleton_node.id,
+            title=skeleton_node.title,
+            node_type="group",
+            hidden=False,
+            source="template",
+            is_mandatory=skeleton_node.is_mandatory,
+            priority=priority,
+            children=merged_children,
+        )
+
+    def _index_nodes(
+        self, node: ChecklistNode, lookup: dict[str, ChecklistNode]
+    ) -> None:
+        """递归索引节点。"""
+        if node.node_id:
+            lookup[node.node_id] = node
+        for child in node.children:
+            self._index_nodes(child, lookup)
+
+    def _collect_skeleton_ids(self, node: MandatorySkeletonNode) -> set[str]:
+        """收集骨架中所有节点 ID。"""
+        ids = {node.id}
+        for child in node.children:
+            ids.update(self._collect_skeleton_ids(child))
+        return ids
 
     def _build_path_prompt(
         self,
@@ -350,9 +503,11 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
     planner = CheckpointOutlinePlanner(llm_client)
 
     def checkpoint_outline_planner_node(state: CaseGenState) -> CaseGenState:
+        mandatory_skeleton = state.get("mandatory_skeleton")
         plan = planner.plan(
             state.get("research_output", ResearchOutput()),
             state.get("checkpoints", []),
+            mandatory_skeleton=mandatory_skeleton,
         )
         return {
             "canonical_outline_nodes": plan.canonical_outline_nodes,
@@ -369,14 +524,7 @@ def attach_expected_results_to_outline(
     checkpoint_paths: list[CheckpointPathMapping] | None = None,
     canonical_outline_nodes: list[CanonicalOutlineNode] | None = None,
 ) -> list[ChecklistNode]:
-    """将 testcase 信息挂载到既有大纲树。
-
-    当提供 ``checkpoint_paths`` 与 ``canonical_outline_nodes`` 时，沿固定层级路径
-    把 expected results 挂到叶子 group 节点下；这是当前工作流的主路径。
-
-    当仅提供 ``optimized_tree`` 和 ``test_cases`` 时，回退到对已有 ``case`` 节点
-    的原位富化逻辑，以兼容仍在使用旧调用约定的代码和测试。
-    """
+    """将 testcase 信息挂载到既有大纲树。"""
     if not optimized_tree or not test_cases:
         return optimized_tree
 

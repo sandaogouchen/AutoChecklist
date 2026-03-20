@@ -4,8 +4,8 @@
 
 变更：
 - build() 新增 optimized_tree 参数
-- 当 optimized_tree 非空时，使用树模式构建 XMind 节点（前置条件组作为一级分支）
-- 原有的 checkpoint 分组模式作为 fallback
+- 当 optimized_tree 非空时，使用树模式构建 XMind 节点
+- 新增 source 颜色标记：template=蓝色, overflow=红色
 """
 
 from __future__ import annotations
@@ -39,6 +39,12 @@ _PRIORITY_MARKERS: dict[str, str] = {
     "P3": "priority-4",
 }
 
+# 来源 → XMind 标记映射
+_SOURCE_MARKERS: dict[str, str] = {
+    "template": "flag-blue",
+    "overflow": "flag-red",
+}
+
 
 class XMindPayloadBuilder:
     """XMind 载荷构建器。"""
@@ -51,68 +57,62 @@ class XMindPayloadBuilder:
         run_id: str = "",
         title: str = "",
         optimized_tree: list[ChecklistNode] | None = None,
+        enable_source_labels: bool = True,
     ) -> XMindNode:
-        """构建 XMind 节点树。
-
-        Args:
-            test_cases: 测试用例列表。
-            checkpoints: 检查点列表。
-            research_output: 研究输出（可选）。
-            run_id: 运行 ID。
-            title: 根节点标题。
-            optimized_tree: 前置条件分组优化树（非空时启用树模式）。
-
-        Returns:
-            XMind 根节点。
-        """
+        """构建 XMind 节点树。"""
         root_title = title or (f"测试用例 - {run_id}" if run_id else "测试用例")
 
-        # 优先使用 optimized_tree 模式
         if optimized_tree:
-            return self._build_tree_root(root_title, optimized_tree)
+            return self._build_tree_root(root_title, optimized_tree, enable_source_labels)
 
-        # Fallback: 原有 checkpoint 分组模式
         return self._build_checkpoint_mode(
             root_title, test_cases, checkpoints, research_output
         )
 
     # -----------------------------------------------------------------------
-    # 树模式：基于 optimized_tree
+    # 树模式：基于 optimized_tree（新增 source 颜色标记）
     # -----------------------------------------------------------------------
 
     def _build_tree_root(
-        self, root_title: str, tree: list[ChecklistNode]
+        self,
+        root_title: str,
+        tree: list[ChecklistNode],
+        enable_source_labels: bool = True,
     ) -> XMindNode:
-        """从 optimized_tree 构建 XMind 根节点。"""
         children: list[XMindNode] = []
         for node in tree:
-            children.extend(self._build_tree_children(node))
+            children.extend(self._build_tree_children(node, enable_source_labels))
         return XMindNode(title=root_title, children=children)
 
-    def _build_tree_children(self, node: ChecklistNode) -> list[XMindNode]:
-        """递归将 ChecklistNode 转为 XMindNode 列表。"""
+    def _build_tree_children(
+        self,
+        node: ChecklistNode,
+        enable_source_labels: bool = True,
+    ) -> list[XMindNode]:
         if node.node_type == "root":
             children: list[XMindNode] = []
             for child in node.children:
-                children.extend(self._build_tree_children(child))
+                children.extend(self._build_tree_children(child, enable_source_labels))
             return children
 
         if node.node_type in {"group", "precondition_group"}:
             if node.hidden:
                 children: list[XMindNode] = []
                 for child in node.children:
-                    children.extend(self._build_tree_children(child))
+                    children.extend(self._build_tree_children(child, enable_source_labels))
                 return children
-            return [self._build_group_xmind_node(node)]
+            return [self._build_group_xmind_node(node, enable_source_labels)]
 
         if node.node_type == "expected_result":
             return [self._build_expected_result_xmind_node(node)]
 
         return [self._build_case_xmind_node(node)]
 
-    def _build_group_xmind_node(self, node: ChecklistNode) -> XMindNode:
-        """将共享逻辑组节点转为 XMindNode。"""
-        # 前置条件作为备注
+    def _build_group_xmind_node(
+        self,
+        node: ChecklistNode,
+        enable_source_labels: bool = True,
+    ) -> XMindNode:
         notes_parts: list[str] = []
         if node.preconditions:
             notes_parts.append("前置条件:")
@@ -120,24 +120,32 @@ class XMindPayloadBuilder:
 
         children: list[XMindNode] = []
         for child in node.children:
-            children.extend(self._build_tree_children(child))
+            children.extend(self._build_tree_children(child, enable_source_labels))
+
+        # 构建标记列表（新增 source 标记）
+        markers: list[str] = []
+        if enable_source_labels:
+            source_marker = _SOURCE_MARKERS.get(node.source)
+            if source_marker:
+                markers.append(source_marker)
+
+        title = (
+            f"[前置] {node.title}"
+            if node.node_type == "precondition_group"
+            else node.title
+        )
 
         return XMindNode(
-            title=(
-                f"[前置] {node.title}"
-                if node.node_type == "precondition_group"
-                else node.title
-            ),
+            title=title,
             children=children,
             notes="\n".join(notes_parts),
+            markers=markers,
         )
 
     def _build_expected_result_xmind_node(self, node: ChecklistNode) -> XMindNode:
-        """将预期结果叶子节点转为 XMindNode。"""
         return XMindNode(title=node.title)
 
     def _build_case_xmind_node(self, node: ChecklistNode) -> XMindNode:
-        """将 case 节点转为 XMindNode。"""
         markers = []
         priority_marker = _PRIORITY_MARKERS.get(node.priority)
         if priority_marker:
@@ -150,7 +158,6 @@ class XMindPayloadBuilder:
 
         leaf_children: list[XMindNode] = []
 
-        # 树模式下保留用例完整前置条件
         if node.preconditions:
             leaf_children.append(
                 XMindNode(
@@ -159,7 +166,6 @@ class XMindPayloadBuilder:
                 )
             )
 
-        # 步骤
         if node.steps:
             leaf_children.append(
                 XMindNode(
@@ -171,7 +177,6 @@ class XMindPayloadBuilder:
                 )
             )
 
-        # 预期结果
         if node.expected_results:
             leaf_children.append(
                 XMindNode(
@@ -202,7 +207,6 @@ class XMindPayloadBuilder:
         checkpoints: list[Checkpoint],
         research_output: ResearchOutput | None,
     ) -> XMindNode:
-        """原有的 checkpoint 分组构建逻辑。"""
         cp_lookup: dict[str, Checkpoint] = {}
         for cp in checkpoints:
             if cp.checkpoint_id:
@@ -262,7 +266,6 @@ class XMindPayloadBuilder:
     def _build_checkpoint_node(
         self, checkpoint: Checkpoint, cases: list[TestCase]
     ) -> XMindNode:
-        """构建 checkpoint 级别的节点。"""
         markers = []
         category_marker = _CATEGORY_MARKERS.get(checkpoint.category)
         if category_marker:
@@ -287,7 +290,6 @@ class XMindPayloadBuilder:
         )
 
     def _build_case_node(self, case: TestCase) -> XMindNode:
-        """构建测试用例级别的节点（checkpoint 模式）。"""
         labels = [case.priority] if case.priority else []
         markers = []
         priority_marker = _PRIORITY_MARKERS.get(case.priority)

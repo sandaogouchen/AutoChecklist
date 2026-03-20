@@ -7,6 +7,7 @@
 
 新增迭代评估回路相关的轻量摘要字段。
 新增项目级 Checklist 模版文件路径字段。
+新增 template_name 字段，支持按名称加载模版。
 """
 
 from __future__ import annotations
@@ -43,11 +44,7 @@ class ErrorInfo(BaseModel):
 
 
 class IterationSummary(BaseModel):
-    """迭代摘要信息。
-
-    作为 CaseGenerationRun 的轻量字段，
-    对外展示迭代回路的关键状态，不暴露完整中间过程。
-    """
+    """迭代摘要信息。"""
 
     iteration_count: int = 0
     last_evaluation_score: float = 0.0
@@ -61,7 +58,8 @@ class CaseGenerationRequest(BaseModel):
 
     新增字段：
     - template_file_path: 可选的项目级 Checklist 模版文件路径（YAML 格式）。
-      提供后，生成的 checkpoint 和 testcase 将强制归类到模版叶子节点。
+    - template_name: 可选的模版名称，对应 templates/ 目录下的 YAML 文件（不含扩展名）。
+      与 template_file_path 二选一使用，template_name 优先。
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -76,14 +74,11 @@ class CaseGenerationRequest(BaseModel):
     options: RunOptions = Field(default_factory=RunOptions)
     project_id: str | None = None
     template_file_path: str | None = None
+    template_name: str | None = None
 
 
 class CaseGenerationRun(BaseModel):
-    """一次用例生成任务的完整运行结果。
-
-    新增字段：
-    - iteration_summary: 迭代摘要，展示轮次、分数、是否发生回流等
-    """
+    """一次用例生成任务的完整运行结果。"""
 
     run_id: str
     status: Literal["pending", "running", "evaluating", "retrying", "succeeded", "failed"]
