@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.domain.research_models import EvidenceRef
 
@@ -21,8 +21,16 @@ class ChecklistNode(BaseModel):
     渲染或历史数据。
     """
 
-    node_id: str = ""
-    title: str = ""
+    model_config = ConfigDict(populate_by_name=True)
+
+    node_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("node_id", "id"),
+    )
+    title: str = Field(
+        default="",
+        validation_alias=AliasChoices("title", "display_text"),
+    )
     node_type: Literal[
         "root",
         "group",
@@ -44,6 +52,22 @@ class ChecklistNode(BaseModel):
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
     checkpoint_id: str = ""
 
+    @property
+    def id(self) -> str:
+        return self.node_id
+
+    @id.setter
+    def id(self, value: str) -> None:
+        self.node_id = value
+
+    @property
+    def display_text(self) -> str:
+        return self.title
+
+    @display_text.setter
+    def display_text(self, value: str) -> None:
+        self.title = value
+
 
 class CanonicalOutlineNode(BaseModel):
     """Checkpoint 大纲规划阶段的规范节点定义。"""
@@ -59,20 +83,45 @@ class CanonicalOutlineNode(BaseModel):
 class CanonicalOutlineNodeCollection(BaseModel):
     """规范大纲节点集合。"""
 
-    canonical_nodes: list[CanonicalOutlineNode] = Field(default_factory=list)
+    model_config = ConfigDict(populate_by_name=True)
+
+    canonical_nodes: list[CanonicalOutlineNode] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("canonical_nodes", "nodes"),
+    )
+
+    @property
+    def nodes(self) -> list[CanonicalOutlineNode]:
+        return self.canonical_nodes
 
 
 class CheckpointPathMapping(BaseModel):
     """单个 checkpoint 对应的固定层级路径。"""
 
     checkpoint_id: str
-    path_node_ids: list[str] = Field(default_factory=list)
+    path_node_ids: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("path_node_ids", "path"),
+    )
+
+    @property
+    def path(self) -> list[str]:
+        return self.path_node_ids
 
 
 class CheckpointPathCollection(BaseModel):
     """Checkpoint 路径映射集合。"""
 
-    checkpoint_paths: list[CheckpointPathMapping] = Field(default_factory=list)
+    model_config = ConfigDict(populate_by_name=True)
+
+    checkpoint_paths: list[CheckpointPathMapping] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("checkpoint_paths", "mappings"),
+    )
+
+    @property
+    def mappings(self) -> list[CheckpointPathMapping]:
+        return self.checkpoint_paths
 
 
 # Pydantic v2 要求显式 rebuild 以支持自引用

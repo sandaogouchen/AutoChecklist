@@ -77,6 +77,8 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
     optimized_tree = attach_expected_results_to_outline(
         state.get("optimized_tree", []),
         assembled_cases,
+        state.get("checkpoint_paths", []),
+        state.get("canonical_outline_nodes", []),
     )
 
     return {
