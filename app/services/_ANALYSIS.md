@@ -9,8 +9,8 @@
 | 维度 | 值 |
 |------|-----|
 | 路径 | `app/services/` |
-| 文件数 | 14 |
-| 分析文件 | 13（排除 `__init__.py`） |
+| 文件数 | 15 |
+| 分析文件 | 14（排除 `__init__.py`）— PR #23 新增 `mandatory_skeleton_builder.py` |
 | 目录职责 | 业务服务层：Checklist 整合、工作流编排、输出渲染、平台分发 |
 
 本目录是 AutoChecklist 项目的**核心业务逻辑层**，承载了从 checkpoint 输入到最终 checklist 输出的全部服务编排、树结构构建、文本归一化、输出渲染及平台分发能力。其中 Checklist 整合方案（即 checkpoint → 结构化 checklist 树的转换过程）是整个系统质量的关键决定因素。
@@ -27,6 +27,11 @@
 | 4 | `precondition_grouper.py` | ~11.5KB | `PreconditionGrouper` | 基于前置条件关键词的测试用例分桶分组 |
 | 5 | `workflow_service.py` | ~13.3KB | `WorkflowService` | 主编排服务：LangGraph 构建 + 迭代执行 + 输出渲染 |
 | 6 | `iteration_controller.py` | ~8.6KB | `IterationController` | 多轮评估迭代控制：evaluate_and_decide → IterationDecision |
+│  ┌──────────────────────────────────┐                            │
+│  │ MandatorySkeletonBuilder         │  ← PR #23 新增             │
+│  │  (强制骨架构建)                   │                            │
+│  └────────────┬─────────────────────┘                            │
+│               │ 被 ProjectTemplateLoader 调用                     │
 | 7 | `text_normalizer.py` | ~7.6KB | `normalize_text()` / `normalize_test_case()` | 中英文文本归一化（空白、标点、编码修复） |
 | 8 | `markdown_renderer.py` | ~5.3KB | `render_test_cases_markdown()` | Markdown 渲染：扁平列表模式 + 树模式 |
 | 9 | `platform_dispatcher.py` | ~5.7KB | `PlatformDispatcher` | 多平台输出分发（markdown / xmind） |
@@ -34,6 +39,8 @@
 | 11 | `xmind_delivery_agent.py` | ~3KB | `XMindDeliveryAgent` | XMind 交付代理：防御性错误处理 |
 | 12 | `xmind_payload_builder.py` | ~4KB | `XMindPayloadBuilder` | ChecklistNode 树 → XMind topic 树构建 |
 | 13 | `project_context_service.py` | ~4KB | `ProjectContextService` | 项目上下文 CRUD（SQLite 持久化） |
+| 14 | `template_loader.py` | ~10KB | `ProjectTemplateLoader` | 模版加载/校验/拍平/强制骨架构建（PR #23 增强：`load_by_name()`、`build_mandatory_skeleton()`、增强 `_parse_node()`、`_get_max_depth()`） |
+| 15 | `mandatory_skeleton_builder.py` | ~5KB | `MandatorySkeletonBuilder` | **[PR #23 新增]** 从模版提取强制节点，构建强制骨架树（MandatorySkeletonNode） |
 
 ---
 
@@ -94,6 +101,74 @@
 
 ---
 
+
+
+**PR #23 变更 — 强制骨架约束注入：**
+
+PR #23 对 `CheckpointOutlinePlanner` 进行了重大增强，引入双重约束机制确保 LLM 输出遵循模版强制骨架。
+
+**新增方法：**
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `_build_mandatory_constraint_prompt()` | `(skeleton: MandatorySkeletonNode) → str` | 将强制骨架序列化为约束 prompt 文本 |
+| `_serialize_skeleton()` | `(node, indent) → str` | 递归将骨架节点序列化为缩进文本，`[MANDATORY]` 标记强制节点 |
+| `_enforce_mandatory_skeleton()` | `(optimized_tree, skeleton) → list[ChecklistNode]` | 后处理修复：以骨架为 ground truth 合并 LLM 输出 |
+| `_merge_skeleton_node()` | `(skeleton_node, llm_lookup) → ChecklistNode` | 将单个骨架节点与 LLM 对应节点合并 |
+| `_index_nodes()` | `(node, lookup) → None` | 递归索引 ChecklistNode 树 |
+| `_collect_skeleton_ids()` | `(node) → set[str]` | 收集骨架中所有节点 ID |
+
+**plan() 方法变更：**
+- 签名新增可选参数：`mandatory_skeleton: MandatorySkeletonNode | None = None`
+- 当 `mandatory_skeleton` 非 None 时：
+  1. **软约束注入**：在 `_OUTLINE_SYSTEM_PROMPT` 和 `_PATH_SYSTEM_PROMPT` 末尾追加 `_MANDATORY_CONSTRAINT_TEMPLATE`
+  2. **硬约束后处理**：LLM 输出后调用 `_enforce_mandatory_skeleton()` 修复
+
+**新增 prompt 模版 — `_MANDATORY_CONSTRAINT_TEMPLATE`：**
+```
+## 强制模版约束
+
+以下是本次生成必须严格遵循的模版骨架结构。标记为 [MANDATORY] 的节点是强制节点，
+你不可以增加、删除、修改或重命名这些节点。
+
+强制骨架：
+{skeleton_text}
+
+约束规则：
+1. 强制层级的节点必须与上述骨架完全一致
+2. 所有 checkpoint 必须被分配到上述骨架节点的某个子路径下
+3. 在非强制层级，你可以自由创建子节点来进一步组织 checkpoint
+4. 输出的 JSON 中，强制节点必须保留原始 id 和 title，不可更改
+```
+
+**`_enforce_mandatory_skeleton()` 后处理策略：**
+
+```
+输入: LLM 生成的 optimized_tree + 强制骨架 skeleton
+  │
+  ├── 1. 建立 LLM 树的 node_id → ChecklistNode 索引
+  │
+  ├── 2. 遍历骨架的每个顶层子节点:
+  │      └── _merge_skeleton_node(): 递归合并
+  │          ├── 查找 LLM 树中的对应节点
+  │          ├── 保留骨架的 id + title (不可变)
+  │          ├── 递归处理子骨架节点
+  │          └── 保留 LLM 为该节点生成的非骨架子节点
+  │
+  ├── 3. 收集未被骨架覆盖的 LLM 节点
+  │      └── 追加到结果列表（非强制层级的额外节点）
+  │
+  └── 返回: 合并后的 list[ChecklistNode]
+```
+
+**节点函数变更 — `checkpoint_outline_planner_node()`：**
+- 从 `state` 读取 `mandatory_skeleton` 字段
+- 传递给 `planner.plan(mandatory_skeleton=mandatory_skeleton)`
+
+**设计评价：**
+- 双重约束策略（软+硬）是务实的工程选择：LLM prompt 注入提高遵循概率，确定性后处理保证 100% 合规
+- `_merge_skeleton_node()` 的合并策略是"骨架优先、LLM 补充"——骨架节点的 id/title 不可变，但允许 LLM 在骨架节点下自由创建子节点
+- 未覆盖的 LLM 节点直接追加而非丢弃，避免信息丢失
 ### §3.3 `semantic_path_normalizer.py` — SemanticPathNormalizer
 
 **核心类**: `SemanticPathNormalizer`
@@ -238,6 +313,29 @@ compile_and_run()
 
 ---
 
+
+
+**PR #23 变更 — source 标签支持：**
+
+`render_test_cases_markdown()` 新增 `enable_source_labels: bool = True` 参数。
+
+**树模式渲染增强：**
+- `_render_tree()` 和 `_render_node()` 传播 `enable_source_labels` 参数
+- `_render_group_node()` 在渲染标题时检查 `node.source` 字段：
+  - `source == "template"` → 标题后追加 ` [模版]`
+  - `source == "overflow"` → 标题后追加 ` [待分配]`
+  - `source == "generated"` → 无额外标签（默认行为）
+- 标签渲染受 `enable_source_labels` 参数控制，可通过 `settings.enable_mandatory_source_labels` 全局关闭
+
+**渲染示例：**
+```markdown
+## Campaign [模版]
+### Campaign name [模版]
+### Campaign objective
+## 待分配 (Overflow) [待分配]
+```
+
+**向后兼容：** `enable_source_labels` 默认为 `True`，但当 `ChecklistNode.source` 为默认值 `"generated"` 时不追加任何标签，因此对无模版的工作流无影响。
 ### §3.9 `platform_dispatcher.py` — PlatformDispatcher
 
 **核心类**: `PlatformDispatcher`
@@ -292,6 +390,30 @@ compile_and_run()
 
 ---
 
+
+
+**PR #23 变更 — source 颜色标记：**
+
+`XMindPayloadBuilder.build()` 新增 `enable_source_labels: bool = True` 参数。
+
+**新增全局常量 — `_SOURCE_MARKERS`：**
+```python
+_SOURCE_MARKERS: dict[str, str] = {
+    "template": "flag-blue",     # 蓝色旗标 = 模版强制节点
+    "overflow": "flag-red",      # 红色旗标 = 溢出未匹配节点
+}
+```
+
+**变更影响：**
+- `_build_tree_root()` / `_build_tree_children()` / `_build_group_xmind_node()` 传播 `enable_source_labels` 参数
+- `_build_group_xmind_node()` 在构建 XMindNode 时检查 `node.source`，将对应 marker 加入 `markers` 列表
+- 蓝色旗标（template）和红色旗标（overflow）在 XMind 中直观标识节点来源
+- 与 priority markers（如 `priority-1` 等）并存，一个节点可同时拥有 source marker + priority marker
+
+**视觉效果：**
+- 模版强制节点：蓝色旗标 — 表示"来自模版、不可修改"
+- 溢出节点：红色旗标 — 表示"未匹配到模版、需要人工分配"
+- LLM 生成节点：无额外旗标 — 正常生成的内容
 ### §3.13 `project_context_service.py` — 项目上下文服务
 
 **核心类**: `ProjectContextService`
@@ -307,6 +429,153 @@ compile_and_run()
 
 ---
 
+
+### §3.14 `mandatory_skeleton_builder.py` — MandatorySkeletonBuilder ★ [PR #23 新增]
+
+**核心类**: `MandatorySkeletonBuilder`
+
+**职责**: 从 Checklist 模版中提取强制节点，构建强制骨架树（`MandatorySkeletonNode`）。骨架作为 outline 规划和 case 挂载的硬约束输入。
+
+**关键方法**:
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `build()` | `(template: ProjectChecklistTemplateFile) → MandatorySkeletonNode \| None` | 公开入口：构建强制骨架或返回 None |
+| `_build_node()` | `(node, depth, mandatory_levels) → MandatorySkeletonNode \| None` | 递归构建单个骨架节点 |
+| `_has_any_mandatory_node()` | `(nodes) → bool` | 检查节点树中是否存在 mandatory=True 的节点 |
+| `_count_mandatory_nodes()` | `(node) → int` | 统计骨架中的强制节点数量 |
+
+**强制性判定规则（三条规则，满足任一即为强制）：**
+
+| # | 规则 | 判定条件 | 适用场景 |
+|---|------|---------|---------|
+| 1 | 层级级强制 | `depth ∈ mandatory_levels` | "第 1、2 层所有节点必须保留" |
+| 2 | 节点级强制 | `node.mandatory == True` | "Campaign name 这个特定节点不可遗漏" |
+| 3 | 路径连接 | 后代中包含强制节点 | 非强制节点作为连接路径保留（确保树连通） |
+
+**构建流程：**
+
+```
+输入: ProjectChecklistTemplateFile
+  │
+  ├── 1. 提取 mandatory_levels（如 [1, 2]）
+  ├── 2. 检查是否存在任何强制约束
+  │      ├── mandatory_levels 非空？
+  │      └── 任何节点 mandatory == True？
+  │      → 均为否则返回 None
+  │
+  ├── 3. 递归遍历模版树:
+  │      对每个节点 (depth=当前深度):
+  │        ├── is_level_mandatory = depth ∈ mandatory_levels
+  │        ├── is_node_mandatory = node.mandatory
+  │        ├── 递归处理子节点 → skeleton_children
+  │        ├── 如果不是强制的且无强制子节点 → 跳过（返回 None）
+  │        └── 构建 MandatorySkeletonNode:
+  │              id, title, depth, is_mandatory
+  │              original_metadata = {priority, note, status, description}
+  │              children = skeleton_children
+  │
+  ├── 4. 构建虚拟根节点:
+  │      id = "__mandatory_root__"
+  │      children = 所有顶层骨架节点
+  │
+  └── 返回: MandatorySkeletonNode (根节点)
+```
+
+**虚拟根节点设计：**
+- ID 为 `"__mandatory_root__"`，不对应任何模版节点
+- 作为骨架树的统一入口，简化下游消费代码
+- `_serialize_skeleton()` 在序列化时跳过虚拟根，直接输出其子节点
+
+**original_metadata 保留策略：**
+- 仅在字段非空时保留（避免空值污染 dict）
+- 保留的字段：`priority`、`note`、`status`、`description`
+- 下游 `_merge_skeleton_node()` 从中读取 `priority` 作为合并后节点的优先级
+
+**示例 — brand_spp_consideration.yaml + mandatory_levels=[1,2]：**
+
+```
+__mandatory_root__ (depth=0, virtual)
+├── doc (depth=1, mandatory=True ← level 1)
+│   ├── prd (depth=2, mandatory=True ← level 2)
+│   ├── FE-tech-design (depth=2, mandatory=True ← level 2)
+│   ├── BE-tech-design (depth=2, mandatory=True ← level 2)
+│   └── test-plan (depth=2, mandatory=True ← level 2)
+└── create (depth=1, mandatory=True ← level 1)
+    ├── campaign (depth=2, mandatory=True ← level 2)
+    │   └── campaign-name (depth=3, mandatory=True ← node.mandatory)
+    ├── adgroup (depth=2, mandatory=True ← level 2)
+    └── ad (depth=2, mandatory=True ← level 2)
+```
+
+注意 `campaign-name` 虽然在 depth=3（不在 mandatory_levels=[1,2] 中），但因其 `mandatory: true` 属性而被纳入骨架。其父节点 `campaign` 因层级规则和路径连接规则双重满足而保留。
+
+**设计评价：**
+- 纯算法实现，不依赖 LLM，完全确定性
+- 三条规则的组合覆盖了业务常见的约束场景
+- 路径连接规则（规则 3）确保骨架树始终连通，不会出现"孤立"的强制叶节点
+- `None` 返回值是显式的"无约束"信号，避免了空骨架对象的歧义
+
+### §3.15 `template_loader.py` — ProjectTemplateLoader (PR #23 增强)
+
+**核心类**: `ProjectTemplateLoader`
+
+**职责**: 项目级 Checklist 模版的加载、校验、拍平和强制骨架构建。
+
+**PR #23 变更摘要：**
+
+| 变更 | 说明 |
+|------|------|
+| 新增 `__init__()` | 初始化 `MandatorySkeletonBuilder` 实例 |
+| 新增 `load_by_name()` | 按名称从 `templates/` 目录加载模版 |
+| 新增 `build_mandatory_skeleton()` | 委托 `MandatorySkeletonBuilder.build()` 构建骨架 |
+| 增强 `_parse_node()` | 解析 description/priority/note/status/mandatory 字段；过滤空 ID 节点 |
+| 新增 `_get_max_depth()` | 获取模版树的最大深度，用于 mandatory_levels 校验 |
+| 增强 `validate_template()` | 新增 mandatory_levels 超深度 Warning |
+
+**新增方法详解：**
+
+**`load_by_name(template_name, template_dir="templates")`：**
+```python
+def load_by_name(self, template_name: str, template_dir: str = "templates"):
+    """按名称从模版目录加载模版。
+    扫描 .yaml 和 .yml 扩展名，找到第一个匹配文件并调用 load()。
+    Raises: FileNotFoundError 当模版不存在时。
+    """
+```
+- 用途：支持 API 请求中的 `template_name` 字段（如 `"brand_spp_consideration"`）
+- 搜索顺序：`.yaml` 优先于 `.yml`
+
+**`build_mandatory_skeleton(template)`：**
+- 纯委托方法：`return self._skeleton_builder.build(template)`
+- 设计原因：将骨架构建能力集成到 loader 的公开接口中，避免调用方直接依赖 `MandatorySkeletonBuilder`
+
+**`_parse_node()` 增强：**
+- 新增字段解析：`description`、`priority`、`note`、`status`、`mandatory`
+- 空 ID 过滤：子节点中 `id` 为空的 dict 被跳过并记录 warning
+- `mandatory` 字段使用 `bool(raw.get("mandatory", False))` 确保类型安全
+
+**`_get_max_depth()` 实现：**
+```python
+def _get_max_depth(self, nodes, current_depth):
+    """递归获取模版树最大深度。"""
+    if not nodes:
+        return current_depth - 1
+    return max(
+        self._get_max_depth(node.children, current_depth + 1)
+        if node.children else current_depth
+        for node in nodes
+    )
+```
+- 用途：`validate_template()` 中校验 `mandatory_levels` 是否超出实际深度
+
+**`validate_template()` 增强 — 新增校验规则 #5：**
+- 当 `mandatory_levels` 包含超过模版实际最大深度的层级时，记录 Warning（不抛异常）
+- 设计选择：Warning 而非 Error，因为超深度的 mandatory_level 只是被忽略，不影响骨架构建的正确性
+
+**依赖关系变更：**
+- 新增内部依赖：`MandatorySkeletonBuilder`（组合关系，`__init__` 中实例化）
+- 新增导入：`MandatorySkeletonNode` 类型
 ## §4 服务依赖图
 
 ### §4.1 调用链全景
@@ -373,7 +642,7 @@ compile_and_run()
 Checkpoints (输入)
     │
     ▼
-CheckpointOutlinePlanner.plan()
+CheckpointOutlinePlanner.plan(mandatory_skeleton=...)
     │  LLM → CanonicalOutlineNode JSON
     ▼
 attach_expected_results_to_outline()
@@ -755,6 +1024,31 @@ def plan_batched(self, checkpoints, scenarios):
 
 **实施方式**:
 ```python
+
+### §5.6 PR #23 对改进路线图的推进
+
+PR #23 的强制模版骨架功能直接推进了 §5.5 中的多项改进建议：
+
+| 原建议 | 状态 | PR #23 实现方式 |
+|--------|------|----------------|
+| **建议 1: PRD 章节锚定** | ✅ 已实现（变体） | 模版强制骨架替代 PRD 标题作为 outline 顶层骨架 |
+| **建议 6: Outline 评估节点** | ⚡ 部分实现 | `_enforce_mandatory_skeleton()` 是确定性校验，但非独立评估节点 |
+| **建议 9: 结构化知识库** | ⚡ 初步实现 | `templates/` 目录 + YAML 模版是结构化知识库的雏形 |
+
+**与原建议的差异分析：**
+
+1. **锚定源不同**: 原建议使用 PRD 原文标题作为锚点（零配置、自动化），PR #23 使用预定义模版（需要人工维护模版文件）。两种方案可互补——无模版时用 PRD 标题锚定，有模版时用模版骨架锚定。
+
+2. **约束强度不同**: 原建议仅是"锚点参考"（LLM 可以调整），PR #23 的强制层级是"硬约束"（不可修改）。硬约束在标准化流程（如广告 Campaign 结构）中价值更高，软锚点在探索性 PRD 中更灵活。
+
+3. **评估方式不同**: 原建议 6 是独立的评估节点（多维度打分），PR #23 的后处理修复是"修复即评估"——不打分、直接修复。优势是零额外 LLM 调用，劣势是缺乏质量度量。
+
+**仍未覆盖的改进建议：**
+- 建议 2（分批规划）：PR #23 未改变单次 LLM 规划的模式
+- 建议 3（PreconditionGrouper 语义升级）：未涉及
+- 建议 5（混合方案 A+B）：未涉及
+- 建议 7（多轮迭代 Outline）：未涉及
+- 建议 8（用户反馈闭环）：未涉及
 # 当前: 关键词交集/并集
 similarity = len(kw_a & kw_b) / len(kw_a | kw_b)
 
