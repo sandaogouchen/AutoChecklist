@@ -16,7 +16,7 @@ from app.clients.llm import LLMClient
 from app.domain.state import CaseGenState
 from app.nodes.checkpoint_evaluator import checkpoint_evaluator_node
 from app.nodes.checkpoint_generator import build_checkpoint_generator_node
-from app.nodes.draft_writer import build_draft_writer_node
+from app.nodes.draft_writer import DraftWriterNode
 from app.nodes.evidence_mapper import evidence_mapper_node
 from app.nodes.scenario_planner import scenario_planner_node
 from app.nodes.structure_assembler import structure_assembler_node
@@ -58,7 +58,7 @@ def build_case_generation_subgraph(llm_client: LLMClient):
         build_checkpoint_outline_planner_node(llm_client),
     )
     builder.add_node("evidence_mapper", evidence_mapper_node)
-    builder.add_node("draft_writer", build_draft_writer_node(llm_client))
+    builder.add_node("draft_writer", DraftWriterNode(llm_client))
     builder.add_node("structure_assembler", structure_assembler_node)
 
     builder.add_edge(START, "scenario_planner")

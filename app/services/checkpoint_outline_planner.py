@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from app.clients.llm import LLMClient
@@ -25,6 +27,8 @@ from app.domain.checklist_models import (
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.research_models import ResearchOutput
 from app.domain.state import CaseGenState
+
+logger = logging.getLogger(__name__)
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -183,8 +187,7 @@ class CheckpointOutlinePlanner:
             json.dumps(
                 {
                     "canonical_nodes": [
-                        node.model_dump(mode="json")
-                        for node in canonical_nodes
+                        node.model_dump(mode="json") for node in canonical_nodes
                     ]
                 },
                 ensure_ascii=False,
@@ -220,10 +223,7 @@ class CheckpointOutlinePlanner:
         canonical_nodes: list[CanonicalOutlineNode],
     ) -> list[_ResolvedCheckpointPath]:
         node_lookup = {node.node_id: node for node in canonical_nodes}
-        path_lookup = {
-            path.checkpoint_id: path
-            for path in checkpoint_paths
-        }
+        path_lookup = {path.checkpoint_id: path for path in checkpoint_paths}
 
         resolved: list[_ResolvedCheckpointPath] = []
         for checkpoint in checkpoints:
@@ -265,10 +265,7 @@ class CheckpointOutlinePlanner:
 
     def _fallback_segments(self, checkpoint: Checkpoint) -> list[_ResolvedOutlineSegment]:
         segments: list[_ResolvedOutlineSegment] = []
-        for index, text in enumerate(
-            [*checkpoint.preconditions, checkpoint.title],
-            start=1,
-        ):
+        for index, text in enumerate([*checkpoint.preconditions, checkpoint.title], start=1):
             normalized = text.strip()
             if not normalized:
                 continue
@@ -369,19 +366,40 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
 def attach_expected_results_to_outline(
     optimized_tree: list[ChecklistNode],
     test_cases: list[TestCase],
+    checkpoint_paths: list[CheckpointPathMapping] | None = None,
+    canonical_outline_nodes: list[CanonicalOutlineNode] | None = None,
+) -> list[ChecklistNode]:
+    """将 testcase 信息挂载到既有大纲树。
+
+    当提供 ``checkpoint_paths`` 与 ``canonical_outline_nodes`` 时，沿固定层级路径
+    把 expected results 挂到叶子 group 节点下；这是当前工作流的主路径。
+
+    当仅提供 ``optimized_tree`` 和 ``test_cases`` 时，回退到对已有 ``case`` 节点
+    的原位富化逻辑，以兼容仍在使用旧调用约定的代码和测试。
+    """
+    if not optimized_tree or not test_cases:
+        return optimized_tree
+
+    if checkpoint_paths and canonical_outline_nodes:
+        return _attach_expected_results_by_path(
+            optimized_tree,
+            test_cases,
+            checkpoint_paths,
+            canonical_outline_nodes,
+        )
+
+    return _attach_case_fields_in_place(optimized_tree, test_cases)
+
+
+def _attach_expected_results_by_path(
+    optimized_tree: list[ChecklistNode],
+    test_cases: list[TestCase],
     checkpoint_paths: list[CheckpointPathMapping],
     canonical_outline_nodes: list[CanonicalOutlineNode],
 ) -> list[ChecklistNode]:
-    """将 testcase 预期结果挂载到既有大纲树叶子。"""
-    if not optimized_tree or not test_cases or not checkpoint_paths:
-        return optimized_tree
-
     tree = [node.model_copy(deep=True) for node in optimized_tree]
     node_lookup = {node.node_id: node for node in canonical_outline_nodes}
-    path_lookup = {
-        path.checkpoint_id: path
-        for path in checkpoint_paths
-    }
+    path_lookup = {path.checkpoint_id: path for path in checkpoint_paths}
 
     for test_case in test_cases:
         if not test_case.expected_results:
@@ -437,6 +455,65 @@ def attach_expected_results_to_outline(
             )
 
     return tree
+
+
+def _attach_case_fields_in_place(
+    optimized_tree: list[ChecklistNode],
+    test_cases: list[TestCase],
+) -> list[ChecklistNode]:
+    try:
+        cp_to_cases: dict[str, list[TestCase]] = defaultdict(list)
+        for tc in test_cases:
+            if tc.checkpoint_id:
+                cp_to_cases[tc.checkpoint_id].append(tc)
+
+        def _enrich_children(children: list[ChecklistNode]) -> list[ChecklistNode]:
+            new_children: list[ChecklistNode] = []
+            for node in children:
+                if node.children:
+                    node.children = _enrich_children(node.children)
+
+                if node.node_type == "case" and node.checkpoint_id:
+                    matching = cp_to_cases.get(node.checkpoint_id, [])
+                    if not matching:
+                        new_children.append(node)
+                        continue
+
+                    _fill_node_from_testcase(node, matching[0])
+                    new_children.append(node)
+
+                    for extra_tc in matching[1:]:
+                        sibling = ChecklistNode(
+                            node_id=f"{node.node_id}__tc__{extra_tc.id}",
+                            title=extra_tc.title or node.title,
+                            node_type="case",
+                            children=[],
+                            checkpoint_id=node.checkpoint_id,
+                        )
+                        _fill_node_from_testcase(sibling, extra_tc)
+                        new_children.append(sibling)
+                else:
+                    new_children.append(node)
+
+            return new_children
+
+        return _enrich_children(optimized_tree)
+    except Exception:
+        logger.warning(
+            "attach_expected_results_to_outline failed; returning unmodified tree",
+            exc_info=True,
+        )
+        return optimized_tree
+
+
+def _fill_node_from_testcase(node: ChecklistNode, tc: TestCase) -> None:
+    node.steps = list(tc.steps or [])
+    node.preconditions = list(tc.preconditions or [])
+    node.expected_results = list(tc.expected_results or [])
+    node.priority = tc.priority or "P2"
+    node.category = tc.category or "functional"
+    node.evidence_refs = list(tc.evidence_refs or [])
+    node.test_case_ref = tc.id or ""
 
 
 def _find_group_node(

@@ -11,11 +11,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from app.domain.case_models import TestCase
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.state import CaseGenState
 from app.services.checkpoint_outline_planner import attach_expected_results_to_outline
 from app.services.text_normalizer import normalize_test_case
+
+logger = logging.getLogger(__name__)
 
 
 def structure_assembler_node(state: CaseGenState) -> CaseGenState:
@@ -67,6 +71,16 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
                     "template_match_confidence": cp.template_match_confidence,
                     "template_match_low_confidence": cp.template_match_low_confidence,
                 })
+                logger.info(
+                    "Checklist template inheritance: case_id=%s checkpoint_id=%s "
+                    "inherited_leaf_id=%s path=%s confidence=%.2f low_confidence=%s",
+                    case.id or f"draft-{index}",
+                    case.checkpoint_id,
+                    cp.template_leaf_id,
+                    " > ".join(cp.template_path_titles) or "-",
+                    cp.template_match_confidence,
+                    cp.template_match_low_confidence,
+                )
 
         assembled = case.model_copy(update=update_fields)
 
@@ -74,11 +88,39 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         assembled = normalize_test_case(assembled)
         assembled_cases.append(assembled)
 
+    logger.info(
+        "Checklist integration starting: draft_cases=%d optimized_tree_roots=%d "
+        "checkpoint_paths=%d canonical_outline_nodes=%d template_bound_cases=%d",
+        len(state.get("draft_cases", [])),
+        len(state.get("optimized_tree", [])),
+        len(state.get("checkpoint_paths", [])),
+        len(state.get("canonical_outline_nodes", [])),
+        sum(1 for case in assembled_cases if case.template_leaf_id),
+    )
+    for case in assembled_cases:
+        logger.info(
+            "Checklist pre-integration item: case_id=%s checkpoint_id=%s title=%s "
+            "template_leaf_id=%s template_path=%s steps=%d expected_results=%d",
+            case.id,
+            case.checkpoint_id or "-",
+            case.title,
+            case.template_leaf_id or "-",
+            " > ".join(case.template_path_titles) or "-",
+            len(case.steps),
+            len(case.expected_results),
+        )
+
     optimized_tree = attach_expected_results_to_outline(
         state.get("optimized_tree", []),
         assembled_cases,
         state.get("checkpoint_paths", []),
         state.get("canonical_outline_nodes", []),
+    )
+
+    logger.info(
+        "Checklist integration completed: test_cases=%d optimized_tree_roots=%d",
+        len(assembled_cases),
+        len(optimized_tree),
     )
 
     return {

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -20,6 +21,8 @@ from app.domain.checkpoint_models import Checkpoint, generate_checkpoint_id
 from app.domain.research_models import ResearchFact
 from app.domain.state import CaseGenState
 from app.domain.template_models import TemplateLeafTarget
+
+logger = logging.getLogger(__name__)
 
 # 低置信度阈值：低于此值的模版匹配将被标记为低置信度
 _LOW_CONFIDENCE_THRESHOLD = 0.6
@@ -154,6 +157,14 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
 
         # 如果存在模版叶子目标，注入模版绑定 prompt
         if template_leaf_targets:
+            logger.info(
+                "Template binding enabled for checkpoint generation: leaf_targets=%d. "
+                "Logic: LLM chooses one template leaf id from the provided leaf targets; "
+                "the system then validates the id, backfills template path ids/titles, "
+                "and flags matches below %.2f as low confidence.",
+                len(template_leaf_targets),
+                _LOW_CONFIDENCE_THRESHOLD,
+            )
             prompt += "\n\n" + _build_template_binding_prompt(template_leaf_targets)
 
         response = llm_client.generate_structured(
@@ -172,6 +183,10 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
         }
 
         checkpoints: list[Checkpoint] = []
+        bound_count = 0
+        unbound_count = 0
+        invalid_cleared_count = 0
+        low_confidence_count = 0
         for draft in response.checkpoints:
             # 确保 fact_ids 不为空
             effective_fact_ids = draft.fact_ids or [facts[0].fact_id] if facts else []
@@ -192,22 +207,56 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
             template_match_confidence = draft.template_match_confidence
             template_match_reason = draft.template_match_reason
             template_match_low_confidence = False
+            binding_status = "unbound"
 
             if template_leaf_id and template_leaf_targets:
                 if template_leaf_id not in valid_leaf_ids:
                     # LLM 返回了无效的 leaf_id，清空绑定
+                    original_leaf_id = template_leaf_id
                     template_leaf_id = ""
                     template_match_confidence = 0.0
                     template_match_reason = ""
+                    binding_status = "invalid_leaf_id_cleared"
+                    invalid_cleared_count += 1
+                    logger.info(
+                        "Template binding result: checkpoint_id=%s status=%s "
+                        "requested_leaf_id=%s reason=%s",
+                        checkpoint_id,
+                        binding_status,
+                        original_leaf_id,
+                        draft.template_match_reason or "-",
+                    )
                 else:
                     # 回填路径信息
                     leaf_target = leaf_lookup[template_leaf_id]
                     template_path_ids = leaf_target.path_ids
                     template_path_titles = leaf_target.path_titles
+                    binding_status = "bound"
+                    bound_count += 1
 
                     # 标记低置信度
                     if template_match_confidence < _LOW_CONFIDENCE_THRESHOLD:
                         template_match_low_confidence = True
+                        low_confidence_count += 1
+
+                    logger.info(
+                        "Template binding result: checkpoint_id=%s status=%s leaf_id=%s "
+                        "confidence=%.2f low_confidence=%s path=%s reason=%s",
+                        checkpoint_id,
+                        binding_status,
+                        template_leaf_id,
+                        template_match_confidence,
+                        template_match_low_confidence,
+                        " > ".join(template_path_titles) or "-",
+                        template_match_reason or "-",
+                    )
+            elif template_leaf_targets:
+                unbound_count += 1
+                logger.info(
+                    "Template binding result: checkpoint_id=%s status=unbound reason=%s",
+                    checkpoint_id,
+                    template_match_reason or "LLM did not return template_leaf_id",
+                )
 
             checkpoints.append(
                 Checkpoint(
@@ -228,6 +277,17 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
                     template_match_reason=template_match_reason,
                     template_match_low_confidence=template_match_low_confidence,
                 )
+            )
+
+        if template_leaf_targets:
+            logger.info(
+                "Template binding summary: checkpoints=%d bound=%d low_confidence=%d "
+                "unbound=%d invalid_cleared=%d",
+                len(checkpoints),
+                bound_count,
+                low_confidence_count,
+                unbound_count,
+                invalid_cleared_count,
             )
 
         return {"checkpoints": checkpoints}
