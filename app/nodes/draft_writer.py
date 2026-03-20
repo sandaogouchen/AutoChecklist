@@ -160,7 +160,7 @@ def _format_checkpoint_prompt(
         lines.append(f"Template path: {template_path_text}")
         if checkpoint.template_match_low_confidence:
             lines.append(
-                "\u26a0\ufe0f 模版匹配置信度较低，请在生成用例时注意验证归类是否合理。"
+                "⚠️ 模版匹配置信度较低，请在生成用例时注意验证归类是否合理。"
             )
 
     path_context = _resolve_path_context(
