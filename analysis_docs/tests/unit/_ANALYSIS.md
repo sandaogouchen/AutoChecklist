@@ -9,10 +9,10 @@
 | 维度 | 值 |
 |------|-----|
 | 路径 | `tests/unit/` |
-| 文件数 | 23（含 `__init__.py`） |
-| 分析文件 | 22 |
+| 文件数 | 25（含 `__init__.py`） |
+| 分析文件 | 24 |
 | 目录职责 | 组件级单元测试：覆盖 domain models、nodes、services 三层 |
-| Checklist 相关 | 6/22 文件直接涉及 checklist 整合 |
+| Checklist 相关 | 8/24 文件直接涉及 checklist 整合 |
 
 ## §2 文件清单
 
@@ -40,6 +40,8 @@
 | 20 | `test_platform_dispatcher.py` | `services/platform_dispatcher` | 否 |
 | 21 | `test_reflection.py` | `nodes/reflection` | 否 |
 | 22 | `test_semantic_path_normalizer.py` | `services/semantic_path_normalizer` | ✅ |
+| 23 | `test_attach_expected_results.py` | `services/checkpoint_outline_planner` (attach logic) | ✅ |
+| 24 | `test_xmind_steps_rendering.py` | `services/xmind_payload_builder` (steps rendering) | ✅ |
 
 ## §3 Checklist 相关测试深度分析
 
@@ -96,6 +98,47 @@
   - 输出格式验证：`NormalizedChecklistPath` 结构
 - **注意**: 测试的是已弃用方案 A 的组件
 
+### §3.7 test_attach_expected_results.py (NEW — PR #21)
+
+> 新增于 PR #21 `feat/checklist-action-verbs-and-steps-passthrough`
+
+- **测试范围**: `attach_expected_results_to_outline()` 重构后的新签名 `(optimized_tree, test_cases)` 及相关辅助逻辑
+- **测试规模**: 8 个测试类，约 14 个测试用例
+- **关键用例**:
+
+| 测试场景 | 说明 |
+|----------|------|
+| 单匹配 | 单个 test_case 正确匹配到对应 outline 节点并填充字段 |
+| 空树 | `optimized_tree` 为空列表时不抛异常，返回空结果 |
+| 空 test_cases | `test_cases` 为空列表时，树结构保持不变（无填充） |
+| 无匹配 checkpoint | outline 节点与 test_cases 无匹配时的优雅降级 |
+| 多 TC 兄弟创建 | 多个 test_case 匹配同一 outline 节点时，正确创建兄弟子节点 |
+| 嵌套树 | 多层嵌套树结构的递归充实正确性 |
+| 遗留 expected_result 节点 | 处理树中已存在的 `expected_result` 类型旧节点 |
+| 优雅降级 | 各种边界/异常情况下不崩溃，返回合理默认值 |
+
+- **覆盖度**: 全面覆盖了重构后 `attach_expected_results_to_outline` 的核心逻辑，包括正常路径、边界条件和错误降级
+- **Checklist 关联**: 直接验证了 PR #21 中签名简化后的挂载正确性，是 `_fill_node_from_testcase` 和 `_enrich_children` 的集成测试
+
+### §3.8 test_xmind_steps_rendering.py (NEW — PR #21)
+
+> 新增于 PR #21 `feat/checklist-action-verbs-and-steps-passthrough`
+
+- **测试范围**: XMind 输出中 test case steps 的渲染逻辑（`XMindPayloadBuilder` 对 steps 字段的处理）
+- **测试规模**: 3 个测试类，约 11 个测试用例
+- **关键用例**:
+
+| 测试场景 | 说明 |
+|----------|------|
+| 带 steps 的用例 | 验证 steps 字段正确渲染为 XMind topic 子节点 |
+| 无 steps 的用例 | 验证 steps 为空时不产生多余的子节点 |
+| 树模式 + 分组 | 树渲染模式下，group 节点包含的用例 steps 正确嵌套 |
+| 深层嵌套 | 多层嵌套 group → case → steps 的渲染层级正确性 |
+| 混合用例 | 同一组内部分有 steps、部分无 steps 的混合场景 |
+
+- **覆盖度**: 覆盖了 steps 字段从 `ChecklistNode` 树到 XMind topic 树的完整渲染路径
+- **Checklist 关联**: 验证了 PR #21 新增的 steps passthrough 功能在 XMind 输出端的正确性
+
 ## §4 非 Checklist 测试概览
 
 ### §4.1 模型层测试（6 文件）
@@ -119,9 +162,9 @@
 
 ## §5 补充观察
 
-1. **测试覆盖广度优秀**: 22 个测试文件覆盖了大部分核心组件，测试金字塔底层（单元测试）厚实
-2. **Checklist 测试比重高**: 6/22 (27%) 的测试文件直接涉及 checklist 整合，反映了这是开发重点和痛点
-3. **⚠️ 缺失测试**:
+1. **测试覆盖广度优秀**: 24 个测试文件覆盖了大部分核心组件，测试金字塔底层（单元测试）厚实
+2. **Checklist 测试比重高**: 8/24 (33%) 的测试文件直接涉及 checklist 整合，反映了这是开发重点和痛点（PR #21 新增 2 个测试文件进一步加强了此覆盖）
+3. **缺失测试**:
    | 组件 | 当前状态 | 影响 |
    |------|----------|------|
    | `PreconditionGrouper` | **无单元测试** | 前置条件分组逻辑未验证 |
@@ -129,7 +172,8 @@
    | `text_normalizer` | **无单元测试** | 中英文归一化边界情况未验证 |
    | `workflow_service` | **无单元测试** | 编排逻辑仅通过集成测试覆盖 |
 4. **Checklist 端到端质量断言缺失**: 单元测试各自验证组件正确性，但缺少跨组件的质量断言（如：给定特定 checkpoints，outline + 用例的整体质量是否达标）
-5. **建议**:
+5. **PR #21 测试改进**: 新增的 `test_attach_expected_results.py`（14 用例）和 `test_xmind_steps_rendering.py`（11 用例）显著增强了 checklist 挂载逻辑和 XMind steps 渲染的测试覆盖，部分缓解了上述 §5.3 中 `structure_assembler` 挂载逻辑未验证的问题
+6. **建议**:
    - 优先为 `PreconditionGrouper` 和 `structure_assembler` 添加单元测试
    - 添加 checklist 整合的"快照测试"：固定输入 → 验证输出结构稳定性
    - 为 `checkpoint_outline_planner` 添加大规模输入（30+ checkpoints）的压力测试
