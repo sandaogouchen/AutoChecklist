@@ -24,7 +24,7 @@
 | 4 | scenario_planner.py | build_scenario_planner_node | 否 | 子图·入口 | planned_scenarios (pass-through) |
 | 5 | checkpoint_generator.py | build_checkpoint_generator_node | 是 | 子图 | checkpoints |
 | 6 | checkpoint_evaluator.py | build_checkpoint_evaluator_node | 是 | 子图 | checkpoints (filtered/revised) |
-| 7 | checklist_optimizer.py | build_checklist_optimizer_node | 是 | ⚠️ 未启用 | optimized_tree |
+| 7 | checklist_optimizer.py | build_checklist_optimizer_node | 是 | 未启用 | optimized_tree |
 | 8 | checkpoint_outline_planner.py | build_checkpoint_outline_planner_node | 是 | 子图 | optimized_tree |
 | 9 | evidence_mapper.py | build_evidence_mapper_node | 是 | 子图 | evidence_map |
 | 10 | draft_writer.py | build_draft_writer_node | 是 | 子图 | test_cases |
@@ -77,7 +77,7 @@
 - **评估维度**: 完整性、可测试性、非冗余性
 - **输出**: 过滤/修订后的 checkpoints
 
-### §3.7 checklist_optimizer.py ⚠️
+### §3.7 checklist_optimizer.py
 - **类型**: A-核心算法 + C-LLM集成
 - **状态**: **已弃用 — 未纳入当前子图流水线**
 - **原始设计**: `SemanticPathNormalizer.normalize()` → `ChecklistMerger.merge()`
@@ -101,7 +101,8 @@
 - **职责**: LLM 将 research_facts 中的证据映射到对应 checkpoint
 - **输出**: `{"evidence_map": list[EvidenceRef]}`
 
-### §3.10 draft_writer.py ⭐
+### §3.10 draft_writer.py
+
 - **类型**: A-核心算法 + C-LLM集成
 - **职责**: LLM 基于 checkpoint + evidence 生成 TestCase
 - **关键特性**:
@@ -113,6 +114,47 @@
     5. 复用感知：相似前置条件使用一致表述
   - **_resolve_path_context()**: 从 optimized_tree 提取层级路径注入 prompt
 - **Checklist 整合关键点**: 此处是 outline 结构影响测试用例生成的核心节点
+
+#### §3.10.1 PR #21 更新 — `feat/checklist-action-verbs-and-steps-passthrough`
+
+> 同步自 PR #21 · 重大重写
+
+**变更概要**: `draft_writer.py` 从工厂函数模式重写为类模式，系统提示词改为中文，新增路径-步骤衔接规则。
+
+**1. 架构模式变更: 工厂函数 → 类**
+
+| 维度 | 变更前 | 变更后 |
+|------|--------|--------|
+| 导出 | `build_draft_writer_node()` 工厂函数 | `DraftWriterNode` 类 |
+| 调用方式 | 返回闭包 `async def node(state)` | 类实例的 `async __call__(self, state)` |
+| 依赖注入 | 闭包捕获 LLMClient/Settings | 构造函数参数 |
+
+**2. 系统提示词: 英文规则 → 中文路径-步骤衔接规则**
+
+原来的 5 条英文前置条件规则被替换为中文系统提示词，核心新增 4 条路径-步骤衔接（path-step bridging）规则：
+
+| 规则 | 名称 | 说明 |
+|------|------|------|
+| 1 | 衔接性 | 测试步骤应与 checklist 路径上下文自然衔接 |
+| 2 | 不重复 | 步骤不应重复路径中已隐含的信息 |
+| 3 | 聚焦细节 | 步骤应聚焦于路径未覆盖的操作细节 |
+| 4 | 操作可执行性 | 每个步骤必须是可执行的具体操作 |
+
+**3. 执行模型: 同步闭包 → async `__call__`**
+
+与 LangGraph 异步执行模型对齐，`__call__` 方法为 `async def`。
+
+**4. 移除的功能**
+
+| 移除项 | 说明 |
+|--------|------|
+| 模板字段继承 | 原有的从模板继承字段值的逻辑被移除 |
+| 场景 fallback | 当路径上下文缺失时的场景降级逻辑被移除 |
+| `DraftCaseCollection` 模型 | 用于收集草稿用例的中间 Pydantic 模型被移除 |
+
+**影响评估**: 此重写使 `draft_writer` 更聚焦于路径-步骤衔接质量，但移除了部分防御性降级逻辑。若上游 `optimized_tree` 为空或路径上下文缺失，当前版本的降级行为需要验证。
+
+---
 
 ### §3.11 evaluation.py
 - **类型**: A-核心算法

@@ -92,6 +92,40 @@
 
 **当前状态**: 属于**方案 B**（当前使用）的核心组件。
 
+#### §3.2.1 PR #21 更新 — `feat/checklist-action-verbs-and-steps-passthrough`
+
+> 同步自 PR #21 · 重大重构
+
+**变更概要**: 此文件经历了一次重大重写，涵盖 prompt 改进、签名简化、新 helper 方法和 async 化。
+
+**1. `_OUTLINE_SYSTEM_PROMPT` — 动作动词注入规则**
+
+系统提示词新增中文动作动词（action verbs）注入规则，要求 `display_text` 字段使用规范化的中文动词开头（如"验证"、"检查"、"确认"等），使 outline 节点文本更具可操作性和一致性。
+
+**2. `attach_expected_results_to_outline()` — 签名简化**
+
+| 维度 | 变更前 | 变更后 |
+|------|--------|--------|
+| 签名 | `(outline_nodes, checkpoints, checkpoint_paths, canonical_outline_nodes)` — 4 参数 | `(optimized_tree, test_cases)` — 2 参数 |
+| 匹配源 | 基于 checkpoint 的 expected_behaviors | 基于 test_cases 的结构化数据 |
+| 职责 | 遍历 outline 叶节点，字符串匹配 checkpoint | 遍历优化树，将 test_case 数据直接填充到节点 |
+
+**3. 新增 `_fill_node_from_testcase(node, tc)` helper**
+
+填充节点的多个字段：`steps`、`preconditions`、`expected_results`、`priority`、`category`、`evidence_refs`、`test_case_ref`。将原来分散的字段赋值逻辑集中为单一 helper，提升可维护性。
+
+**4. 新增 `_enrich_children(children, tc_map)` 递归充实**
+
+递归遍历子节点树，使用 `tc_map`（test_case 映射字典）逐节点匹配并调用 `_fill_node_from_testcase`。支持任意深度的树结构充实。
+
+**5. 类方法 async 化**
+
+核心方法从同步改为 `async`，与上游 LangGraph 异步执行模型对齐。
+
+**6. 潜在破坏性变更**
+
+> `structure_assembler.py` 中仍以 4 参数形式调用 `attach_expected_results_to_outline()`。签名简化为 2 参数后，若 `structure_assembler.py` 未同步更新，将产生 `TypeError` 运行时错误。需确认 PR #21 是否同步修改了 `structure_assembler.py` 的调用点。
+
 ---
 
 ### §3.3 `semantic_path_normalizer.py` — SemanticPathNormalizer
@@ -823,11 +857,11 @@ Phase 4 — 后处理:
 
 | 指标 | 计算方式 | 合格阈值 |
 |------|---------|----------|
-| **覆盖率** | 已匹配 checkpoint 数 / 总 checkpoint 数 | ≥ 0.95 |
-| **平衡度** | std(各子树叶节点数) / mean(各子树叶节点数) | ≤ 1.5 |
+| **覆盖率** | 已匹配 checkpoint 数 / 总 checkpoint 数 | >= 0.95 |
+| **平衡度** | std(各子树叶节点数) / mean(各子树叶节点数) | <= 1.5 |
 | **深度合理性** | max_depth / log2(叶节点数) | 0.5 - 3.0 |
-| **空叶节点率** | 无子节点的叶节点数 / 总叶节点数 | ≤ 0.1 |
-| **命名一致性** | 同层节点命名风格相似度 | ≥ 0.7 |
+| **空叶节点率** | 无子节点的叶节点数 / 总叶节点数 | <= 0.1 |
+| **命名一致性** | 同层节点命名风格相似度 | >= 0.7 |
 
 **不合格时的处理**:
 - 覆盖率不足 → 找到未匹配的 checkpoint，追加为新叶节点
