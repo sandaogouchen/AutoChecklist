@@ -9,7 +9,7 @@
 | 属性 | 值 |
 |---|---|
 | **路径** | `app/domain/` |
-| **文件数量** | 11（1 `__init__.py` + 10 模型文件） |
+| **文件数量** | 11（1 `__init__.py` + 10 模型文件）— PR #23 扩展了 template_models.py、checklist_models.py、state.py、api_models.py |
 | **角色描述** | 项目核心领域模型层，定义从 PRD 解析到测试用例生成全流程中所有数据结构。全部采用 Pydantic v2 模型（少数使用 `TypedDict`），负责数据校验、序列化和跨层通信的类型契约。 |
 | **设计风格** | 纯数据模型，无业务逻辑（除 `model_validator` 中的防御性归一化）；贫血模型 + 管道式数据流 |
 
@@ -30,6 +30,11 @@
 | 9 | `run_state.py` | A-model | ~100 | 运行状态与评估：`RunState`、`EvaluationReport`、`EvaluationDimension`、`RetryDecision`、`IterationRecord` |
 | 10 | `state.py` | A-model (TypedDict) | ~40 | 全局状态容器：`GlobalState(TypedDict)` 含 `optimized_tree`、`CaseGenState(TypedDict)` 用于子图 |
 | 11 | `xmind_models.py` | A-model | ~40 | XMind 导出专用树结构：`XMindTopic` |
+                                           │
+                                           ▼
+                              MandatorySkeletonNode    （强制骨架约束 · PR #23）
+                                           │
+| 12 | `template_models.py` | A-model | ~130 | **关键文件 (PR #23 扩展)**：项目级 Checklist 模版领域模型：`ProjectChecklistTemplateNode`（+mandatory）、`ProjectChecklistTemplateMetadata`（+mandatory_levels）、`ProjectChecklistTemplateFile`、`TemplateLeafTarget`、`MandatorySkeletonNode`（新增） |
 
 ---
 
@@ -66,6 +71,12 @@ class IterationSummary(BaseModel):
     iteration: int                    # 迭代轮次编号
     score: float                      # 本轮评估得分
     passed: bool                      # 是否通过质量门槛
+
+
+**PR #23 变更：**
+- `CaseGenerationRequest` 新增 `template_name: str | None` 字段，支持按名称从 `templates/` 目录加载模版（不含扩展名）
+- `template_name` 与 `template_file_path` 二选一，`template_name` 优先
+- 使用场景：用户在 API 请求中指定 `template_name: "brand_spp_consideration"` 即可自动加载对应模版
     # ... 其他摘要字段
 
 class CaseGenerationResponse(BaseModel):
@@ -167,6 +178,25 @@ class CheckpointPathCollection(BaseModel):
 
 ---
 
+
+
+**PR #23 变更 — source 与 is_mandatory 字段：**
+
+`ChecklistNode` 新增两个字段以支持强制模版骨架功能：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `source` | `Literal["template", "generated", "overflow"]` | `"generated"` | 标记节点来源：来自模版骨架 / LLM 自由生成 / 溢出未匹配 |
+| `is_mandatory` | `bool` | `False` | 标记节点是否为强制节点（不可被 LLM 删除或重命名） |
+
+**source 三值语义：**
+- `"template"` — 节点来自模版强制骨架，标题和 ID 与模版一致，LLM 不可修改
+- `"generated"` — 节点由 LLM 自由生成，可在非强制层级自由创建
+- `"overflow"` — 节点未匹配到骨架中任何位置，被收集到 `_overflow` 容器
+
+**下游消费：**
+- `markdown_renderer.py`：`source == "template"` → 标题后追加 `[模版]`；`source == "overflow"` → 追加 `[待分配]`
+- `xmind_payload_builder.py`：`source == "template"` → 蓝色旗标；`source == "overflow"` → 红色旗标
 ### §3.5 `checkpoint_models.py`
 
 | 属性 | 值 |
@@ -387,6 +417,18 @@ class RunState(BaseModel):
 
 ```python
 class GlobalState(TypedDict):
+
+
+**PR #23 变更 — mandatory_skeleton 字段：**
+
+`GlobalState` 和 `CaseGenState` 均新增 `mandatory_skeleton: MandatorySkeletonNode` 字段：
+
+- **写入者**: `template_loader` 节点 — 加载模版后调用 `MandatorySkeletonBuilder.build()` 构建骨架
+- **桥接传递**: `main_workflow.py` 的 `_build_case_generation_bridge()` 负责将 `mandatory_skeleton` 从 `GlobalState` 映射到 `CaseGenState`
+- **消费者**:
+  1. `checkpoint_outline_planner` — 将骨架注入 LLM prompt（软约束）+ 后处理修复（硬约束）
+  2. `structure_assembler` — 最终防线：确保输出树与骨架一致 + source 标注
+- **可选性**: 当未提供模版或模版无强制约束时，该字段为 `None`，所有消费者安全跳过，保持向后兼容
     # LangGraph 主图的状态容器
     parsed_document: ParsedDocument | None
     research_output: ResearchOutput | None
@@ -426,6 +468,97 @@ class CaseGenState(TypedDict):
 class XMindTopic(BaseModel):
     title: str                                  # 节点标题
     children: list["XMindTopic"] = []           # 子主题列表（递归引用）
+
+### §3.12 `template_models.py` ★ 关键文件 (PR #23 扩展)
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-model（模版领域模型） |
+| **职责** | 定义项目级 Checklist 模版的完整数据结构，包括模版节点、元数据、叶子目标和强制骨架节点 |
+
+**关键类与签名：**
+
+```python
+class ProjectChecklistTemplateNode(BaseModel):
+    """模版树节点（支持递归子节点 + mandatory 标记）。"""
+    id: str                                       # 节点唯一标识
+    title: str                                    # 节点标题
+    description: str = ""                         # [PR #23] 节点描述信息
+    priority: str = ""                            # [PR #23] 优先级标记（P0-P3）
+    note: str = ""                                # [PR #23] 附加备注
+    status: str = ""                              # [PR #23] 节点状态
+    mandatory: bool = False                       # [PR #23] 是否为强制节点
+    children: list[ProjectChecklistTemplateNode] = []
+
+class ProjectChecklistTemplateMetadata(BaseModel):
+    """模版元数据。"""
+    name: str = ""
+    version: str = ""
+    description: str = ""
+    mandatory_levels: list[int] = []              # [PR #23] 强制层级列表（从 1 开始）
+
+    @field_validator("mandatory_levels")
+    def validate_mandatory_levels(cls, v):
+        """校验层级编号为正整数，返回排序去重后的列表。"""
+
+class ProjectChecklistTemplateFile(BaseModel):
+    """完整的模版文件结构。"""
+    metadata: ProjectChecklistTemplateMetadata
+    nodes: list[ProjectChecklistTemplateNode]
+
+class TemplateLeafTarget(BaseModel):
+    """拍平后的叶子目标，用于 checkpoint 绑定。"""
+    leaf_id: str
+    leaf_title: str
+    path_ids: list[str]
+    path_titles: list[str]
+    path_text: str = ""
+
+class MandatorySkeletonNode(BaseModel):
+    """[PR #23 新增] 强制骨架节点。"""
+    id: str                                       # 节点 ID（与模版原始 ID 一致）
+    title: str                                    # 节点标题
+    depth: int                                    # 在模版树中的深度（从 1 开始）
+    is_mandatory: bool                            # 是否为强制节点
+    source: Literal["template"] = "template"      # 固定来源标记
+    original_metadata: dict = {}                  # 保留原始元信息（priority/note/status）
+    children: list[MandatorySkeletonNode] = []    # 子骨架节点
+```
+
+**依赖关系：**
+- 内部：`MandatorySkeletonNode` 被 `state.GlobalState` / `state.CaseGenState` 引用
+- 外部：`pydantic.BaseModel`、`pydantic.field_validator`、`typing.Literal`
+
+**PR #23 核心变更：**
+
+1. **`ProjectChecklistTemplateNode` 扩展**:
+   - 新增 `description`、`priority`、`note`、`status` 元信息字段（均可选，默认空字符串）
+   - 新增 `mandatory: bool = False` — 节点级强制标记，允许在非强制层级中标记单个节点为强制
+
+2. **`ProjectChecklistTemplateMetadata` 扩展**:
+   - 新增 `mandatory_levels: list[int]` — 层级级强制标记，指定哪些深度层级的所有节点自动为强制
+   - 层级编号从 1 开始（第 1 层 = `nodes` 的直接子节点）
+   - `field_validator` 确保层级编号为正整数，自动排序去重
+
+3. **`MandatorySkeletonNode` 新增**:
+   - 从模版中提取的仅包含强制节点的子树
+   - 作为 outline 规划和 case 挂载的硬约束输入
+   - `depth` 字段记录在模版树中的绝对深度，支持层级级强制判定
+   - `original_metadata` 保留原始节点的 priority/note/status 等信息，避免信息丢失
+   - `source` 字段固定为 `"template"`，用于下游 source 标注
+
+4. **自引用 model_rebuild()**:
+   - `ProjectChecklistTemplateNode.model_rebuild()` — 已有
+   - `MandatorySkeletonNode.model_rebuild()` — PR #23 新增，支持自引用递归结构
+
+**强制性判定的双通道设计：**
+
+| 通道 | 粒度 | 字段 | 说明 |
+|------|------|------|------|
+| 层级级强制 | 整层所有节点 | `metadata.mandatory_levels` | 适用于"Campaign/AdGroup/Ad 三层必须存在"的场景 |
+| 节点级强制 | 单个特定节点 | `node.mandatory` | 适用于"Campaign name 这个特定节点不可遗漏"的场景 |
+
+两种通道的组合使模版定义者可以灵活控制强制约束的粒度——既可以按层级批量约束，也可以对特定关键节点精确约束。
     # ... 可能的样式、标注等 XMind 特有属性
 ```
 
@@ -474,7 +607,8 @@ GlobalState (TypedDict)
     ├── checkpoints:      list[Checkpoint]
     ├── optimized_tree:   list[ChecklistNode]      ← 核心产出
     ├── test_cases:       list[TestCase]
-    └── run_state:        RunState
+    ├── run_state
+    ├── mandatory_skeleton:   MandatorySkeletonNode     ← PR #23 新增:        RunState
                             └── iterations: list[IterationRecord]
                                               └── evaluation: EvaluationReport
                                                                 └── dimensions: list[EvaluationDimension]
@@ -496,6 +630,11 @@ ResearchFact → EvidenceRef ◄─────────► TestCase.evidence
 
 ---
 
+
+
+MandatorySkeletonNode.id ◄───────────► ProjectChecklistTemplateNode.id (一对一骨架映射)
+MandatorySkeletonNode.id ◄───────────► ChecklistNode.node_id          (强制节点恢复/合并)
+ChecklistNode.source ────────────────► "template" | "generated" | "overflow" (来源标记)
 ## §5 补充观察
 
 ### 5.1 ChecklistNode 的 node_type 枚举设计
@@ -586,3 +725,37 @@ def coerce_evidence_refs(cls, values):
 4. **可扩展性**：如果未来 LLM 出现新的格式异常模式（如返回逗号分隔字符串），只需在验证器中增加一个 `elif` 分支，无需修改业务逻辑
 
 这种"宽进严出"的防御性设计是 LLM 应用工程中的最佳实践——在系统边界处做最大限度的输入归一化，在系统内部保持严格的类型约束。
+
+
+### 5.6 MandatorySkeletonNode 的设计意图 (PR #23)
+
+`MandatorySkeletonNode` 是 PR #23 引入的核心新模型，它代表了从模版中提取的"强制骨架"——仅包含模版中被标记为强制的节点子树。
+
+**为什么需要独立的骨架模型（而非直接复用 ProjectChecklistTemplateNode）：**
+
+1. **关注点分离**: `ProjectChecklistTemplateNode` 是完整的模版节点（包含所有非强制节点），而 `MandatorySkeletonNode` 仅包含强制节点及其连接路径。直接复用会混淆"完整模版"和"强制约束"两个概念
+2. **深度标注**: `depth` 字段记录节点在原始模版中的绝对深度，是层级级强制判定（`mandatory_levels`）的核心依据。`ProjectChecklistTemplateNode` 没有这个信息（深度由递归位置隐式确定）
+3. **元信息保留**: `original_metadata` 将 priority/note/status 等信息打包为 dict，避免在骨架传播过程中丢失模版定义者的意图
+4. **source 固定**: `source = "template"` 是编译时常量，确保骨架节点在整个管道中始终被标记为模版来源
+
+**骨架在管道中的生命周期：**
+
+```
+template_loader 节点
+    │ MandatorySkeletonBuilder.build(template)
+    ▼
+GlobalState.mandatory_skeleton
+    │ _build_case_generation_bridge() 映射
+    ▼
+CaseGenState.mandatory_skeleton
+    │
+    ├──→ checkpoint_outline_planner
+    │      ├── 序列化注入 system prompt（软约束）
+    │      └── _enforce_mandatory_skeleton() 后处理（硬约束）
+    │
+    └──→ structure_assembler
+           ├── _enforce_mandatory_constraints() 最终防线
+           └── _annotate_source() 来源标注
+```
+
+**向后兼容保证：** 当模版无 `mandatory_levels` 且无 `mandatory: true` 节点时，`MandatorySkeletonBuilder.build()` 返回 `None`，`mandatory_skeleton` 字段不被写入状态。所有消费者均以 `state.get("mandatory_skeleton")` 安全获取，`None` 时跳过全部强制逻辑。
