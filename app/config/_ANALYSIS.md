@@ -12,13 +12,14 @@
 | 文件数 | 2 |
 | 分析文件 | \_\_init\_\_.py, settings.py |
 | 目录职责 | 集中式应用配置：基于 pydantic-settings 的类型安全配置管理 |
+| PR #23 变更 | settings.py 新增 2 个配置字段（模版目录 + source 标签开关） |
 
 ## §2 文件清单
 
 | # | 文件 | 类型 | 行数(估) | 概要 |
 |---|------|------|----------|------|
 | 1 | \_\_init\_\_.py | K-配置 | ~1 | 空包初始化文件 |
-| 2 | settings.py | K-配置 | ~40 | Pydantic Settings 配置类，定义全部运行时参数 |
+| 2 | settings.py | K-配置 | ~45 | Pydantic Settings 配置类，定义全部运行时参数（含 PR #23 新增模版配置） |
 
 ## §3 逐文件分析
 
@@ -49,6 +50,8 @@
 |------|------|--------|------|
 | `max_iterations` | int | 3 | Reflection 层最大迭代轮数 |
 | `evaluation_pass_threshold` | float | 0.7 | 评估通过阈值（0-1） |
+| `template_dir="templates"` | `"templates"` | 合理。约定优于配置，项目根目录下的 `templates/` 为直觉默认位置 |
+| `enable_mandatory_source_labels=True` | `True` | 合理。默认启用提供完整信息，调试/展示时一目了然。关闭时不影响功能逻辑 |
 
 #### C. 功能开关
 
@@ -62,6 +65,25 @@
 |------|------|--------|------|
 | `data_dir` | str | "data" | 数据存储根目录 |
 | `project_db_path` | str | "data/projects.db" | SQLite 项目数据库路径 |
+
+#### E. 模版配置 (PR #23 新增)
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `template_dir` | str | `"templates"` | 模版文件目录路径，`load_by_name()` 和 `list_templates` 端点从此目录扫描 `.yaml`/`.yml` 文件 |
+| `enable_mandatory_source_labels` | bool | `True` | 启用 source 来源标签：Markdown 渲染 `[模版]`/`[待分配]`，XMind 渲染 `flag-blue`/`flag-red` |
+
+**字段分析**:
+- `template_dir`:
+  - 与 `data_dir` 模式一致，使用相对路径字符串
+  - 消费方：`routes.py` 的 `list_templates()` / `get_template()` 端点、`template_loader.py` 节点的 `load_by_name()`
+  - 路径解析：在消费方通过 `Path(settings.template_dir)` 转为 `Path` 对象，运行时依赖进程工作目录
+  - 生产环境建议通过 `TEMPLATE_DIR` 环境变量指定绝对路径
+- `enable_mandatory_source_labels`:
+  - 功能开关模式，与 `enable_checklist_optimization` 设计一致
+  - `True` (默认): 所有输出格式（Markdown / XMind）均标注节点来源
+  - `False`: 关闭标签，输出与 PR #23 之前行为一致（向后兼容）
+  - 传播路径：`Settings → markdown_renderer.render_test_cases_markdown(enable_source_labels=...) / xmind_payload_builder.build(enable_source_labels=...)`
 
 - **设计模式**: Pydantic Settings 单例模式 — 通过 `BaseSettings` 实现环境变量到强类型字段的自动映射，配合 `.env` 文件与 `python-dotenv` 完成开发/生产环境配置隔离
 
@@ -106,3 +128,14 @@
 2. **数据库路径硬编码模式**: `project_db_path` 默认值 `"data/projects.db"` 使用相对路径，运行时行为依赖进程工作目录。生产部署时应通过环境变量显式指定绝对路径
 3. **无密钥验证**: `llm_api_key` 为纯字符串类型，未使用 `SecretStr`。若需防止日志意外泄露密钥，可升级为 `pydantic.SecretStr` 类型
 4. **与根目录 .env.example 一致性**: settings.py 中的 LLM 字段与 `.env.example` 模板完全对应，配置链路完整无遗漏
+5. **PR #23 配置扩展评估**:
+   - 新增字段数量（2 个）适度，未引入嵌套分组——当前总字段数 ~13 个，仍在扁平化可接受范围内
+   - `template_dir` 与 `data_dir` 存在路径管理一致性：均为相对路径字符串，均未使用 `Path` 类型。建议后续统一为 `Path` 类型字段
+   - `enable_mandatory_source_labels` 是第二个功能开关（第一个是 `enable_checklist_optimization`），开关命名规范统一（`enable_` 前缀 + 功能描述）
+   - **缺失的时区配置说明**: `timezone` 字段（`"Asia/Shanghai"`）已在 PR #23 的 diff 中出现但非新增——此前分析中未覆盖，应属原有字段
+
+6. **配置与 API 端点的交互**:
+   - `template_dir` 同时被 API 层（`routes.py`）和节点层（`template_loader.py`）消费
+   - API 层通过 FastAPI `Depends(_get_settings)` 注入，节点层需要在 `template_loader_node` 内通过其他途径获取（当前通过 `load_by_name()` 默认参数 `template_dir="templates"`）
+   - 潜在不一致：如果通过环境变量修改了 `TEMPLATE_DIR`，API 层会感知，但节点层若未传入 `settings.template_dir`，将使用硬编码默认值
+   - 建议：将 `settings.template_dir` 在 `build_template_loader_node()` 工厂函数中注入，避免默认值分叉

@@ -38,22 +38,29 @@
 ### §3.2 main_workflow.py
 
 - **职责**: 构建 `StateGraph[GlobalState]` 主图
-- **拓扑**: `input_parser → [project_context_loader] → context_research → case_generation_bridge`
+- **拓扑**: `input_parser → template_loader → [project_context_loader] → context_research → case_generation_bridge`
+- **PR #23 变更**: 桥接节点新增 `mandatory_skeleton` 字段的传入与传出映射
 - **关键机制 — `_build_case_generation_bridge()`**:
   - 功能：将 `GlobalState` 字段映射到 `CaseGenState`，执行子图，回写结果
-  - 映射字段：`research_facts`, `planned_scenarios`, `checkpoints`, `optimized_tree`, `test_cases`, `evidence_map`
+  - 映射字段：`research_facts`, `planned_scenarios`, `checkpoints`, `optimized_tree`, `test_cases`, `evidence_map`, `template_leaf_targets`, `project_template`, **`mandatory_skeleton`** (PR #23)
   - 回写重点：`optimized_tree` 需要从 `CaseGenState` 显式回写到 `GlobalState`
   - 桥接原因：
     1. 两个 TypedDict 类型域不同，LangGraph 不自动映射
     2. `CaseGenState` 是子图的隔离执行空间
     3. `optimized_tree` 在子图内生成，需要回传给主图的 `reflection` 节点
     4. 显式桥接提高了可测试性（可独立测试子图）
+- **PR #23 mandatory_skeleton 桥接**:
+  - 传入逻辑：`"mandatory_skeleton": state.get("mandatory_skeleton")` — 从 `GlobalState` 提取强制骨架树
+  - None 安全：桥接映射后执行 `{k: v for k, v in subgraph_input.items() if v is not None}` 清理，若模版无强制约束则字段自动省略
+  - 传出逻辑：骨架本身在子图内仅为只读输入，不回写（骨架在 template_loader 一次性构建后不变）
+  - 消费方：子图内 `checkpoint_outline_planner` 和 `structure_assembler` 通过 `state.get("mandatory_skeleton")` 各自读取
+  - 维护成本注意：每次 `CaseGenState` 新增字段，需同步更新此处桥接映射（观察 §4.1 仍然成立）
 - **project_context_loader 条件执行**: 通过 `should_load_context()` 条件函数判断，仅当 `project_id` 存在时执行
 - **编译**: 主图编译后通过 `WorkflowService` 的迭代循环执行
 
 ## §4 补充观察
 
-1. **状态桥接的维护成本**: 每次 `CaseGenState` 新增字段都需同步更新桥接映射，遗漏将导致数据丢失。建议考虑自动化映射或类型检查
+1. **状态桥接的维护成本**: 每次 `CaseGenState` 新增字段都需同步更新桥接映射，遗漏将导致数据丢失。PR #23 新增 `mandatory_skeleton` 字段时已同步更新桥接，但手工维护仍有风险。建议考虑自动化映射或类型检查
 2. **线性管道的扩展瓶颈**: 当前无法实现并行节点执行（如同时运行 evidence_mapper 和 outline_planner）。LangGraph 支持 fan-out/fan-in，但需要重构拓扑
 3. **错误恢复缺失**: 子图内任一节点抛出异常将导致整个子图终止，无 fallback 路径。建议为关键节点添加 try-except 降级逻辑
 4. **迭代循环位置**: 迭代评估（evaluate → retry）在主图外部通过 `IterationController` 实现，而非图内条件边。这简化了图结构但增加了编排复杂度
@@ -61,3 +68,8 @@
    - Map-reduce 并行化：按 PlannedScenario 分组，每组独立执行子图，最后合并结果
    - 子图内回环：为 `checkpoint_evaluator` → `checkpoint_generator` 添加条件回边
    - 动态节点跳过：根据配置跳过可选节点（如 `checklist_optimizer`）
+6. **PR #23 影响评估**:
+   - `_build_case_generation_bridge()` 新增 1 个传入字段（`mandatory_skeleton`），无传出字段变更
+   - 骨架为只读数据流：`GlobalState.mandatory_skeleton → 桥接传入 → CaseGenState.mandatory_skeleton → checkpoint_outline_planner / structure_assembler 读取`
+   - 与 template_leaf_targets / project_template 字段的桥接模式一致（单向传入，无回写），降低了桥接维护复杂度
+   - 未来若骨架需要在子图内变异（如动态增删强制节点），需增加传出映射
