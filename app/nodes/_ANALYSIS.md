@@ -31,6 +31,7 @@
 | 11 | evaluation.py | build_evaluation_node | 否 | 主图·反思 | evaluation_report |
 | 12 | reflection.py | build_reflection_node | 否 | 主图·反思 | final response |
 | - | structure_assembler.py | build_structure_assembler_node | 否 | 子图·出口 | optimized_tree (final) |
+| - | template_loader.py | build_template_loader_node | 否 | 主图·模版 | project_template, template_leaf_targets, mandatory_skeleton |
 
 ## §3 逐文件分析
 
@@ -135,11 +136,109 @@
 - **覆盖计算**: `covered_checkpoints / total_checkpoints`
 - **输出**: 构建 `CaseGenerationResponse` 返回给 API 层
 
-### §3.13 structure_assembler.py
-- **类型**: B-流程编排
-- **职责**: 调用 `attach_expected_results_to_outline()` 将 expected_results 挂载到 outline 叶节点
-- **角色**: 被动组装，不做智能整合
+### §3.13 structure_assembler.py ⭐ (PR #23 大幅增强)
+- **类型**: A-核心算法 + B-流程编排
+- **职责**: 组装并标准化测试用例 + **强制约束最终防线** + source 标注
+- **角色**: 从被动组装升级为主动约束执行者
 
+**原有功能**（保留）:
+- 遍历 draft 用例，补全 ID、列表字段、证据引用
+- 从 checkpoint 继承模版绑定字段（兆底补全）
+- 调用 `normalize_test_case()` 文本归一化
+- 调用 `attach_expected_results_to_outline()` 挂载 expected_results
+
+**PR #23 新增功能：**
+
+| 新增函数 | 签名 | 说明 |
+|----------|------|------|
+| `_enforce_mandatory_constraints()` | `(tree, skeleton) → list[ChecklistNode]` | 强制约束最终防线 |
+| `_restore_or_merge()` | `(sk_node, tree_lookup) → ChecklistNode` | 从树中查找或从骨架复原节点 |
+| `_annotate_source()` | `(tree, skeleton) → None` | 为每个节点标注 source 字段 |
+| `_set_source_recursive()` | `(node, skeleton_ids) → None` | 递归设置 source 标记 |
+| `_collect_skeleton_ids()` | `(node) → set[str]` | 收集骨架所有节点 ID |
+| `_index_tree()` | `(tree, lookup) → None` | 递归索引树节点 |
+
+**`_enforce_mandatory_constraints()` — 最终防线策略：**
+
+```
+输入: optimized_tree (已挂载 expected_results) + mandatory_skeleton
+  │
+  ├── 1. 收集骨架所有节点 ID → skeleton_ids
+  ├── 2. 索引树所有节点 → tree_lookup
+  │
+  ├── 3. 遍历骨架顶层子节点:
+  │      └── _restore_or_merge():
+  │          ├── 在 tree_lookup 中查找对应节点
+  │          ├── 递归处理子骨架节点 → merged_children
+  │          ├── 保留已有节点的非骨架子节点
+  │          └── 构建 ChecklistNode:
+  │                node_id = sk_node.id
+  │                title = sk_node.title
+  │                source = "template"
+  │                is_mandatory = sk_node.is_mandatory
+  │                priority = original_metadata["priority"]
+  │
+  ├── 4. 收集非骨架的顶层节点 → overflow_cases
+  │      ├── 计算溢出比例 = overflow / total
+  │      ├── 比例 > 20%? → logger.warning 告警
+  │      └── 包装为 ChecklistNode:
+  │            node_id = "_overflow"
+  │            title = "待分配 (Overflow)"
+  │            source = "overflow"
+  │
+  └── 返回: 合并后的树
+```
+
+**`_annotate_source()` — 来源标注：**
+- 骨架 ID 集合中的节点 → `source = "template"`, `is_mandatory = True`
+- `_overflow` 节点 → `source = "overflow"`
+- 其他节点 → 保留默认 `source = "generated"`
+
+**溢出机制设计分析：**
+- 阈值 20% 是经验值，含义是“如果超过 1/5 的节点无法匹配到模版骨架，说明模版与实际 PRD 的匹配度不足”
+- 溢出节点不丢弃（收集到 `_overflow` 容器），确保信息不丢失
+- `_overflow` 容器在 Markdown 渲染时标记为 `[待分配]`，在 XMind 中标记为红色旗标，引导人工分配
+
+**与 checkpoint_outline_planner._enforce_mandatory_skeleton() 的关系：**
+- `checkpoint_outline_planner` 是第一道防线（在 outline 规划阶段修复）
+- `structure_assembler` 是最终防线（在用例组装阶段再次修复）
+- 两道防线的逻辑相似但独立：即使 planner 的修复遗漏了某些情况，assembler 会兆底
+- 设计意图：关键约束的“防御性深度”——宁可重复检查也不遗漏
+
+### §3.14 template_loader.py（节点）(PR #23 增强)
+- **类型**: B-流程编排
+- **职责**: 从工作流状态中读取模版文件路径或名称，加载模版，构建强制骨架
+- **签名**: `build_template_loader_node() → Callable`
+- **条件执行**: 当 `template_file_path` 和 `template_name` 均为空时跳过
+- **输出**: `{"project_template": ..., "template_leaf_targets": [...], "mandatory_skeleton": ...}`
+
+**PR #23 变更：**
+
+| 变更 | 说明 |
+|------|------|
+| 支持 `template_name` | 除了 `template_file_path`，新增从 `request.template_name` 读取模版名称 |
+| 优先级 | `template_name` 优先于 `template_file_path`（通过 `loader.load_by_name()` 加载） |
+| 骨架构建 | 加载模版后调用 `loader.build_mandatory_skeleton(template)` 构建强制骨架 |
+| 条件输出 | `mandatory_skeleton` 仅在非 None 时写入状态（避免下游错误消费 None 值） |
+
+**模版加载优先级链：**
+```
+1. state["template_name"] 非空? → loader.load_by_name(template_name)
+2. state["template_file_path"] 非空? → loader.load(template_file_path)
+3. 均为空 → 跳过（返回空 dict）
+```
+
+**骨架输出逻辑：**
+```python
+mandatory_skeleton = loader.build_mandatory_skeleton(template)
+result = {"project_template": template, "template_leaf_targets": leaf_targets}
+if mandatory_skeleton is not None:
+    result["mandatory_skeleton"] = mandatory_skeleton
+return result
+```
+
+**设计说明：**
+- `mandatory_skeleton` 的条件写入是刻意的——`None` 值不写入状态，确保下游 `state.get("mandatory_skeleton")` 在无约束时返回 `None` 而非被显式设置为 `None`（两者在 LangGraph 的状态合并语义中可能有差异）
 ## §4 节点流水线
 
 ### 主图流水线
@@ -198,7 +297,7 @@ checkpoint_outline_planner → evidence_mapper → draft_writer → structure_as
    
 2. **缺乏 PRD 结构锚定**
    - 当前仅输入 checkpoint 标题，不包含 PRD 原文章节结构
-   - LLM 需要"凭空"创建层级，缺乏领域锚点
+   - LLM 需要“凭空”创建层级，缺乏领域锚点
    
 3. **结构化输出脆弱性**
    - 依赖 LLM 生成合法 JSON 树结构
@@ -216,23 +315,38 @@ checkpoint_outline_planner → evidence_mapper → draft_writer → structure_as
 - **风险 2**: 固定路径 → 限制 LLM 对边界场景的创造性组织
 - **风险 3**: 路径查找失败时（checkpoint 未匹配到 outline 节点）→ 降级为无上下文生成，质量断崖
 
-### §5.5 structure_assembler 的被动角色
+### §5.5 structure_assembler 的角色升级 (PR #23)
 
+**PR #23 前**:
 - 仅执行 `attach_expected_results_to_outline()` → 字符串匹配挂载
 - 不做任何智能整合（不合并相似 expected_results，不检测遗漏）
-- 是质量损失链中的"透明管道"
+- 是质量损失链中的“透明管道”
+
+**PR #23 后**:
+- 新增 `_enforce_mandatory_constraints()` — 强制约束最终防线
+- 新增 `_annotate_source()` — 来源标注
+- 新增溢出机制 — 未匹配节点收集到 `_overflow` 容器
+- 从“透明管道”升级为“主动约束执行者”，是 Checklist 质量保证链的关键一环
 
 ### §5.6 端到端质量损失链
 
 ```
 checkpoint_outline_planner  →  evidence_mapper  →  draft_writer  →  structure_assembler
-       [高风险]                   [中风险]            [中风险]           [低风险]
+       [中风险 ↓]                [中风险]            [中风险]           [低风险]
   · 层级不合理                · 证据错配           · 路径注入失效        · 挂载遗漏
   · 同义节点重复              · 遗漏映射           · 前置条件不一致      · 顺序混乱
   · 单子链过深                                     · 生成质量波动
+  
+  PR #23 缓解:                                                     PR #23 缓解:
+  · 强制骨架 prompt 注入                                            · 最终防线修复
+  · 后处理修复                                                      · source 标注
+  · ↓ 风险从高降为中                                                · 溢出告警
 ```
 
 ### §5.7 改进建议
+
+> **PR #23 进展**: 短期改进中的“建议 1: PRD 章节锚定”已通过强制模版骨架方式实现（变体）。详见 [services §5.6](../services/_ANALYSIS.md)。
+
 
 #### 短期（1-2 周）
 1. **PRD 章节锚定**: 将 PRD 一级/二级标题作为 outline 顶层骨架，LLM 仅规划叶级分组
