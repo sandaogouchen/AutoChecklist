@@ -1,0 +1,56 @@
+metadata:
+  name: "brand S++ consideration"
+  version: "1.0.0"
+  description: "brand S++ consideration 固定模版"
+  mandatory_levels: [1, 2]
+
+nodes:
+  - id: "doc"
+    title: "文档信息"
+    children:
+      - id: "prd"
+        title: "需求文档"
+        children:
+          - id: "prd-url"
+            title: "需求文档链接"
+      - id: "FE-tech-design"
+        title: "前端技术设计"
+      - id: "BE-tech-design"
+        title: "后端技术设计"
+      - id: "test-plan"
+        title: "测试方案"
+
+  - id: "create"
+    title: "新建"
+    children:
+      - id: "campaign"
+        title: "campaign"
+        children:
+          - id: "campaign-name"
+            title: "Campaign name"
+            priority: "P2"
+            mandatory: true
+          - id: "campaign-objective"
+            title: "Campaign objective"
+            priority: "P0"
+          - id: "campaign-budget"
+            title: "Campaign budget"
+            priority: "P1"
+      - id: "adgroup"
+        title: "adgroup"
+        children:
+          - id: "adgroup-targeting"
+            title: "Adgroup targeting"
+            priority: "P1"
+          - id: "adgroup-bid"
+            title: "Adgroup bid"
+            priority: "P0"
+      - id: "ad"
+        title: "ad"
+        children:
+          - id: "ad-creative"
+            title: "Ad creative"
+            priority: "P1"
+          - id: "ad-landing-page"
+            title: "Ad landing page"
+            priority: "P1"

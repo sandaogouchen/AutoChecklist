@@ -8,6 +8,7 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 这与 LangGraph 的增量更新模式一致——每个节点只需返回自己修改的字段。
 
 新增模版相关状态字段，支持项目级 Checklist 模版的加载与传递。
+新增 mandatory_skeleton 字段，支持强制层级约束在管道中传播。
 新增知识检索相关状态字段，支持 GraphRAG 知识注入。
 """
 
@@ -26,7 +27,11 @@ from app.domain.checklist_models import (
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 from app.domain.run_state import EvaluationReport, RunState
-from app.domain.template_models import ProjectChecklistTemplateFile, TemplateLeafTarget
+from app.domain.template_models import (
+    MandatorySkeletonNode,
+    ProjectChecklistTemplateFile,
+    TemplateLeafTarget,
+)
 
 
 class GlobalState(TypedDict, total=False):
@@ -37,6 +42,7 @@ class GlobalState(TypedDict, total=False):
     - template_file_path: 项目级 Checklist 模版文件路径
     - project_template: 解析后的模版文件对象
     - template_leaf_targets: 拍平后的模版叶子目标列表
+    - mandatory_skeleton: 强制骨架树（从模版中提取的强制节点子树）
     - knowledge_context: GraphRAG 检索到的知识上下文文本
     - knowledge_sources: 知识来源文档标识列表
     - knowledge_retrieval_success: 知识检索是否成功
@@ -76,6 +82,9 @@ class GlobalState(TypedDict, total=False):
     project_template: ProjectChecklistTemplateFile
     template_leaf_targets: list[TemplateLeafTarget]
 
+    # ---- 强制骨架字段 ----
+    mandatory_skeleton: MandatorySkeletonNode
+
     # ---- 知识检索字段 ----
     knowledge_context: str
     knowledge_sources: list[str]
@@ -89,6 +98,7 @@ class CaseGenState(TypedDict, total=False):
     - optimized_tree: 前置条件分组优化后的 ChecklistNode 树
     - template_leaf_targets: 拍平后的模版叶子目标列表
     - project_template: 解析后的模版文件对象
+    - mandatory_skeleton: 强制骨架树
     """
 
     language: str
@@ -108,3 +118,6 @@ class CaseGenState(TypedDict, total=False):
     # ---- 模版相关字段 ----
     template_leaf_targets: list[TemplateLeafTarget]
     project_template: ProjectChecklistTemplateFile
+
+    # ---- 强制骨架字段 ----
+    mandatory_skeleton: MandatorySkeletonNode
