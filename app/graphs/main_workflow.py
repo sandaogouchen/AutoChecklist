@@ -8,6 +8,7 @@
 变更：
 - 新增 template_loader 节点，始终添加（无模版时自动跳过）
 - 桥接节点新增 template_leaf_targets 和 project_template 字段映射
+- 桥接节点新增 mandatory_skeleton 字段映射
 - 边连接链路调整为 input_parser → template_loader → [project_context_loader] → [knowledge_retrieval] → context_research
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
 """
@@ -90,14 +91,8 @@ def build_workflow(
 def _build_case_generation_bridge(case_generation_subgraph):
     """构建主图与用例生成子图之间的桥接节点。
 
-    职责：
-    1. 从 GlobalState 中提取子图所需的字段，构造 CaseGenState
-    2. 调用子图执行
-    3. 将子图输出映射回 GlobalState 的增量更新
-
     变更：
-    - 新增 template_leaf_targets 和 project_template 字段的传入与传出映射
-    - 新增 optimized_tree 字段映射
+    - 新增 mandatory_skeleton 字段的传入与传出映射
     """
 
     def case_generation_node(state: GlobalState) -> GlobalState:
@@ -109,9 +104,11 @@ def _build_case_generation_bridge(case_generation_subgraph):
             # ---- 模版相关字段传入子图 ----
             "template_leaf_targets": state.get("template_leaf_targets", []),
             "project_template": state.get("project_template"),
+            # ---- 强制骨架传入子图 ----
+            "mandatory_skeleton": state.get("mandatory_skeleton"),
         }
 
-        # 清理 None 值，避免子图接收到未初始化的字段
+        # 清理 None 值
         subgraph_input = {k: v for k, v in subgraph_input.items() if v is not None}
 
         subgraph_result = case_generation_subgraph.invoke(subgraph_input)
