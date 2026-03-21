@@ -9,6 +9,7 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 
 新增模版相关状态字段，支持项目级 Checklist 模版的加载与传递。
 新增 mandatory_skeleton 字段，支持强制层级约束在管道中传播。
+新增知识检索相关状态字段，支持 GraphRAG 知识注入。
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ class GlobalState(TypedDict, total=False):
     - project_template: 解析后的模版文件对象
     - template_leaf_targets: 拍平后的模版叶子目标列表
     - mandatory_skeleton: 强制骨架树（从模版中提取的强制节点子树）
+    - knowledge_context: GraphRAG 检索到的知识上下文文本
+    - knowledge_sources: 知识来源文档标识列表
+    - knowledge_retrieval_success: 知识检索是否成功
     """
 
     run_id: str
@@ -80,6 +84,11 @@ class GlobalState(TypedDict, total=False):
 
     # ---- 强制骨架字段 ----
     mandatory_skeleton: MandatorySkeletonNode
+
+    # ---- 知识检索字段 ----
+    knowledge_context: str
+    knowledge_sources: list[str]
+    knowledge_retrieval_success: bool
 
 
 class CaseGenState(TypedDict, total=False):
