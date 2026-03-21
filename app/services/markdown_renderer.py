@@ -1,12 +1,11 @@
 """统一 Markdown 渲染器。
 
-提供 ``render_test_cases_markdown()`` 作为唯一的测试用例 Markdown 渲染入口，
-消除 platform_dispatcher 和 workflow_service 中的重复渲染函数（DRY 修复）。
-
 三种渲染模式（优先级从高到低）：
 - 模版模式（template）：当提供 template 参数时，按模版树骨架渲染
 - 树模式（tree）：当 optimized_tree 非空时，按前置条件分组结构渲染
-- 扁平模式（flat）：当 optimized_tree 为空时，与原 _render_test_cases_markdown 行为一致
+- 扁平模式（flat）：当 optimized_tree 为空时，与原渲染行为一致
+
+新增 source 标签支持：强制模版节点标题后追加 [模版]，overflow 节点追加 [待分配]。
 """
 
 from __future__ import annotations
@@ -23,40 +22,24 @@ def render_test_cases_markdown(
     test_cases: list[TestCase],
     optimized_tree: list[ChecklistNode] | None = None,
     template: ProjectChecklistTemplateFile | None = None,
+    enable_source_labels: bool = True,
 ) -> str:
-    """渲染测试用例为 Markdown 文档。
-
-    渲染优先级：template 模式 > tree 模式 > flat 模式。
-
-    Args:
-        test_cases: 测试用例列表（扁平模式的数据源）。
-        optimized_tree: 前置条件分组优化树（非空时启用树模式）。
-        template: 项目级 Checklist 模版（非 None 时启用模版模式）。
-
-    Returns:
-        Markdown 格式的字符串。
-    """
+    """渲染测试用例为 Markdown 文档。"""
     if template and template.nodes:
         return _render_template_tree(template, test_cases)
     if optimized_tree:
-        return _render_tree(optimized_tree)
+        return _render_tree(optimized_tree, enable_source_labels=enable_source_labels)
     return _flat_render(test_cases)
 
 
 # ---------------------------------------------------------------------------
-# 模版模式：按模版树骨架渲染
+# 模版模式
 # ---------------------------------------------------------------------------
 
 def _render_template_tree(
     template: ProjectChecklistTemplateFile,
     test_cases: list[TestCase],
 ) -> str:
-    """按模版树骨架渲染 Markdown。
-
-    以模版的节点结构为骨架，将用例按 template_leaf_id 分组到对应叶子下。
-    没有匹配到模版叶子的用例归入"未分类"部分。
-    """
-    # 按 template_leaf_id 分组用例
     leaf_cases: dict[str, list[TestCase]] = {}
     unclassified: list[TestCase] = []
 
@@ -76,7 +59,6 @@ def _render_template_tree(
     for node in template.nodes:
         _render_template_node(node, lines, leaf_cases, heading_level=2)
 
-    # 渲染未分类用例
     if unclassified:
         lines.append("## 未分类")
         lines.append("")
@@ -92,24 +74,17 @@ def _render_template_node(
     leaf_cases: dict[str, list[TestCase]],
     heading_level: int,
 ) -> None:
-    """递归渲染模版树节点。
-
-    - 非叶子节点：渲染为标题，递归处理子节点
-    - 叶子节点：渲染为标题，下方列出绑定的用例
-    """
     prefix = "#" * heading_level
     lines.append(f"{prefix} {node.title}")
     lines.append("")
 
     if node.children:
-        # 非叶子节点，递归子节点
         for child in node.children:
             _render_template_node(
                 child, lines, leaf_cases,
                 heading_level=min(heading_level + 1, 6),
             )
     else:
-        # 叶子节点，渲染绑定的用例
         cases = leaf_cases.get(node.id, [])
         if cases:
             for case in cases:
@@ -120,11 +95,6 @@ def _render_template_node(
 
 
 def _render_single_case(case: TestCase, lines: list[str]) -> str:
-    """渲染单个测试用例。
-
-    共享的单个用例渲染逻辑，供模版模式和扁平模式复用。
-    低置信度匹配的用例会添加 :warning: 标记。
-    """
     title_suffix = ""
     if case.template_match_low_confidence:
         title_suffix = " :warning: *低置信度匹配*"
@@ -162,11 +132,10 @@ def _render_single_case(case: TestCase, lines: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 扁平模式：与原 _render_test_cases_markdown 完全一致
+# 扁平模式
 # ---------------------------------------------------------------------------
 
 def _flat_render(test_cases: list[TestCase]) -> str:
-    """扁平渲染，向后兼容原始格式。"""
     if not test_cases:
         return "# 生成的测试用例\n\n暂无测试用例。\n"
 
@@ -200,15 +169,17 @@ def _flat_render(test_cases: list[TestCase]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 树模式：按 optimized_tree 的分组结构渲染
+# 树模式（新增 source 标签支持）
 # ---------------------------------------------------------------------------
 
-def _render_tree(tree: list[ChecklistNode]) -> str:
-    """按优化树结构渲染 Markdown。"""
+def _render_tree(
+    tree: list[ChecklistNode],
+    enable_source_labels: bool = True,
+) -> str:
     lines = ["# 生成的测试用例（优化分组）", ""]
 
     for node in tree:
-        _render_node(node, lines, heading_level=2)
+        _render_node(node, lines, heading_level=2, enable_source_labels=enable_source_labels)
 
     return "\n".join(lines).strip() + "\n"
 
@@ -217,13 +188,13 @@ def _render_node(
     node: ChecklistNode,
     lines: list[str],
     heading_level: int,
+    enable_source_labels: bool = True,
 ) -> None:
-    """递归渲染单个节点。"""
     if node.node_type == "root":
         for child in node.children:
-            _render_node(child, lines, heading_level=heading_level)
+            _render_node(child, lines, heading_level=heading_level, enable_source_labels=enable_source_labels)
     elif node.node_type in {"group", "precondition_group"}:
-        _render_group_node(node, lines, heading_level=heading_level)
+        _render_group_node(node, lines, heading_level=heading_level, enable_source_labels=enable_source_labels)
     elif node.node_type == "expected_result":
         _render_expected_result_node(node, lines)
     elif node.node_type == "case":
@@ -234,8 +205,8 @@ def _render_group_node(
     node: ChecklistNode,
     lines: list[str],
     heading_level: int,
+    enable_source_labels: bool = True,
 ) -> None:
-    """渲染共享逻辑组节点。"""
     if not node.hidden:
         prefix = "#" * heading_level
         title = (
@@ -243,6 +214,14 @@ def _render_group_node(
             if node.node_type == "precondition_group"
             else node.title
         )
+
+        # 新增：source 标签
+        if enable_source_labels:
+            if node.source == "template":
+                title = f"{title} [模版]"
+            elif node.source == "overflow":
+                title = f"{title} [待分配]"
+
         lines.append(f"{prefix} {title}")
         lines.append("")
         next_heading_level = heading_level + 1
@@ -250,16 +229,14 @@ def _render_group_node(
         next_heading_level = heading_level
 
     for child in node.children:
-        _render_node(child, lines, heading_level=next_heading_level)
+        _render_node(child, lines, heading_level=next_heading_level, enable_source_labels=enable_source_labels)
 
 
 def _render_expected_result_node(node: ChecklistNode, lines: list[str]) -> None:
-    """渲染预期结果叶子。"""
     lines.append(f"- {node.title}")
 
 
 def _render_case_node(node: ChecklistNode, lines: list[str], heading_level: int = 3) -> None:
-    """渲染 case 叶子节点。"""
     prefix = "#" * heading_level
     ref_label = node.test_case_ref or node.node_id
     lines.append(f"{prefix} {ref_label} {node.title}")
@@ -269,7 +246,6 @@ def _render_case_node(node: ChecklistNode, lines: list[str], heading_level: int 
         lines.append(f"**Checkpoint:** {node.checkpoint_id}")
         lines.append("")
 
-    # 树模式下保留用例完整前置条件
     if node.preconditions:
         lines.append(f"{prefix}# 前置条件")
         lines.extend(f"- {item}" for item in node.preconditions)
@@ -283,6 +259,6 @@ def _render_case_node(node: ChecklistNode, lines: list[str], heading_level: int 
         lines.append("")
 
     if node.expected_results:
-        lines.append(f"{prefix}# 预期结果")
+        lines.append(f"{prefix}#预期结果")
         lines.extend(f"- {item}" for item in node.expected_results)
         lines.append("")

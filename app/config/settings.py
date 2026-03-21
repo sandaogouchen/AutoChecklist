@@ -2,6 +2,7 @@
 
 通过 pydantic-settings 从 .env 文件和环境变量中加载配置。
 新增 enable_checklist_optimization 配置项。
+新增模版相关配置项。
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ class Settings(BaseSettings):
 
     # ---- Checklist 优化配置 ----
     enable_checklist_optimization: bool = True
+
+    # ---- 模版配置 ----
+    template_dir: str = "templates"
+    enable_mandatory_source_labels: bool = True
 
     # ---- 时区配置 ----
     timezone: str = "Asia/Shanghai"

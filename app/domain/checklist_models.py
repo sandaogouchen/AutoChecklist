@@ -41,6 +41,10 @@ class ChecklistNode(BaseModel):
     children: list[ChecklistNode] = Field(default_factory=list)
     hidden: bool = False
 
+    # ---- 来源与强制性标记 ----
+    source: Literal["template", "generated", "overflow"] = "generated"
+    is_mandatory: bool = False
+
     # ---- case 节点专属字段 ----
     test_case_ref: str = ""
     source_test_case_refs: list[str] = Field(default_factory=list)
