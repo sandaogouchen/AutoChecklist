@@ -58,3 +58,69 @@
 3. **Fixture 粒度合理**: 从 `parsed_document` → `research_output` → `checkpoints` 逐层构建，每层可独立使用
 4. **Fixture 集中管理**: 所有共享 fixture 放在根 `conftest.py`，子目录的 `conftest.py` 仅添加局部 fixture，层次清晰
 5. **缺少 Checklist 专用 Fixture**: 缺少 `sample_optimized_tree` 或 `sample_outline_nodes` fixture，checklist 相关测试需各自构建测试数据
+
+## §5 PR #24 变更 — 知识检索测试
+
+> 同步自 PR #24 `feat/graphrag-knowledge-retrieval`
+
+PR #24 新增 4 个测试文件，共计 31 个测试用例，覆盖知识检索子系统的各层逻辑。
+
+### 新增测试文件
+
+| # | 文件 | 测试数 | 覆盖范围 |
+|---|------|--------|--------|
+| 1 | `tests/unit/test_knowledge_ingestion.py` | 12 | 文档扫描与校验 |
+| 2 | `tests/unit/test_knowledge_retrieval.py` | 8 | 检索节点行为 |
+| 3 | `tests/unit/test_graphrag_engine.py` | 6 | 引擎生命周期 |
+| 4 | `tests/integration/test_knowledge_workflow.py` | 5 | 端到端工作流 |
+
+### §5.1 test_knowledge_ingestion.py（12 个用例）
+
+覆盖 `ingestion.py` 的两个公开函数：
+
+| 测试分组 | 用例数 | 关键场景 |
+|---------|--------|--------|
+| `scan_knowledge_directory` | 7 | 正常扫描、空目录、目录不存在、超大文件过滤、非 UTF-8 过滤、空文件跳过、递归子目录 |
+| `validate_document_path` | 5 | 正常校验、文件不存在、非 .md 格式、空文件、超大文件 |
+
+### §5.2 test_knowledge_retrieval.py（8 个用例）
+
+覆盖 `retriever.py` 和 `knowledge_retrieval.py` 节点：
+
+| 测试分组 | 用例数 | 关键场景 |
+|---------|--------|--------|
+| `build_retrieval_query` | 2 | 正常查询构造、空文档处理 |
+| `format_retrieval_result` | 2 | 正常格式化、超长截断 |
+| `knowledge_retrieval_node` | 4 | 正常检索、引擎未就绪降级、异常降级、空查询 |
+
+### §5.3 test_graphrag_engine.py（6 个用例）
+
+覆盖 `GraphRAGEngine` 类的生命周期与索引：
+
+| 用例 | 关键场景 |
+|------|--------|
+| 初始化 + 就绪检查 | mock LightRAG 初始化流程 |
+| 插入文档 | 正常索引 + 幂等重复跳过 |
+| 批量索引 | 多文档批量处理 |
+| 查询 | 正常检索 + 失败降级 |
+| 删除文档 | 正常删除 + 不存在文档 |
+| 终结 | 资源释放 |
+
+### §5.4 test_knowledge_workflow.py（5 个集成用例）
+
+覆盖知识检索与主工作流的端到端集成：
+
+| 用例 | 关键场景 |
+|------|--------|
+| 知识检索节点在工作流中正常执行 | 含 knowledge_retrieval 的完整工作流 |
+| 知识上下文注入 context_research | 验证 prompt 中包含 [Domain Knowledge Reference] |
+| 引擎未就绪时工作流正常降级 | 跳过知识检索，主流程不受影响 |
+| 无知识文档时的空结果处理 | knowledge_context 为空 |
+| 配置关闭时的完全跳过 | enable_knowledge_retrieval=False |
+
+### 测试策略评价
+
+1. **覆盖层次完整**: 单元测试覆盖模块内部逻辑，集成测试覆盖跨模块交互
+2. **Mock 策略合理**: GraphRAG 引擎通过 mock 避免真实 LLM 调用
+3. **降级场景充分**: 引擎未就绪、异常、空查询等降级路径均有测试覆盖
+4. **与现有测试风格一致**: 使用 pytest-asyncio + conftest fixtures，融入现有测试体系

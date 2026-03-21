@@ -72,3 +72,35 @@
 2. **PRD 驱动设计**: prd.md 详细定义了四层架构，与实际代码结构高度一致，说明开发遵循了良好的 design-first 实践
 3. **测试数据真实**: testprd.md 使用真实业务 PRD，有利于发现边界问题
 4. **依赖精简**: 运行时仅 8 个直接依赖，无冗余引入
+
+## §5 PR #24 变更 — 根目录文件更新
+
+> 同步自 PR #24 `feat/graphrag-knowledge-retrieval`
+
+PR #24 修改了根目录的两个配置文件，新增知识检索相关的环境变量和依赖。
+
+### .env.example 变更
+
+新增 11 个知识检索相关的环境变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ENABLE_KNOWLEDGE_RETRIEVAL` | `false` | 知识检索总开关 |
+| `KNOWLEDGE_WORKING_DIR` | `./knowledge_db` | LightRAG 工作目录 |
+| `KNOWLEDGE_DOCS_DIR` | `./knowledge_docs` | 知识文档源目录 |
+| `KNOWLEDGE_RETRIEVAL_MODE` | `hybrid` | 检索模式 |
+| `KNOWLEDGE_TOP_K` | `10` | 检索结果数量上限 |
+| `KNOWLEDGE_EMBEDDING_MODEL` | _(空)_ | Embedding 模型，空则复用 LLM_MODEL |
+| `KNOWLEDGE_MAX_DOC_SIZE_KB` | `1024` | 单文档最大 KB 数 |
+
+以及对应的注释说明行。
+
+### pyproject.toml 变更
+
+新增运行时依赖：
+
+| 依赖 | 版本约束 | 说明 |
+|------|---------|------|
+| `lightrag-hku` | `>=1.1.0` | LightRAG GraphRAG 框架（HKU 发布版） |
+
+此依赖会间接引入 `numpy` 等科学计算包。
