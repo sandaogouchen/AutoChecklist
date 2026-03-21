@@ -4,6 +4,7 @@
 支持通过参数覆盖 settings / workflow_service，方便测试时注入 mock 对象。
 
 新增：GraphRAG 知识检索引擎的生命周期管理和知识库 API 路由注册。
+变更：WorkflowService 创建时注入 graphrag_engine，使知识检索节点在运行时自动接入工作流。
 """
 
 from __future__ import annotations
@@ -56,6 +57,15 @@ async def _lifespan(app: FastAPI):
 
             app.state.graphrag_engine = engine
             logger.info("GraphRAG 引擎已启动")
+
+            # 将引擎注入到 WorkflowService，使知识检索节点可用
+            workflow_service = getattr(app.state, "workflow_service", None)
+            if workflow_service is not None:
+                workflow_service._graphrag_engine = engine
+                # 清除缓存的工作流，以便下次调用时带上知识检索节点
+                workflow_service._workflow = None
+                logger.info("GraphRAG 引擎已注入 WorkflowService")
+
         except Exception:
             logger.exception("GraphRAG 引擎启动失败，知识检索功能不可用")
             app.state.graphrag_engine = None
