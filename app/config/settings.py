@@ -2,6 +2,7 @@
 
 通过 pydantic-settings 从 .env 文件和环境变量中加载配置。
 新增 enable_checklist_optimization 配置项。
+新增 knowledge_* 系列配置项，支持 GraphRAG 知识检索功能。
 """
 
 from __future__ import annotations
@@ -33,6 +34,15 @@ class Settings(BaseSettings):
 
     # ---- 时区配置 ----
     timezone: str = "Asia/Shanghai"
+
+    # ---- 知识检索配置（GraphRAG / LightRAG） ----
+    enable_knowledge_retrieval: bool = False
+    knowledge_working_dir: str = "./knowledge_db"
+    knowledge_docs_dir: str = "./knowledge_docs"
+    knowledge_retrieval_mode: str = "hybrid"
+    knowledge_top_k: int = 10
+    knowledge_embedding_model: str = ""
+    knowledge_max_doc_size_kb: int = 1024
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -2,10 +2,15 @@
 
 职责：创建 FastAPI 实例、注入配置与服务依赖、注册路由。
 支持通过参数覆盖 settings / workflow_service，方便测试时注入 mock 对象。
+
+新增：GraphRAG 知识检索引擎的生命周期管理和知识库 API 路由注册。
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,6 +22,56 @@ from app.services.workflow_service import WorkflowService
 from app.api.project_routes import router as project_router
 from app.repositories.project_repository import ProjectRepository
 from app.services.project_context_service import ProjectContextService
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """FastAPI 应用生命周期管理。
+
+    启动时：初始化 GraphRAG 引擎（如果启用）。
+    关闭时：释放 GraphRAG 引擎资源。
+    """
+    settings: Settings = app.state.settings
+
+    # ---- 启动：初始化 GraphRAG 引擎 ----
+    if settings.enable_knowledge_retrieval:
+        try:
+            from app.knowledge.graphrag_engine import GraphRAGEngine
+            from app.knowledge.ingestion import scan_knowledge_directory
+
+            engine = GraphRAGEngine(settings)
+            await engine.initialize()
+
+            if engine.is_ready():
+                # 扫描并增量索引新文档
+                scanned = scan_knowledge_directory(
+                    settings.knowledge_docs_dir,
+                    max_doc_size_kb=settings.knowledge_max_doc_size_kb,
+                )
+                if scanned:
+                    await engine.insert_batch(scanned)
+                    logger.info("知识文档启动索引完成: %d 文档", len(scanned))
+
+            app.state.graphrag_engine = engine
+            logger.info("GraphRAG 引擎已启动")
+        except Exception:
+            logger.exception("GraphRAG 引擎启动失败，知识检索功能不可用")
+            app.state.graphrag_engine = None
+    else:
+        app.state.graphrag_engine = None
+
+    yield
+
+    # ---- 关闭：释放 GraphRAG 引擎资源 ----
+    engine = getattr(app.state, "graphrag_engine", None)
+    if engine is not None:
+        try:
+            await engine.finalize()
+            logger.info("GraphRAG 引擎已关闭")
+        except Exception:
+            logger.exception("GraphRAG 引擎关闭失败")
 
 
 def create_app(
@@ -34,7 +89,11 @@ def create_app(
     """
     app_settings = settings or get_settings()
     configure_app_logging(level="INFO")
-    app = FastAPI(title=app_settings.app_name, version=app_settings.app_version)
+    app = FastAPI(
+        title=app_settings.app_name,
+        version=app_settings.app_version,
+        lifespan=_lifespan,
+    )
 
     # 将配置和服务绑定到 app.state，供路由通过 Depends 获取
     app.state.settings = app_settings
@@ -62,6 +121,11 @@ def create_app(
 
     app.include_router(router)
     app.include_router(project_router)
+
+    # ---- 注册知识库管理 API ----
+    from app.api.knowledge_routes import router as knowledge_router
+    app.include_router(knowledge_router)
+
     return app
 
 
