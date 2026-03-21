@@ -11,12 +11,15 @@
 - 移除模块级 _render_test_cases_markdown 函数（DRY 修复，使用 markdown_renderer）
 - 移除 TestCase 导入（不再直接使用）
 - 新增 template_file_path 传递到工作流输入
+- 新增 knowledge_retrieval_node 集成：当启用知识检索且 GraphRAG 引擎就绪时，
+  构建知识检索节点并传入 build_workflow()
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
 from app.config.settings import Settings
@@ -65,6 +68,7 @@ class WorkflowService:
         platform_dispatcher: PlatformDispatcher | None = None,
         enable_xmind: bool = True,
         project_context_service: ProjectContextService | None = None,
+        graphrag_engine=None,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
@@ -76,6 +80,7 @@ class WorkflowService:
         self._llm_client = llm_client
         self._workflow = None
         self._run_registry: dict[str, CaseGenerationRun] = {}
+        self._graphrag_engine = graphrag_engine
 
         if platform_dispatcher is not None:
             self.platform_dispatcher = platform_dispatcher
@@ -278,16 +283,47 @@ class WorkflowService:
         )
 
     def _get_workflow(self):
-        """构建并缓存 LangGraph 工作流实例。"""
+        """构建并缓存 LangGraph 工作流实例。
+
+        变更：新增 knowledge_retrieval_node 集成。
+        当启用知识检索且 GraphRAG 引擎就绪时，构建知识检索节点
+        并传入 build_workflow()，使其在 context_research 之前执行。
+        """
         if self._workflow is None:
             project_loader = None
             if self.project_context_service is not None:
                 project_loader = build_project_context_loader(
                     self.project_context_service
                 )
+
+            # ---- 构建知识检索节点（如果可用）----
+            knowledge_node = None
+            if (
+                self.settings.enable_knowledge_retrieval
+                and self._graphrag_engine is not None
+            ):
+                try:
+                    from app.nodes.knowledge_retrieval import (
+                        build_knowledge_retrieval_node,
+                    )
+
+                    if self._graphrag_engine.is_ready():
+                        knowledge_node = build_knowledge_retrieval_node(
+                            self._graphrag_engine,
+                            self.settings,
+                        )
+                        logger.info("知识检索节点已构建并注入工作流")
+                    else:
+                        logger.warning(
+                            "GraphRAG 引擎未就绪，知识检索节点未注入"
+                        )
+                except Exception:
+                    logger.exception("构建知识检索节点失败，工作流将不包含知识检索")
+
             self._workflow = build_workflow(
                 self._get_llm_client(),
                 project_context_loader=project_loader,
+                knowledge_retrieval_node=knowledge_node,
             )
         return self._workflow
 
