@@ -34,6 +34,8 @@ from app.domain.run_state import RunStage, RunStatus
 from app.graphs.main_workflow import build_workflow
 from app.nodes.evaluation import evaluate
 from app.nodes.project_context_loader import build_project_context_loader
+from app.nodes.xmind_reference_loader import build_xmind_reference_loader_node
+from app.parsers.xmind_parser import XMindParser
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
@@ -42,6 +44,7 @@ from app.services.project_context_service import ProjectContextService
 from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
+from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
 from app.utils.run_id import generate_run_id
 
 logger = logging.getLogger(__name__)
@@ -192,6 +195,7 @@ class WorkflowService:
                 "model_config": request.llm_config,
                 "iteration_index": run_state.iteration_index,
                 "project_id": getattr(request, 'project_id', None) or "",
+                "reference_xmind_path": request.reference_xmind_path,
             }
 
             # ---- 传递模版文件路径 ----
@@ -320,10 +324,16 @@ class WorkflowService:
                 except Exception:
                     logger.exception("构建知识检索节点失败，工作流将不包含知识检索")
 
+            # Build XMind reference loader node
+            xmind_parser = XMindParser()
+            xmind_analyzer = XMindReferenceAnalyzer()
+            xmind_reference_loader_node = build_xmind_reference_loader_node(xmind_parser, xmind_analyzer)
+
             self._workflow = build_workflow(
                 self._get_llm_client(),
                 project_context_loader=project_loader,
                 knowledge_retrieval_node=knowledge_node,
+                xmind_reference_loader_node=xmind_reference_loader_node,
             )
         return self._workflow
 
