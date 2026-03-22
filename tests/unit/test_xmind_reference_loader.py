@@ -4,10 +4,13 @@ Covers:
 - Normal load: parser + analyzer produce summary
 - Skip when no reference_xmind_path in state
 - Graceful degradation on parse error
+- Integration with tree_converter
 """
 
 from __future__ import annotations
 
+import json
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,6 +43,42 @@ def _make_mock_summary() -> XMindReferenceSummary:
         top_prefixes=["Root > A"],
         formatted_summary="[参考 Checklist 结构]\n...",
     )
+
+
+def _create_test_xmind(tmp_path):
+    """Create a minimal .xmind file for testing."""
+    content = [
+        {
+            "rootTopic": {
+                "title": "测试 Checklist",
+                "children": {
+                    "attached": [
+                        {
+                            "title": "功能模块A",
+                            "children": {
+                                "attached": [
+                                    {"title": "测试项1"},
+                                    {"title": "测试项2"},
+                                ]
+                            },
+                        },
+                        {
+                            "title": "功能模块B",
+                            "children": {
+                                "attached": [
+                                    {"title": "测试项3"},
+                                ]
+                            },
+                        },
+                    ]
+                },
+            }
+        }
+    ]
+    xmind_file = tmp_path / "test.xmind"
+    with zipfile.ZipFile(str(xmind_file), "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("content.json", json.dumps(content, ensure_ascii=False))
+    return xmind_file
 
 
 class TestNormalLoad:
@@ -114,3 +153,50 @@ class TestGracefulDegradation:
         result = node({"reference_xmind_path": "/some/file.xmind"})
 
         assert result == {}
+
+
+class TestWithTreeConverter:
+    """验证 loader 集成 tree_converter 后的行为。"""
+
+    def test_load_produces_reference_tree(self, tmp_path) -> None:
+        from app.services.xmind_reference_tree_converter import XMindReferenceTreeConverter
+
+        xmind_file = _create_test_xmind(tmp_path)
+        parser = XMindParser()
+        analyzer = XMindReferenceAnalyzer()
+        converter = XMindReferenceTreeConverter()
+
+        node = build_xmind_reference_loader_node(parser, analyzer, converter)
+        result = node({"reference_xmind_path": str(xmind_file)})
+
+        summary = result["xmind_reference_summary"]
+        assert hasattr(summary, "reference_tree")
+        assert len(summary.reference_tree) > 0
+        assert all(n.source == "reference" for n in summary.reference_tree)
+
+    def test_load_produces_leaf_titles(self, tmp_path) -> None:
+        from app.services.xmind_reference_tree_converter import XMindReferenceTreeConverter
+
+        xmind_file = _create_test_xmind(tmp_path)
+        parser = XMindParser()
+        analyzer = XMindReferenceAnalyzer()
+        converter = XMindReferenceTreeConverter()
+
+        node = build_xmind_reference_loader_node(parser, analyzer, converter)
+        result = node({"reference_xmind_path": str(xmind_file)})
+
+        summary = result["xmind_reference_summary"]
+        assert hasattr(summary, "all_leaf_titles")
+        assert len(summary.all_leaf_titles) > 0
+
+    def test_backward_compatible_without_converter(self, tmp_path) -> None:
+        xmind_file = _create_test_xmind(tmp_path)
+        parser = XMindParser()
+        analyzer = XMindReferenceAnalyzer()
+
+        # No converter passed - should still work
+        node = build_xmind_reference_loader_node(parser, analyzer)
+        result = node({"reference_xmind_path": str(xmind_file)})
+
+        summary = result["xmind_reference_summary"]
+        assert summary.formatted_summary  # Original behavior preserved
