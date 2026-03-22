@@ -6,10 +6,12 @@
 - 空叶子列表快速返回
 - batch_size 边界（恰好一批）
 - 耗时元数据结构正确性
+- LLM 返回数量与叶子数不一致时的安全处理
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -120,6 +122,40 @@ class TestProcessSingleBatch:
         assert timing["batch_index"] == 2
         assert timing["case_count"] == 0
 
+    def test_llm_returns_fewer_cases(self):
+        """LLM 返回的用例数少于叶子数——只覆写前 N 条标题。"""
+        leaves = [_make_leaf(f"n{i}", f"叶子{i}") for i in range(3)]
+        # LLM 只返回 2 条
+        returned = [_make_test_case("TC-1", "LLM-1"), _make_test_case("TC-2", "LLM-2")]
+        collection = DraftCaseCollection(test_cases=returned)
+        client = _make_llm_client(return_value=collection)
+
+        cases, timing = _process_single_batch(client, leaves, 0, 1)
+
+        assert len(cases) == 2
+        assert cases[0].title == "叶子0"  # 覆写
+        assert cases[1].title == "叶子1"  # 覆写
+        assert timing["case_count"] == 2
+
+    def test_llm_returns_more_cases(self):
+        """LLM 返回的用例数多于叶子数——多余的保留 LLM 原标题。"""
+        leaves = [_make_leaf("n0", "叶子0")]
+        # LLM 返回 3 条
+        returned = [
+            _make_test_case("TC-1", "LLM-1"),
+            _make_test_case("TC-2", "LLM-2"),
+            _make_test_case("TC-3", "LLM-3"),
+        ]
+        collection = DraftCaseCollection(test_cases=returned)
+        client = _make_llm_client(return_value=collection)
+
+        cases, timing = _process_single_batch(client, leaves, 0, 1)
+
+        assert len(cases) == 3
+        assert cases[0].title == "叶子0"  # 覆写
+        assert cases[1].title == "LLM-2"  # 保留 LLM 原标题
+        assert cases[2].title == "LLM-3"  # 保留 LLM 原标题
+
 
 # ---------------------------------------------------------------------------
 # Tests: _generate_reference_leaf_details (并发核心)
@@ -137,6 +173,7 @@ class TestGenerateReferenceLeafDetails:
         assert timing["total_leaves"] == 0
         assert timing["total_batches"] == 0
         assert timing["batches"] == []
+        assert isinstance(timing["total_elapsed_seconds"], float)
         client.generate_structured.assert_not_called()
 
     def test_concurrent_batches_basic(self):
@@ -176,12 +213,14 @@ class TestGenerateReferenceLeafDetails:
         leaves = [_make_leaf(f"n{i}", f"标题{i}") for i in range(80)]
         # 80 叶子 → 2 批
 
-        call_count = 0
+        lock = threading.Lock()
+        call_count_holder = [0]  # 用 list 包装避免 nonlocal 竞态
 
         def _mock_generate(**kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
+            with lock:
+                call_count_holder[0] += 1
+                current = call_count_holder[0]
+            if current == 1:
                 raise RuntimeError("模拟 LLM 失败")
             cases = [_make_test_case(f"TC-{i}", f"case-{i}") for i in range(40)]
             return DraftCaseCollection(test_cases=cases)

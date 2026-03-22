@@ -134,12 +134,22 @@ def _process_single_batch(
             response_model=DraftCaseCollection,
         )
         if response and hasattr(response, "test_cases"):
-            for case, leaf in zip(response.test_cases, batch):
-                if hasattr(case, "title"):
-                    case.title = leaf.title
-                if hasattr(case, "source"):
-                    case.source = "reference"
-            cases = list(response.test_cases)
+            returned_cases = list(response.test_cases)
+            # 按位置覆写标题为叶子原始标题——仅处理 min(返回数, 叶子数) 对
+            paired = min(len(returned_cases), len(batch))
+            if len(returned_cases) != len(batch):
+                logger.warning(
+                    "[DRAFT-PARALLEL] batch %d/%d: LLM 返回 %d 条用例，"
+                    "期望 %d 条（叶子数），仅前 %d 条标题被覆写",
+                    batch_index + 1,
+                    total_batches,
+                    len(returned_cases),
+                    len(batch),
+                    paired,
+                )
+            for i in range(paired):
+                returned_cases[i].title = batch[i].title
+            cases = returned_cases
     except Exception:
         had_error = True
         logger.warning(
@@ -188,7 +198,7 @@ def _generate_reference_leaf_details(
             "max_workers": _MAX_WORKERS,
             "total_leaves": 0,
             "total_batches": 0,
-            "total_elapsed_seconds": 0,
+            "total_elapsed_seconds": 0.0,
             "batches": [],
         }
 
@@ -241,7 +251,7 @@ def _generate_reference_leaf_details(
                         "batch_index": idx,
                         "leaf_count": len(batches[idx]),
                         "case_count": 0,
-                        "elapsed_seconds": 0,
+                        "elapsed_seconds": 0.0,
                         "had_error": True,
                     },
                 )
