@@ -1,5 +1,4 @@
 """结构组装节点。
-
 对 LLM 生成的草稿用例进行标准化处理：
 - 补全缺失的 ID（自动编号 TC-001, TC-002, ...）
 - 为空字段填充默认值
@@ -9,7 +8,6 @@
 - 从 checkpoint 继承模版绑定字段（兜底补全）
 - 执行强制约束后置校验和 source 标注
 """
-
 from __future__ import annotations
 
 import logging
@@ -29,7 +27,6 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
     """组装并标准化测试用例。"""
     assembled_cases: list[TestCase] = []
     evidence_lookup = state.get("mapped_evidence", {})
-
     checkpoints: list[Checkpoint] = state.get("checkpoints", [])
     cp_lookup: dict[str, Checkpoint] = {
         cp.checkpoint_id: cp for cp in checkpoints if cp.checkpoint_id
@@ -138,7 +135,10 @@ def _enforce_mandatory_constraints(
     overflow_cases: list[ChecklistNode] = []
     for node in tree:
         if node.node_id not in skeleton_ids and node.node_id not in result_ids:
-            if node.children or node.node_type in ("expected_result", "case"):
+            # 保护 template 和 reference 来源的节点不进入溢出区
+            if node.source in ("template", "reference"):
+                result.append(node)
+            elif node.children or node.node_type in ("expected_result", "case"):
                 overflow_cases.append(node)
 
     if overflow_cases:
@@ -150,6 +150,7 @@ def _enforce_mandatory_constraints(
                 len(tree),
                 overflow_ratio * 100,
             )
+
         result.append(
             ChecklistNode(
                 node_id="_overflow",
@@ -169,7 +170,6 @@ def _restore_or_merge(
 ) -> ChecklistNode:
     """从树中查找对应节点或从骨架复原。"""
     existing = tree_lookup.get(sk_node.id)
-
     merged_children: list[ChecklistNode] = []
     sk_child_ids = {c.id for c in sk_node.children}
 
@@ -183,7 +183,6 @@ def _restore_or_merge(
                 merged_children.append(child)
 
     priority = sk_node.original_metadata.get("priority", "P2")
-
     return ChecklistNode(
         node_id=sk_node.id,
         title=sk_node.title,
@@ -211,6 +210,9 @@ def _set_source_recursive(node: ChecklistNode, skeleton_ids: set[str]) -> None:
     if node.node_id in skeleton_ids:
         node.source = "template"
         node.is_mandatory = True
+    elif node.source == "reference":
+        # 保留 reference 来源标记，不覆盖
+        pass
     elif node.node_id == "_overflow":
         node.source = "overflow"
     # children 中的 source 不需要覆盖（保留 generated 默认值或已设置的值）
