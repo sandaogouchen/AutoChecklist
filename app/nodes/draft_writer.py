@@ -19,6 +19,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pydantic import BaseModel, Field
 
 from app.clients.llm import LLMClient
+from app.config.settings import get_settings
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import (
     CanonicalOutlineNode,
@@ -132,6 +133,7 @@ def _process_single_batch(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=prompt,
             response_model=DraftCaseCollection,
+            max_tokens=get_settings().llm_max_tokens,  # 显式透传 max_tokens
         )
         if response and hasattr(response, "test_cases"):
             returned_cases = list(response.test_cases)
