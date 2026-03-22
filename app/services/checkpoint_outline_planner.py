@@ -9,15 +9,17 @@
 - 当存在 mandatory_skeleton 时，将强制骨架注入 LLM prompt
 - LLM 输出后执行确定性后处理修复，确保强制层级 100% 合规
 
-新增 XMind 参考结构支持：
-- 双模式 prompt 策略：仅参考模式（主结构锚点）与模版+参考模式（路由辅助）
-- 参考结构可影响大纲维度覆盖、命名风格和 checkpoint 归属路由
+改造后的 2 阶段规划流程（维度引导式全量规划）：
+- Stage 1（维度引导大纲）: 若有 abstracted_reference_schema，构建维度引导
+  prompt，告知 LLM 需要覆盖的验证维度方向（不含具体用例文本）
+- Stage 2（全量 LLM 生成）: 对**所有** checkpoint 调用 LLM 生成完整大纲树，
+  不再区分增量/已覆盖，不再用参考树做种子或合并
 
-新增 4 阶段规划流程：
-- Stage 0: 准备参考树种子
-- Stage 1: 覆盖度过滤，确定增量 checkpoint
-- Stage 2: LLM 只对增量 checkpoint 做 Stage A/B
-- Stage 3: 合并 reference_tree + llm_tree
+废弃的旧 4 阶段流程：
+- Stage 0: 准备参考树种子 → 已废弃
+- Stage 1: 覆盖度过滤 → 已改造为维度引导
+- Stage 2: LLM 只对增量做 Stage A/B → 已改造为全量生成
+- Stage 3: 合并 reference_tree + llm_tree → 已废弃
 """
 
 from __future__ import annotations
@@ -26,10 +28,16 @@ import hashlib
 import json
 import logging
 import re
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 from app.clients.llm import LLMClient
+from app.domain.abstracted_reference_models import (
+    AbstractedModule,
+    AbstractedReferenceSchema,
+    AbstractedSubmodule,
+)
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import (
     CanonicalOutlineNode,
@@ -104,6 +112,16 @@ _MANDATORY_CONSTRAINT_TEMPLATE = """
 4. 输出的 JSON 中，强制节点必须保留原始 id 和 title，不可更改
 """.strip()
 
+_DIMENSION_GUIDANCE_TEMPLATE = """
+## 参考模板维度指引（仅作为覆盖方向参考，禁止照搬）
+
+以下验证维度清单来自同类项目的历史测试模板。
+规划大纲时，确保覆盖与当前 PRD 相关的维度，忽略不相关的维度。
+不要照搬维度的文字描述作为节点名称，而是基于当前 PRD 的具体内容生成节点。
+
+{dimensions_text}
+""".strip()
+
 
 def _normalize_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip().casefold()
@@ -115,7 +133,52 @@ def _stable_id(prefix: str, value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# XMind 参考结构辅助函数
+# 维度引导构建辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _build_dimension_guidance_text(
+    schema: AbstractedReferenceSchema,
+) -> str:
+    """将 AbstractedReferenceSchema 转为维度引导 prompt 文本。
+
+    输出格式：
+    ### 模块: FE（模版广告创编）[category: frontend_e2e]
+    #### 子模块: 草稿创建
+    - [positive] 草稿CRUD全生命周期: 验证草稿从创建到删除的完整操作流程
+    - [negative] 异常输入容错: 验证非法或边界输入下系统的容错处理
+    ...
+    """
+    if not schema or not schema.modules:
+        return ""
+
+    lines: list[str] = []
+    for module in schema.modules:
+        lines.append(
+            f"### 模块: {module.title} [category: {module.category}]"
+        )
+        if module.boundary_hints:
+            hints_str = ", ".join(module.boundary_hints[:10])
+            lines.append(f"  边界提示: {hints_str}")
+
+        for submodule in module.submodules:
+            density_tag = ""
+            if submodule.density and submodule.density != "normal":
+                density_tag = f" (density: {submodule.density})"
+            lines.append(f"#### 子模块: {submodule.title}{density_tag}")
+
+            for dim in submodule.dimensions:
+                lines.append(
+                    f"- [{dim.mode}] {dim.name}: {dim.description}"
+                )
+
+        lines.append("")  # blank line between modules
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# XMind 参考结构辅助函数（向后兼容，降级使用）
 # ---------------------------------------------------------------------------
 
 
@@ -130,63 +193,26 @@ def _get_formatted_summary(xmind_reference_summary) -> str:
     return ""
 
 
-def _build_xmind_reference_prompt_section(
+def _build_xmind_fallback_prompt_section(
     xmind_reference_summary,
     has_mandatory_skeleton: bool,
-    routing_hints: str = "",
-    coverage_result: CoverageResult | None = None,
 ) -> str:
-    """构建 XMind 参考的 prompt 注入段落。
+    """构建 XMind 参考摘要的降级 prompt 段落。
 
-    双模式 prompt 策略：
-    - 模式1（仅参考无模版）: XMind 骨架为主结构锚点
-    - 模式2（模版+参考）: 强制骨架为硬约束 + 参考辅助 checkpoint 路由
+    仅在没有 abstracted_reference_schema 时使用，作为向后兼容的降级路径。
+    与旧版不同的是：不再引导 LLM 照搬参考结构，而是仅提供结构概览作为参考。
     """
     formatted = _get_formatted_summary(xmind_reference_summary)
     if not formatted:
         return ""
 
-    coverage_note = ""
-    if coverage_result and hasattr(coverage_result, "covered_checkpoint_ids"):
-        covered = coverage_result.covered_checkpoint_ids
-        if covered:
-            coverage_note = (
-                "\n\n## 已覆盖说明\n"
-                f"以下 {len(covered)} 个检查点已被参考 Checklist 覆盖，"
-                "无需为它们生成 outline 节点：\n"
-                + "\n".join(f"- {cid}" for cid in covered[:20])
-                + "\n\n请只为未覆盖的检查点生成分类路径。\n"
-            )
-
-    if not has_mandatory_skeleton:
-        return (
-            "\n\n## 参考 Checklist 结构（主结构锚点）\n"
-            f"{formatted}\n"
-            "【重要指令】你生成的 outline 必须尽量遵循此参考结构的覆盖维度和组织方式。\n"
-            "- 参考结构中的一级分支应作为你输出的主要分类维度\n"
-            "- 参考结构中的二级分支应作为子分类的参考\n"
-            "- 命名风格和路径组织方式应与参考保持一致\n"
-            "- 仅在参考结构明显未覆盖的领域，可自行补充新的分支\n"
-            + coverage_note
-        )
-
-    section = (
-        "\n\n## 参考 Checklist 结构（路由辅助 + 补充锚点）\n"
+    return (
+        "\n\n## 参考 Checklist 结构概览（仅供参考，禁止照搬）\n"
         f"{formatted}\n"
-        '【重要指令】强制模版骨架中标记为"必须保留"的节点是硬约束，不可更改。\n'
-        "参考结构用于以下用途：\n"
-        "- **路由辅助**：根据参考结构判断每个 checkpoint 最适合归属到哪个强制节点下\n"
-        "- **补充锚点**：强制模版未覆盖的区域，按参考结构的组织方式补充分支\n"
-        "- **风格对齐**：命名风格和层级深度参考已有结构\n"
+        "【重要指令】上述参考结构仅用于了解历史模板的覆盖范围。\n"
+        "你必须基于当前 PRD 需求全新生成所有节点，禁止复制参考结构中的任何具体文本。\n"
+        "仅参考其覆盖的测试维度方向。\n"
     )
-    if routing_hints:
-        section += (
-            "\n## Checkpoint 归属建议\n"
-            "以下是基于参考结构的 checkpoint 路由建议：\n"
-            f"{routing_hints}\n"
-        )
-    section += coverage_note
-    return section
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +250,13 @@ class _OutlineTrieNode:
 
 
 class CheckpointOutlinePlanner:
-    """将 checkpoint 规划为稳定的共享大纲树。"""
+    """将 checkpoint 规划为稳定的共享大纲树。
+
+    改造后采用维度引导式全量规划：
+    - 不再将参考树作为种子或合并目标
+    - 通过 AbstractedReferenceSchema 提供覆盖维度引导
+    - 所有 checkpoint 均由 LLM 全量规划，输出即为完整大纲
+    """
 
     def __init__(self, llm_client: LLMClient) -> None:
         self.llm_client = llm_client
@@ -236,6 +268,7 @@ class CheckpointOutlinePlanner:
         mandatory_skeleton: MandatorySkeletonNode | None = None,
         xmind_reference_summary=None,
         coverage_result: CoverageResult | None = None,
+        abstracted_reference_schema: AbstractedReferenceSchema | None = None,
     ) -> CheckpointOutlinePlan:
         if not checkpoints:
             return CheckpointOutlinePlan([], [], [])
@@ -261,12 +294,41 @@ class CheckpointOutlinePlanner:
             for checkpoint in checkpoints
         ]
 
-        # 构建 system prompt（含可选的强制约束）
+        # ---- 构建 system prompt（含可选的强制约束）----
         outline_system = _OUTLINE_SYSTEM_PROMPT
         if mandatory_skeleton:
             constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
             outline_system = outline_system + "\n\n" + constraint
 
+        # ---- Stage 1: 维度引导构建 ----
+        dimension_guidance = ""
+        if abstracted_reference_schema and abstracted_reference_schema.modules:
+            dimension_guidance = _build_dimension_guidance_text(
+                abstracted_reference_schema
+            )
+            logger.info(
+                "维度引导已构建: modules=%d, total_dimensions=%d",
+                len(abstracted_reference_schema.modules),
+                abstracted_reference_schema.total_dimensions,
+            )
+
+        # 注入维度引导到 system prompt
+        if dimension_guidance:
+            guidance_section = _DIMENSION_GUIDANCE_TEMPLATE.format(
+                dimensions_text=dimension_guidance
+            )
+            outline_system = outline_system + "\n\n" + guidance_section
+        elif xmind_reference_summary:
+            # 降级路径：没有抽象 schema 时，使用 XMind 摘要作为弱参考
+            # 但不再像旧版那样鼓励照搬
+            fallback_section = _build_xmind_fallback_prompt_section(
+                xmind_reference_summary=xmind_reference_summary,
+                has_mandatory_skeleton=mandatory_skeleton is not None,
+            )
+            if fallback_section:
+                outline_system = outline_system + fallback_section
+
+        # ---- Stage 2: 全量 LLM 生成（所有 checkpoint，不区分增量/已覆盖）----
         outline_user_prompt = (
             "[Facts]\n"
             f"{json.dumps(facts_payload, ensure_ascii=False, indent=2)}\n\n"
@@ -274,87 +336,47 @@ class CheckpointOutlinePlanner:
             f"{json.dumps(checkpoint_payload, ensure_ascii=False, indent=2)}"
         )
 
-        # ---- routing_hints 生成（修复：从 node wrapper 移到此处） ----
-        routing_hints = ""
-        if xmind_reference_summary and mandatory_skeleton is not None:
-            from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
-            _analyzer = XMindReferenceAnalyzer()
-            checkpoint_titles = [cp.title for cp in checkpoints]
-            routing_hints = _analyzer.generate_routing_hints(
-                xmind_reference_summary, checkpoint_titles,
+        if dimension_guidance:
+            outline_user_prompt += (
+                "\n\n[Generation Directive]\n"
+                "Based on the PRD requirements and the verification dimensions above "
+                "(as abstract guidance), generate a COMPLETE checklist tree. "
+                "DO NOT copy any specific test case text — create new, PRD-specific "
+                "test cases that cover these verification dimensions.\n"
+                "ALL checkpoints listed above must be organized into the outline. "
+                "No checkpoint should be skipped or considered 'already covered'."
             )
 
-        # ---- XMind 参考注入 ----
-        xmind_section = _build_xmind_reference_prompt_section(
-            xmind_reference_summary=xmind_reference_summary,
-            has_mandatory_skeleton=mandatory_skeleton is not None,
-            routing_hints=routing_hints,
-            coverage_result=coverage_result,
+        canonical_response = self.llm_client.generate_structured(
+            system_prompt=outline_system,
+            user_prompt=outline_user_prompt,
+            response_model=CanonicalOutlineNodeCollection,
         )
-        if xmind_section:
-            outline_user_prompt += xmind_section
 
-        # ---- Stage 0: 准备参考树种子 ----
-        reference_tree: list[ChecklistNode] = []
-        if xmind_reference_summary and hasattr(xmind_reference_summary, "reference_tree"):
-            ref_tree = xmind_reference_summary.reference_tree
-            if isinstance(ref_tree, list):
-                reference_tree = ref_tree
+        path_system = _PATH_SYSTEM_PROMPT
+        if mandatory_skeleton:
+            constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
+            path_system = path_system + "\n\n" + constraint
 
-        # ---- Stage 1: 确定增量 checkpoint ----
-        active_checkpoints = checkpoints
-        if coverage_result and coverage_result.uncovered_checkpoint_ids:
-            uncovered_ids = set(coverage_result.uncovered_checkpoint_ids)
-            active_checkpoints = [
-                cp for cp in checkpoints
-                if getattr(cp, "id", "") in uncovered_ids
-            ]
-            logger.info(
-                "覆盖度过滤: %d/%d checkpoint 需要增量生成",
-                len(active_checkpoints), len(checkpoints),
-            )
-
-        # ---- Stage 2: LLM 只对增量 checkpoint 做 Stage A/B ----
-        if active_checkpoints:
-            canonical_response = self.llm_client.generate_structured(
-                system_prompt=outline_system,
-                user_prompt=outline_user_prompt,
-                response_model=CanonicalOutlineNodeCollection,
-            )
-
-            path_system = _PATH_SYSTEM_PROMPT
-            if mandatory_skeleton:
-                constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
-                path_system = path_system + "\n\n" + constraint
-
-            path_response = self.llm_client.generate_structured(
-                system_prompt=path_system,
-                user_prompt=self._build_path_prompt(
-                    active_checkpoints,
-                    canonical_response.canonical_nodes,
-                ),
-                response_model=CheckpointPathCollection,
-            )
-
-            resolved_paths = self._resolve_checkpoint_paths(
-                active_checkpoints,
-                path_response.checkpoint_paths,
+        path_response = self.llm_client.generate_structured(
+            system_prompt=path_system,
+            user_prompt=self._build_path_prompt(
+                checkpoints,
                 canonical_response.canonical_nodes,
-            )
-
-            llm_tree = self._build_outline_tree(resolved_paths)
-        else:
-            llm_tree = []
-            canonical_response = CanonicalOutlineNodeCollection(canonical_nodes=[])
-            path_response = CheckpointPathCollection(checkpoint_paths=[])
-
-        # ---- Stage 3: 合并 reference_tree + llm_tree ----
-        optimized_tree = self._merge_reference_and_llm_trees(
-            reference_tree=reference_tree,
-            llm_tree=llm_tree,
+            ),
+            response_model=CheckpointPathCollection,
         )
 
-        # 如果存在强制骨架，执行后处理修复（Stage 4）
+        resolved_paths = self._resolve_checkpoint_paths(
+            checkpoints,
+            path_response.checkpoint_paths,
+            canonical_response.canonical_nodes,
+        )
+
+        # LLM 输出即为完整大纲——不再与参考树合并
+        optimized_tree = self._build_outline_tree(resolved_paths)
+
+        # 如果存在强制骨架，执行后处理修复
         if mandatory_skeleton:
             optimized_tree = self._enforce_mandatory_skeleton(
                 optimized_tree, mandatory_skeleton
@@ -365,6 +387,10 @@ class CheckpointOutlinePlanner:
             checkpoint_paths=path_response.checkpoint_paths,
             optimized_tree=optimized_tree,
         )
+
+    # ------------------------------------------------------------------
+    # 强制骨架相关方法
+    # ------------------------------------------------------------------
 
     def _build_mandatory_constraint_prompt(
         self, skeleton: MandatorySkeletonNode
@@ -479,7 +505,7 @@ class CheckpointOutlinePlanner:
         return ids
 
     # ------------------------------------------------------------------
-    # 参考树合并
+    # 参考树合并 — 已废弃（DEPRECATED）
     # ------------------------------------------------------------------
 
     def _merge_reference_and_llm_trees(
@@ -489,13 +515,25 @@ class CheckpointOutlinePlanner:
     ) -> list[ChecklistNode]:
         """将 LLM 生成的增量节点合并进参考树。
 
-        合并策略：
+        .. deprecated::
+            此方法已废弃。改造后的规划流程不再使用参考树合并。
+            LLM 全量生成的大纲即为完整输出，无需与参考树合并。
+            保留此方法仅为向后兼容，不应在新代码中调用。
+
+        合并策略（旧版）：
         1. 以 reference_tree 为主干
-        2. 对 llm_tree 的每个一级节点，找标题相似的参考分支（Jaccard ≥ 0.4）
+        2. 对 llm_tree 的每个一级节点，找标题相似的参考分支（Jaccard >= 0.4）
         3. 找到 → 将 LLM children 追加到参考分支下（去重后）
         4. 未找到 → 作为新一级分支追加
-        5. 叶子去重：同一父节点下 Jaccard ≥ 0.5 则保留参考叶子
+        5. 叶子去重：同一父节点下 Jaccard >= 0.5 则保留参考叶子
         """
+        warnings.warn(
+            "_merge_reference_and_llm_trees is deprecated. "
+            "The new dimension-guided pipeline generates complete outlines "
+            "without reference tree merging.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not reference_tree:
             return llm_tree
         if not llm_tree:
@@ -521,7 +559,10 @@ class CheckpointOutlinePlanner:
         target: ChecklistNode,
         new_children: list[ChecklistNode],
     ) -> None:
-        """将 new_children 追加到 target.children，叶子级去重。"""
+        """将 new_children 追加到 target.children，叶子级去重。
+
+        .. deprecated:: 仅供已废弃的 _merge_reference_and_llm_trees 使用。
+        """
         existing_titles = {child.title for child in target.children}
         for child in new_children:
             is_duplicate = any(
@@ -564,6 +605,10 @@ class CheckpointOutlinePlanner:
         if not union:
             return 0.0
         return len(set_a & set_b) / len(union)
+
+    # ------------------------------------------------------------------
+    # 路径构建与树构建方法（保留不变）
+    # ------------------------------------------------------------------
 
     def _build_path_prompt(
         self,
@@ -741,6 +786,7 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
         mandatory_skeleton = state.get("mandatory_skeleton")
         xmind_reference_summary = state.get("xmind_reference_summary")
         coverage_result = state.get("coverage_result")
+        abstracted_reference_schema = state.get("abstracted_reference_schema")
         checkpoints = state.get("checkpoints", [])
 
         plan = planner.plan(
@@ -749,6 +795,7 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
             mandatory_skeleton=mandatory_skeleton,
             xmind_reference_summary=xmind_reference_summary,
             coverage_result=coverage_result,
+            abstracted_reference_schema=abstracted_reference_schema,
         )
 
         return {
@@ -817,7 +864,7 @@ def _attach_expected_results_by_path(
             if not normalized_result:
                 continue
 
-            existing_leaf = next(
+existing_leaf = next(
                 (
                     child
                     for child in target.children

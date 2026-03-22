@@ -7,6 +7,12 @@
 - 对文本字段进行中英文混排规范化
 - 从 checkpoint 继承模版绑定字段（兜底补全）
 - 执行强制约束后置校验和 source 标注
+
+改造说明：
+- 移除对 source="reference" 节点的特殊保护逻辑
+  （改造后不再有来自参考树的 reference 源节点，所有节点均为 LLM 生成）
+- 保留 mandatory_skeleton 的强制约束逻辑（独立于 XMind 参考模板）
+- assembler 的输入仅为 planner 输出的 optimized_tree + checkpoint_path_collection
 """
 from __future__ import annotations
 
@@ -135,8 +141,9 @@ def _enforce_mandatory_constraints(
     overflow_cases: list[ChecklistNode] = []
     for node in tree:
         if node.node_id not in skeleton_ids and node.node_id not in result_ids:
-            # 保护 template 和 reference 来源的节点不进入溢出区
-            if node.source in ("template", "reference"):
+            # 所有节点现在均为 LLM 生成，不再有 reference 源节点需要特殊保护。
+            # 仅保护 template 来源的节点不进入溢出区。
+            if node.source == "template":
                 result.append(node)
             elif node.children or node.node_type in ("expected_result", "case"):
                 overflow_cases.append(node)
@@ -206,13 +213,15 @@ def _annotate_source(
 
 
 def _set_source_recursive(node: ChecklistNode, skeleton_ids: set[str]) -> None:
-    """递归设置 source 标记。"""
+    """递归设置 source 标记。
+
+    改造说明：移除了对 source="reference" 的特殊保留逻辑。
+    改造后所有节点均为 LLM 生成（source="generated"）或来自 YAML 模板
+    （source="template"），不再有参考树来源的节点。
+    """
     if node.node_id in skeleton_ids:
         node.source = "template"
         node.is_mandatory = True
-    elif node.source == "reference":
-        # 保留 reference 来源标记，不覆盖
-        pass
     elif node.node_id == "_overflow":
         node.source = "overflow"
     # children 中的 source 不需要覆盖（保留 generated 默认值或已设置的值）

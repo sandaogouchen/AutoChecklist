@@ -9,6 +9,8 @@ scenario_planner → checkpoint_generator → checkpoint_evaluator
 
 变更：
 - 新增可选 timer / iteration_index 参数，支持子图内节点级耗时计量
+- CaseGenState 新增 abstracted_reference_schema 字段，
+  由主图桥接传入，供 checkpoint_outline_planner 使用维度引导
 """
 from __future__ import annotations
 
@@ -72,9 +74,15 @@ def build_case_generation_subgraph(
     - checkpoint_evaluator：对 checkpoints 去重、归一化
     - coverage_detector：检测 checkpoint 与参考 XMind 叶子的覆盖关系
     - checkpoint_outline_planner：为 checkpoints 规划共享层级并构建 optimized_tree
+      （改造后使用维度引导式全量规划，通过 abstracted_reference_schema 获取维度引导）
     - evidence_mapper：为每个场景匹配 PRD 文档证据
     - draft_writer：基于 checkpoint 与固定路径上下文生成叶子级草稿
     - structure_assembler：标准化用例结构，补全缺失字段
+
+    状态字段说明：
+    - abstracted_reference_schema 由主图通过桥接节点传入 CaseGenState，
+      在子图中作为透传字段流转到 checkpoint_outline_planner 节点使用。
+      子图内部无需额外处理该字段——它通过 CaseGenState TypedDict 自然流转。
 
     Args:
         llm_client: LLM 客户端实例，传递给需要 LLM 的节点。

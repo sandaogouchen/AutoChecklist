@@ -12,12 +12,14 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 新增知识检索相关状态字段，支持 GraphRAG 知识注入。
 新增 XMind 参考相关状态字段，支持已有 Checklist 结构参考。
 新增 draft_writer_timing 字段，支持并发补充阶段的耗时数据流转与持久化。
+新增 abstracted_reference_schema 字段，支持模板抽象化维度引导。
 """
 
 from __future__ import annotations
 
 from typing import TypedDict
 
+from app.domain.abstracted_reference_models import AbstractedReferenceSchema
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.checkpoint_models import Checkpoint, CheckpointCoverage
@@ -53,6 +55,7 @@ class GlobalState(TypedDict, total=False):
     - reference_xmind_path: 参考 XMind 文件路径
     - xmind_reference_summary: 参考 XMind 结构分析摘要
     - draft_writer_timing: draft_writer 并发补充阶段的耗时元数据
+    - abstracted_reference_schema: 模板抽象化后的验证维度模式
     """
 
     run_id: str
@@ -101,6 +104,9 @@ class GlobalState(TypedDict, total=False):
     reference_xmind_path: str
     xmind_reference_summary: XMindReferenceSummary
 
+    # ---- 模板抽象化字段 ----
+    abstracted_reference_schema: AbstractedReferenceSchema | None
+
     # ---- draft_writer 并发耗时数据 ----
     draft_writer_timing: dict
 
@@ -115,6 +121,7 @@ class CaseGenState(TypedDict, total=False):
     - mandatory_skeleton: 强制骨架树
     - xmind_reference_summary: 参考 XMind 结构分析摘要
     - draft_writer_timing: draft_writer 并发补充阶段的耗时元数据
+    - abstracted_reference_schema: 模板抽象化后的验证维度模式
     """
 
     language: str
@@ -140,6 +147,9 @@ class CaseGenState(TypedDict, total=False):
 
     # ---- XMind 参考字段 ----
     xmind_reference_summary: XMindReferenceSummary
+
+    # ---- 模板抽象化字段 ----
+    abstracted_reference_schema: AbstractedReferenceSchema | None
 
     # ---- 覆盖度检测字段 ----
     coverage_result: CoverageResult | None

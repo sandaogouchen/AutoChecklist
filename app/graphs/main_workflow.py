@@ -1,19 +1,23 @@
 """主工作流图定义。
 使用 LangGraph 构建 AutoChecklist 的主处理流水线：
-input_parser → template_loader → [xmind_reference_loader] → [project_context_loader]
-→ [knowledge_retrieval] → context_research → case_generation（子图） → reflection
+input_parser → template_loader → [xmind_reference_loader] → [template_abstractor]
+→ [project_context_loader] → [knowledge_retrieval] → context_research
+→ case_generation（子图） → reflection
 
 每个节点接收并返回 ``GlobalState``，通过增量更新的方式传递数据。
 
 变更：
 - 新增 template_loader 节点，始终添加（无模版时自动跳过）
 - 新增可选 xmind_reference_loader 节点，在 template_loader 之后加载参考 XMind 文件
+- 新增 template_abstractor 节点，在 xmind_reference_loader 之后将参考树抽象为验证维度
 - 桥接节点新增 template_leaf_targets 和 project_template 字段映射
 - 桥接节点新增 mandatory_skeleton 字段映射
 - 桥接节点新增 xmind_reference_summary 字段映射
+- 桥接节点新增 abstracted_reference_schema 字段映射
 - 桥接节点新增 coverage_result 字段回传映射
 - 边连接链路调整为 input_parser → template_loader → [xmind_reference_loader]
-  → [project_context_loader] → [knowledge_retrieval] → context_research
+  → [template_abstractor] → [project_context_loader] → [knowledge_retrieval]
+  → context_research
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
 - 新增可选 timer / iteration_index 参数，支持节点级耗时计量
 """
@@ -27,6 +31,7 @@ from app.graphs.case_generation import build_case_generation_subgraph
 from app.nodes.context_research import build_context_research_node
 from app.nodes.input_parser import input_parser_node
 from app.nodes.reflection import reflection_node
+from app.nodes.template_abstractor import build_template_abstractor_node
 from app.nodes.template_loader import build_template_loader_node
 from app.utils.timing import maybe_wrap
 
@@ -44,23 +49,24 @@ def build_workflow(
     工作流结构（线性流水线）：
     ```
     START → input_parser → template_loader → [xmind_reference_loader]
-    → [project_context_loader] → [knowledge_retrieval]
+    → [template_abstractor] → [project_context_loader] → [knowledge_retrieval]
     → context_research → case_generation → reflection → END
     ```
 
     template_loader 始终添加，当未提供模版文件路径时自动跳过（返回空增量）。
     xmind_reference_loader 为可选节点，仅在启用 XMind 参考时添加。
+    template_abstractor 在 xmind_reference_loader 之后添加，将参考树抽象为验证维度模式。
     knowledge_retrieval 为可选节点，仅在启用知识检索时添加。
 
     Args:
         llm_client: LLM 客户端实例，传递给需要调用 LLM 的节点。
         project_context_loader: 可选的项目上下文加载节点（闭包 callable），
-            插入在 xmind_reference_loader（或 template_loader）之后。
+            插入在 template_abstractor（或 xmind_reference_loader 或 template_loader）之后。
         knowledge_retrieval_node: 可选的知识检索节点（闭包 callable），
             插入在 project_context_loader（或 template_loader）之后、
             context_research 之前。
         xmind_reference_loader_node: 可选的 XMind 参考加载节点（闭包 callable），
-            插入在 template_loader 之后、project_context_loader 之前。
+            插入在 template_loader 之后、template_abstractor 之前。
         timer: 可选的 ``NodeTimer`` 实例，传入时自动包装每个节点以记录耗时。
         iteration_index: 当前迭代轮次索引，用于在 timer 中区分不同轮次。
 
@@ -78,6 +84,10 @@ def build_workflow(
 
     if xmind_reference_loader_node is not None:
         builder.add_node("xmind_reference_loader", maybe_wrap("xmind_reference_loader", xmind_reference_loader_node, timer, iteration_index))
+        # template_abstractor uses the factory pattern: build with llm_client,
+        # matching build_context_research_node(llm_client) and
+        # build_xmind_reference_loader_node(parser, analyzer, ...) patterns.
+        builder.add_node("template_abstractor", maybe_wrap("template_abstractor", build_template_abstractor_node(llm_client), timer, iteration_index))
 
     if project_context_loader is not None:
         builder.add_node("project_context_loader", maybe_wrap("project_context_loader", project_context_loader, timer, iteration_index))
@@ -90,7 +100,8 @@ def build_workflow(
     builder.add_node("reflection", maybe_wrap("reflection", reflection_node, timer, iteration_index))
 
     # 边连接：input_parser → template_loader → [xmind_reference_loader]
-    # → [project_context_loader] → [knowledge_retrieval] → context_research
+    # → [template_abstractor] → [project_context_loader] → [knowledge_retrieval]
+    # → context_research
     builder.add_edge(START, "input_parser")
     builder.add_edge("input_parser", "template_loader")
 
@@ -99,7 +110,8 @@ def build_workflow(
 
     if xmind_reference_loader_node is not None:
         builder.add_edge(prev_node, "xmind_reference_loader")
-        prev_node = "xmind_reference_loader"
+        builder.add_edge("xmind_reference_loader", "template_abstractor")
+        prev_node = "template_abstractor"
 
     if project_context_loader is not None:
         builder.add_edge(prev_node, "project_context_loader")
@@ -123,6 +135,7 @@ def _build_case_generation_bridge(case_generation_subgraph):
     变更：
     - 新增 mandatory_skeleton 字段的传入与传出映射
     - 新增 xmind_reference_summary 字段的传入与传出映射
+    - 新增 abstracted_reference_schema 字段的传入映射
     - 新增 coverage_result 字段的传出映射
     """
 
@@ -139,6 +152,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "mandatory_skeleton": state.get("mandatory_skeleton"),
             # ---- XMind 参考传入子图 ----
             "xmind_reference_summary": state.get("xmind_reference_summary"),
+            # ---- 模板抽象化传入子图 ----
+            "abstracted_reference_schema": state.get("abstracted_reference_schema"),
         }
 
         # 清理 None 值
