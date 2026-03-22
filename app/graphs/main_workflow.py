@@ -1,8 +1,7 @@
 """主工作流图定义。
-
 使用 LangGraph 构建 AutoChecklist 的主处理流水线：
-  input_parser → template_loader → [xmind_reference_loader] → [project_context_loader]
-  → [knowledge_retrieval] → context_research → case_generation（子图） → reflection
+input_parser → template_loader → [xmind_reference_loader] → [project_context_loader]
+→ [knowledge_retrieval] → context_research → case_generation（子图） → reflection
 
 每个节点接收并返回 ``GlobalState``，通过增量更新的方式传递数据。
 
@@ -12,11 +11,11 @@
 - 桥接节点新增 template_leaf_targets 和 project_template 字段映射
 - 桥接节点新增 mandatory_skeleton 字段映射
 - 桥接节点新增 xmind_reference_summary 字段映射
+- 桥接节点新增 coverage_result 字段回传映射
 - 边连接链路调整为 input_parser → template_loader → [xmind_reference_loader]
   → [project_context_loader] → [knowledge_retrieval] → context_research
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
 """
-
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
@@ -41,8 +40,8 @@ def build_workflow(
     工作流结构（线性流水线）：
     ```
     START → input_parser → template_loader → [xmind_reference_loader]
-          → [project_context_loader] → [knowledge_retrieval]
-          → context_research → case_generation → reflection → END
+    → [project_context_loader] → [knowledge_retrieval]
+    → context_research → case_generation → reflection → END
     ```
 
     template_loader 始终添加，当未提供模版文件路径时自动跳过（返回空增量）。
@@ -65,20 +64,25 @@ def build_workflow(
     case_generation_subgraph = build_case_generation_subgraph(llm_client)
 
     builder = StateGraph(GlobalState)
+
     builder.add_node("input_parser", input_parser_node)
     builder.add_node("template_loader", build_template_loader_node())
+
     if xmind_reference_loader_node is not None:
         builder.add_node("xmind_reference_loader", xmind_reference_loader_node)
+
     if project_context_loader is not None:
         builder.add_node("project_context_loader", project_context_loader)
+
     if knowledge_retrieval_node is not None:
         builder.add_node("knowledge_retrieval", knowledge_retrieval_node)
+
     builder.add_node("context_research", build_context_research_node(llm_client))
     builder.add_node("case_generation", _build_case_generation_bridge(case_generation_subgraph))
     builder.add_node("reflection", reflection_node)
 
     # 边连接：input_parser → template_loader → [xmind_reference_loader]
-    #        → [project_context_loader] → [knowledge_retrieval] → context_research
+    # → [project_context_loader] → [knowledge_retrieval] → context_research
     builder.add_edge(START, "input_parser")
     builder.add_edge("input_parser", "template_loader")
 
@@ -111,6 +115,7 @@ def _build_case_generation_bridge(case_generation_subgraph):
     变更：
     - 新增 mandatory_skeleton 字段的传入与传出映射
     - 新增 xmind_reference_summary 字段的传入与传出映射
+    - 新增 coverage_result 字段的传出映射
     """
 
     def case_generation_node(state: GlobalState) -> GlobalState:
@@ -143,6 +148,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),
             "optimized_tree": subgraph_result.get("optimized_tree", []),
+            # ---- 覆盖检测结果回传 ----
+            "coverage_result": subgraph_result.get("coverage_result"),
         }
 
     return case_generation_node
