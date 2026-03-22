@@ -6,6 +6,9 @@
 变更：新增模版绑定能力，当 template_leaf_targets 非空时，
 在 prompt 中注入模版叶子列表，引导 LLM 将每个 checkpoint 归类到最匹配的叶子节点，
 并在后处理阶段校验、回填模版路径信息。
+
+变更：新增 XMind 参考注入能力，当 state 中存在 xmind_reference_summary 时，
+将参考 Checklist 的覆盖维度和组织方式注入 prompt，引导 LLM 生成结构和风格一致的检查点。
 """
 
 from __future__ import annotations
@@ -120,6 +123,30 @@ class CheckpointDraftCollection(BaseModel):
     checkpoints: list[CheckpointDraft] = Field(default_factory=list)
 
 
+def _build_xmind_reference_prompt(xmind_reference_summary) -> str:
+    """Build XMind reference prompt section for checkpoint generation.
+
+    When an XMind reference summary is available, returns a formatted
+    prompt section that guides the LLM to align coverage dimensions.
+    """
+    if xmind_reference_summary is None:
+        return ""
+    if hasattr(xmind_reference_summary, "formatted_summary"):
+        formatted = xmind_reference_summary.formatted_summary
+    elif isinstance(xmind_reference_summary, dict):
+        formatted = xmind_reference_summary.get("formatted_summary", "")
+    else:
+        return ""
+    if not formatted:
+        return ""
+    return (
+        "\n\n## 参考 Checklist 结构\n"
+        f"{formatted}\n"
+        "请参考上述已有 Checklist 的覆盖维度和组织方式来生成检查点，"
+        "确保生成的检查点在结构和命名风格上与参考保持一致。\n"
+    )
+
+
 def build_checkpoint_generator_node(llm_client: LLMClient):
     """构建检查点生成节点的工厂函数。
 
@@ -166,6 +193,11 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
                 _LOW_CONFIDENCE_THRESHOLD,
             )
             prompt += "\n\n" + _build_template_binding_prompt(template_leaf_targets)
+
+        # ---- XMind 参考注入 ----
+        xmind_ref_section = _build_xmind_reference_prompt(state.get("xmind_reference_summary"))
+        if xmind_ref_section:
+            prompt += xmind_ref_section
 
         response = llm_client.generate_structured(
             system_prompt=_SYSTEM_PROMPT,

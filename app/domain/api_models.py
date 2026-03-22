@@ -8,6 +8,7 @@
 新增迭代评估回路相关的轻量摘要字段。
 新增项目级 Checklist 模版文件路径字段。
 新增 template_name 字段，支持按名称加载模版。
+新增 reference_xmind_path 字段，支持 XMind 参考文件路径。
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ class CaseGenerationRequest(BaseModel):
     - template_file_path: 可选的项目级 Checklist 模版文件路径（YAML 格式）。
     - template_name: 可选的模版名称，对应 templates/ 目录下的 YAML 文件（不含扩展名）。
       与 template_file_path 二选一使用，template_name 优先。
+    - reference_xmind_path: 可选的参考 XMind checklist 文件路径，
+      系统将解析其结构并用于引导 checklist 生成。
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -75,6 +78,7 @@ class CaseGenerationRequest(BaseModel):
     project_id: str | None = None
     template_file_path: str | None = None
     template_name: str | None = None
+    reference_xmind_path: str | None = None
 
 
 class CaseGenerationRun(BaseModel):

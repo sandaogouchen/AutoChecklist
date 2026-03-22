@@ -8,6 +8,10 @@
 新增强制骨架约束：
 - 当存在 mandatory_skeleton 时，将强制骨架注入 LLM prompt
 - LLM 输出后执行确定性后处理修复，确保强制层级 100% 合规
+
+新增 XMind 参考结构支持：
+- 双模式 prompt 策略：仅参考模式（主结构锚点）与模版+参考模式（路由辅助）
+- 参考结构可影响大纲维度覆盖、命名风格和 checkpoint 归属路由
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from app.domain.checkpoint_models import Checkpoint
 from app.domain.research_models import ResearchOutput
 from app.domain.state import CaseGenState
 from app.domain.template_models import MandatorySkeletonNode
+from app.domain.xmind_reference_models import XMindReferenceSummary
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,71 @@ def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{digest}"
 
 
+# ---------------------------------------------------------------------------
+# XMind 参考结构辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _get_formatted_summary(xmind_reference_summary) -> str:
+    """Safely extract formatted_summary from Pydantic model or dict."""
+    if xmind_reference_summary is None:
+        return ""
+    if hasattr(xmind_reference_summary, "formatted_summary"):
+        return xmind_reference_summary.formatted_summary or ""
+    if isinstance(xmind_reference_summary, dict):
+        return xmind_reference_summary.get("formatted_summary", "")
+    return ""
+
+
+def _build_xmind_reference_prompt_section(
+    xmind_reference_summary,
+    has_mandatory_skeleton: bool,
+    routing_hints: str = "",
+) -> str:
+    """构建 XMind 参考的 prompt 注入段落。
+
+    双模式 prompt 策略：
+    - 模式1（仅参考无模版）: XMind 骨架为主结构锚点
+    - 模式2（模版+参考）: 强制骨架为硬约束 + 参考辅助 checkpoint 路由
+    """
+    formatted = _get_formatted_summary(xmind_reference_summary)
+    if not formatted:
+        return ""
+
+    if not has_mandatory_skeleton:
+        return (
+            "\n\n## 参考 Checklist 结构（主结构锚点）\n"
+            f"{formatted}\n"
+            "【重要指令】你生成的 outline 必须尽量遵循此参考结构的覆盖维度和组织方式。\n"
+            "- 参考结构中的一级分支应作为你输出的主要分类维度\n"
+            "- 参考结构中的二级分支应作为子分类的参考\n"
+            "- 命名风格和路径组织方式应与参考保持一致\n"
+            "- 仅在参考结构明显未覆盖的领域，可自行补充新的分支\n"
+        )
+
+    section = (
+        "\n\n## 参考 Checklist 结构（路由辅助 + 补充锚点）\n"
+        f"{formatted}\n"
+        "【重要指令】强制模版骨架中标记为"必须保留"的节点是硬约束，不可更改。\n"
+        "参考结构用于以下用途：\n"
+        "- **路由辅助**：根据参考结构判断每个 checkpoint 最适合归属到哪个强制节点下\n"
+        "- **补充锚点**：强制模版未覆盖的区域，按参考结构的组织方式补充分支\n"
+        "- **风格对齐**：命名风格和层级深度参考已有结构\n"
+    )
+    if routing_hints:
+        section += (
+            "\n## Checkpoint 归属建议\n"
+            "以下是基于参考结构的 checkpoint 路由建议：\n"
+            f"{routing_hints}\n"
+        )
+    return section
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class _ResolvedOutlineSegment:
     node_id: str
@@ -142,6 +212,7 @@ class CheckpointOutlinePlanner:
         research_output: ResearchOutput,
         checkpoints: list[Checkpoint],
         mandatory_skeleton: MandatorySkeletonNode | None = None,
+        xmind_reference_summary=None,
     ) -> CheckpointOutlinePlan:
         if not checkpoints:
             return CheckpointOutlinePlan([], [], [])
@@ -173,14 +244,24 @@ class CheckpointOutlinePlanner:
             constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
             outline_system = outline_system + "\n\n" + constraint
 
+        outline_user_prompt = (
+            "[Facts]\n"
+            f"{json.dumps(facts_payload, ensure_ascii=False, indent=2)}\n\n"
+            "[Checkpoints]\n"
+            f"{json.dumps(checkpoint_payload, ensure_ascii=False, indent=2)}"
+        )
+
+        # ---- XMind 参考注入 ----
+        xmind_section = _build_xmind_reference_prompt_section(
+            xmind_reference_summary=xmind_reference_summary,
+            has_mandatory_skeleton=mandatory_skeleton is not None,
+        )
+        if xmind_section:
+            outline_user_prompt += xmind_section
+
         canonical_response = self.llm_client.generate_structured(
             system_prompt=outline_system,
-            user_prompt=(
-                "[Facts]\n"
-                f"{json.dumps(facts_payload, ensure_ascii=False, indent=2)}\n\n"
-                "[Checkpoints]\n"
-                f"{json.dumps(checkpoint_payload, ensure_ascii=False, indent=2)}"
-            ),
+            user_prompt=outline_user_prompt,
             response_model=CanonicalOutlineNodeCollection,
         )
 
@@ -504,11 +585,28 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
 
     def checkpoint_outline_planner_node(state: CaseGenState) -> CaseGenState:
         mandatory_skeleton = state.get("mandatory_skeleton")
+        xmind_reference_summary = state.get("xmind_reference_summary")
+        checkpoints = state.get("checkpoints", [])
+
         plan = planner.plan(
             state.get("research_output", ResearchOutput()),
-            state.get("checkpoints", []),
+            checkpoints,
             mandatory_skeleton=mandatory_skeleton,
+            xmind_reference_summary=xmind_reference_summary,
         )
+
+        # ---- Routing hints for checkpoint path assignment ----
+        if xmind_reference_summary and mandatory_skeleton is not None:
+            try:
+                from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
+                analyzer = XMindReferenceAnalyzer()
+                checkpoint_titles = [cp.title for cp in checkpoints]
+                routing_hints = analyzer.generate_routing_hints(xmind_reference_summary, checkpoint_titles)
+                if routing_hints:
+                    logger.info("Generated routing hints for %d checkpoints", len(checkpoint_titles))
+            except Exception:
+                logger.warning("Failed to generate routing hints", exc_info=True)
+
         return {
             "canonical_outline_nodes": plan.canonical_outline_nodes,
             "checkpoint_paths": plan.checkpoint_paths,

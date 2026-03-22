@@ -10,6 +10,7 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 新增模版相关状态字段，支持项目级 Checklist 模版的加载与传递。
 新增 mandatory_skeleton 字段，支持强制层级约束在管道中传播。
 新增知识检索相关状态字段，支持 GraphRAG 知识注入。
+新增 XMind 参考相关状态字段，支持已有 Checklist 结构参考。
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from app.domain.template_models import (
     ProjectChecklistTemplateFile,
     TemplateLeafTarget,
 )
+from app.domain.xmind_reference_models import XMindReferenceSummary
 
 
 class GlobalState(TypedDict, total=False):
@@ -46,6 +48,8 @@ class GlobalState(TypedDict, total=False):
     - knowledge_context: GraphRAG 检索到的知识上下文文本
     - knowledge_sources: 知识来源文档标识列表
     - knowledge_retrieval_success: 知识检索是否成功
+    - reference_xmind_path: 参考 XMind 文件路径
+    - xmind_reference_summary: 参考 XMind 结构分析摘要
     """
 
     run_id: str
@@ -90,6 +94,10 @@ class GlobalState(TypedDict, total=False):
     knowledge_sources: list[str]
     knowledge_retrieval_success: bool
 
+    # ---- XMind 参考字段 ----
+    reference_xmind_path: str
+    xmind_reference_summary: XMindReferenceSummary
+
 
 class CaseGenState(TypedDict, total=False):
     """用例生成子图状态。
@@ -99,6 +107,7 @@ class CaseGenState(TypedDict, total=False):
     - template_leaf_targets: 拍平后的模版叶子目标列表
     - project_template: 解析后的模版文件对象
     - mandatory_skeleton: 强制骨架树
+    - xmind_reference_summary: 参考 XMind 结构分析摘要
     """
 
     language: str
@@ -121,3 +130,6 @@ class CaseGenState(TypedDict, total=False):
 
     # ---- 强制骨架字段 ----
     mandatory_skeleton: MandatorySkeletonNode
+
+    # ---- XMind 参考字段 ----
+    xmind_reference_summary: XMindReferenceSummary
