@@ -740,6 +740,7 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
     def checkpoint_outline_planner_node(state: CaseGenState) -> CaseGenState:
         mandatory_skeleton = state.get("mandatory_skeleton")
         xmind_reference_summary = state.get("xmind_reference_summary")
+        coverage_result = state.get("coverage_result")
         checkpoints = state.get("checkpoints", [])
 
         plan = planner.plan(
@@ -747,19 +748,8 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
             checkpoints,
             mandatory_skeleton=mandatory_skeleton,
             xmind_reference_summary=xmind_reference_summary,
+            coverage_result=coverage_result,
         )
-
-        # ---- Routing hints for checkpoint path assignment ----
-        if xmind_reference_summary and mandatory_skeleton is not None:
-            try:
-                from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
-                analyzer = XMindReferenceAnalyzer()
-                checkpoint_titles = [cp.title for cp in checkpoints]
-                routing_hints = analyzer.generate_routing_hints(xmind_reference_summary, checkpoint_titles)
-                if routing_hints:
-                    logger.info("Generated routing hints for %d checkpoints", len(checkpoint_titles))
-            except Exception:
-                logger.warning("Failed to generate routing hints", exc_info=True)
 
         return {
             "canonical_outline_nodes": plan.canonical_outline_nodes,
