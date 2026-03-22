@@ -9,13 +9,21 @@
 
 from __future__ import annotations
 
+import logging
+
 from pydantic import BaseModel, Field
 
 from app.clients.llm import LLMClient
 from app.domain.case_models import TestCase
-from app.domain.checklist_models import CanonicalOutlineNode, CheckpointPathMapping
+from app.domain.checklist_models import (
+    CanonicalOutlineNode,
+    ChecklistNode,
+    CheckpointPathMapping,
+)
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.state import CaseGenState
+
+logger = logging.getLogger(__name__)
 
 # LLM 系统提示词：指导模型基于 checkpoint 生成结构化的手动 QA 测试用例
 _SYSTEM_PROMPT = (
@@ -55,6 +63,69 @@ class DraftCaseCollection(BaseModel):
     """LLM 返回的测试用例草稿集合。"""
 
     test_cases: list[TestCase] = Field(default_factory=list)
+
+
+def _collect_reference_leaves(tree: list[ChecklistNode]) -> list[ChecklistNode]:
+    """递归收集参考树中所有叶子节点（source='reference'）。"""
+    leaves: list[ChecklistNode] = []
+    for node in tree:
+        if not node.children and node.source == "reference":
+            leaves.append(node)
+        else:
+            leaves.extend(_collect_reference_leaves(node.children))
+    return leaves
+
+
+def _generate_reference_leaf_details(
+    llm_client,
+    ref_leaves: list[ChecklistNode],
+    state: dict,
+) -> list:
+    """为参考树叶子节点批量生成 steps / expected_results / preconditions。
+
+    标题固定为参考叶子的原始标题（不允许 LLM 修改）。
+    每批最多 10 个叶子，减少 LLM 调用次数。
+    """
+    _BATCH_SIZE = 10
+    all_cases: list = []
+
+    for i in range(0, len(ref_leaves), _BATCH_SIZE):
+        batch = ref_leaves[i : i + _BATCH_SIZE]
+        leaf_descriptions = "\n".join(
+            f"- 【{leaf.title}】(node_id={leaf.node_id})"
+            for leaf in batch
+        )
+        prompt = (
+            "以下是已有 Checklist 中的测试用例标题，请为每个标题补充具体的：\n"
+            "1. 前置条件（preconditions）\n"
+            "2. 执行步骤（steps）\n"
+            "3. 预期结果（expected_results）\n\n"
+            "【重要】请保留原始标题不做任何修改。\n\n"
+            f"用例列表：\n{leaf_descriptions}\n"
+        )
+
+        try:
+            response = llm_client.generate_structured(
+                system_prompt=_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response_model=DraftCaseCollection,
+            )
+            if response and hasattr(response, "test_cases"):
+                # 确保标题与参考一致
+                for case, leaf in zip(response.test_cases, batch):
+                    if hasattr(case, "title"):
+                        case.title = leaf.title
+                    if hasattr(case, "source"):
+                        case.source = "reference"
+                all_cases.extend(response.test_cases)
+        except Exception:
+            logger.warning(
+                "参考叶子 batch %d-%d 生成失败，跳过",
+                i, i + len(batch),
+                exc_info=True,
+            )
+
+    return all_cases
 
 
 class DraftWriterNode:
@@ -111,7 +182,25 @@ def _run_draft_writer(state: CaseGenState, llm_client: LLMClient) -> CaseGenStat
         user_prompt="\n\n".join(prompt_lines),
         response_model=DraftCaseCollection,
     )
-    return {"draft_cases": response.test_cases}
+    draft_cases = response.test_cases
+
+    # ---- 参考叶子节点补充 detail ----
+    xmind_summary = state.get("xmind_reference_summary")
+    if xmind_summary and hasattr(xmind_summary, "reference_tree"):
+        ref_tree = xmind_summary.reference_tree
+        if isinstance(ref_tree, list) and ref_tree:
+            ref_leaves = _collect_reference_leaves(ref_tree)
+            if ref_leaves:
+                logger.info(
+                    "为 %d 个参考叶子节点补充 case detail",
+                    len(ref_leaves),
+                )
+                ref_cases = _generate_reference_leaf_details(
+                    llm_client, ref_leaves, state,
+                )
+                draft_cases.extend(ref_cases)
+
+    return {"draft_cases": draft_cases}
 
 
 def _format_checkpoint_prompt(
