@@ -1,13 +1,11 @@
 """XMind 载荷构建器。
-
 将测试用例、检查点、研究输出等数据映射为 XMind 思维导图的节点树结构。
 
 变更：
 - build() 新增 optimized_tree 参数
 - 当 optimized_tree 非空时，使用树模式构建 XMind 节点
-- 新增 source 颜色标记：template=蓝色, overflow=红色
+- 新增 source 颜色标记：template=蓝色, overflow=红色, reference=绿色
 """
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -20,10 +18,10 @@ if TYPE_CHECKING:
     from app.domain.checkpoint_models import Checkpoint
     from app.domain.research_models import ResearchOutput
 
+
 # ---------------------------------------------------------------------------
 # 分类 → XMind 标记映射
 # ---------------------------------------------------------------------------
-
 _CATEGORY_MARKERS: dict[str, str] = {
     "functional": "star-blue",
     "edge_case": "star-orange",
@@ -43,6 +41,7 @@ _PRIORITY_MARKERS: dict[str, str] = {
 _SOURCE_MARKERS: dict[str, str] = {
     "template": "flag-blue",
     "overflow": "flag-red",
+    "reference": "flag-green",
 }
 
 
@@ -61,10 +60,8 @@ class XMindPayloadBuilder:
     ) -> XMindNode:
         """构建 XMind 节点树。"""
         root_title = title or (f"测试用例 - {run_id}" if run_id else "测试用例")
-
         if optimized_tree:
             return self._build_tree_root(root_title, optimized_tree, enable_source_labels)
-
         return self._build_checkpoint_mode(
             root_title, test_cases, checkpoints, research_output
         )
@@ -116,7 +113,7 @@ class XMindPayloadBuilder:
         notes_parts: list[str] = []
         if node.preconditions:
             notes_parts.append("前置条件:")
-            notes_parts.extend(f"  - {pc}" for pc in node.preconditions)
+            notes_parts.extend(f" - {pc}" for pc in node.preconditions)
 
         children: list[XMindNode] = []
         for child in node.children:
@@ -153,7 +150,6 @@ class XMindPayloadBuilder:
         category_marker = _CATEGORY_MARKERS.get(node.category)
         if category_marker:
             markers.append(category_marker)
-
         labels = [node.priority] if node.priority else []
 
         leaf_children: list[XMindNode] = []
@@ -244,6 +240,7 @@ class XMindPayloadBuilder:
                 f for f in research_output.facts
                 if f.fact_id and f.fact_id not in covered_fact_ids
             ]
+
             if uncovered_facts:
                 uncovered_node = XMindNode(
                     title=f"未覆盖的事实 ({len(uncovered_facts)})",
@@ -278,7 +275,7 @@ class XMindPayloadBuilder:
             notes_parts.append("证据引用:")
             for ref in checkpoint.evidence_refs:
                 notes_parts.append(
-                    f"  - {ref.section_title} (L{ref.line_start}-L{ref.line_end}): {ref.excerpt}"
+                    f" - {ref.section_title} (L{ref.line_start}-L{ref.line_end}): {ref.excerpt}"
                 )
 
         return XMindNode(

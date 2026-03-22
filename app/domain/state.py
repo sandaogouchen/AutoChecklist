@@ -34,6 +34,7 @@ from app.domain.template_models import (
     TemplateLeafTarget,
 )
 from app.domain.xmind_reference_models import XMindReferenceSummary
+from app.services.coverage_detector import CoverageResult
 
 
 class GlobalState(TypedDict, total=False):
@@ -133,3 +134,7 @@ class CaseGenState(TypedDict, total=False):
 
     # ---- XMind 参考字段 ----
     xmind_reference_summary: XMindReferenceSummary
+
+    # ---- 覆盖度检测字段 ----
+    coverage_result: CoverageResult | None
+    uncovered_checkpoints: list

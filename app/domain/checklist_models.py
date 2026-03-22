@@ -42,7 +42,7 @@ class ChecklistNode(BaseModel):
     hidden: bool = False
 
     # ---- 来源与强制性标记 ----
-    source: Literal["template", "generated", "overflow"] = "generated"
+    source: Literal["template", "generated", "overflow", "reference"] = "generated"
     is_mandatory: bool = False
 
     # ---- case 节点专属字段 ----

@@ -12,6 +12,12 @@
 新增 XMind 参考结构支持：
 - 双模式 prompt 策略：仅参考模式（主结构锚点）与模版+参考模式（路由辅助）
 - 参考结构可影响大纲维度覆盖、命名风格和 checkpoint 归属路由
+
+新增 4 阶段规划流程：
+- Stage 0: 准备参考树种子
+- Stage 1: 覆盖度过滤，确定增量 checkpoint
+- Stage 2: LLM 只对增量 checkpoint 做 Stage A/B
+- Stage 3: 合并 reference_tree + llm_tree
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from app.domain.research_models import ResearchOutput
 from app.domain.state import CaseGenState
 from app.domain.template_models import MandatorySkeletonNode
 from app.domain.xmind_reference_models import XMindReferenceSummary
+from app.services.coverage_detector import CoverageResult
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +134,7 @@ def _build_xmind_reference_prompt_section(
     xmind_reference_summary,
     has_mandatory_skeleton: bool,
     routing_hints: str = "",
+    coverage_result: CoverageResult | None = None,
 ) -> str:
     """构建 XMind 参考的 prompt 注入段落。
 
@@ -138,6 +146,18 @@ def _build_xmind_reference_prompt_section(
     if not formatted:
         return ""
 
+    coverage_note = ""
+    if coverage_result and hasattr(coverage_result, "covered_checkpoint_ids"):
+        covered = coverage_result.covered_checkpoint_ids
+        if covered:
+            coverage_note = (
+                "\n\n## 已覆盖说明\n"
+                f"以下 {len(covered)} 个检查点已被参考 Checklist 覆盖，"
+                "无需为它们生成 outline 节点：\n"
+                + "\n".join(f"- {cid}" for cid in covered[:20])
+                + "\n\n请只为未覆盖的检查点生成分类路径。\n"
+            )
+
     if not has_mandatory_skeleton:
         return (
             "\n\n## 参考 Checklist 结构（主结构锚点）\n"
@@ -147,6 +167,7 @@ def _build_xmind_reference_prompt_section(
             "- 参考结构中的二级分支应作为子分类的参考\n"
             "- 命名风格和路径组织方式应与参考保持一致\n"
             "- 仅在参考结构明显未覆盖的领域，可自行补充新的分支\n"
+            + coverage_note
         )
 
     section = (
@@ -164,6 +185,7 @@ def _build_xmind_reference_prompt_section(
             "以下是基于参考结构的 checkpoint 路由建议：\n"
             f"{routing_hints}\n"
         )
+    section += coverage_note
     return section
 
 
@@ -213,6 +235,7 @@ class CheckpointOutlinePlanner:
         checkpoints: list[Checkpoint],
         mandatory_skeleton: MandatorySkeletonNode | None = None,
         xmind_reference_summary=None,
+        coverage_result: CoverageResult | None = None,
     ) -> CheckpointOutlinePlan:
         if not checkpoints:
             return CheckpointOutlinePlan([], [], [])
@@ -251,43 +274,87 @@ class CheckpointOutlinePlanner:
             f"{json.dumps(checkpoint_payload, ensure_ascii=False, indent=2)}"
         )
 
+        # ---- routing_hints 生成（修复：从 node wrapper 移到此处） ----
+        routing_hints = ""
+        if xmind_reference_summary and mandatory_skeleton is not None:
+            from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
+            _analyzer = XMindReferenceAnalyzer()
+            checkpoint_titles = [cp.title for cp in checkpoints]
+            routing_hints = _analyzer.generate_routing_hints(
+                xmind_reference_summary, checkpoint_titles,
+            )
+
         # ---- XMind 参考注入 ----
         xmind_section = _build_xmind_reference_prompt_section(
             xmind_reference_summary=xmind_reference_summary,
             has_mandatory_skeleton=mandatory_skeleton is not None,
+            routing_hints=routing_hints,
+            coverage_result=coverage_result,
         )
         if xmind_section:
             outline_user_prompt += xmind_section
 
-        canonical_response = self.llm_client.generate_structured(
-            system_prompt=outline_system,
-            user_prompt=outline_user_prompt,
-            response_model=CanonicalOutlineNodeCollection,
-        )
+        # ---- Stage 0: 准备参考树种子 ----
+        reference_tree: list[ChecklistNode] = []
+        if xmind_reference_summary and hasattr(xmind_reference_summary, "reference_tree"):
+            ref_tree = xmind_reference_summary.reference_tree
+            if isinstance(ref_tree, list):
+                reference_tree = ref_tree
 
-        path_system = _PATH_SYSTEM_PROMPT
-        if mandatory_skeleton:
-            constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
-            path_system = path_system + "\n\n" + constraint
+        # ---- Stage 1: 确定增量 checkpoint ----
+        active_checkpoints = checkpoints
+        if coverage_result and coverage_result.uncovered_checkpoint_ids:
+            uncovered_ids = set(coverage_result.uncovered_checkpoint_ids)
+            active_checkpoints = [
+                cp for cp in checkpoints
+                if getattr(cp, "id", "") in uncovered_ids
+            ]
+            logger.info(
+                "覆盖度过滤: %d/%d checkpoint 需要增量生成",
+                len(active_checkpoints), len(checkpoints),
+            )
 
-        path_response = self.llm_client.generate_structured(
-            system_prompt=path_system,
-            user_prompt=self._build_path_prompt(
-                checkpoints,
+        # ---- Stage 2: LLM 只对增量 checkpoint 做 Stage A/B ----
+        if active_checkpoints:
+            canonical_response = self.llm_client.generate_structured(
+                system_prompt=outline_system,
+                user_prompt=outline_user_prompt,
+                response_model=CanonicalOutlineNodeCollection,
+            )
+
+            path_system = _PATH_SYSTEM_PROMPT
+            if mandatory_skeleton:
+                constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
+                path_system = path_system + "\n\n" + constraint
+
+            path_response = self.llm_client.generate_structured(
+                system_prompt=path_system,
+                user_prompt=self._build_path_prompt(
+                    active_checkpoints,
+                    canonical_response.canonical_nodes,
+                ),
+                response_model=CheckpointPathCollection,
+            )
+
+            resolved_paths = self._resolve_checkpoint_paths(
+                active_checkpoints,
+                path_response.checkpoint_paths,
                 canonical_response.canonical_nodes,
-            ),
-            response_model=CheckpointPathCollection,
+            )
+
+            llm_tree = self._build_outline_tree(resolved_paths)
+        else:
+            llm_tree = []
+            canonical_response = CanonicalOutlineNodeCollection(canonical_nodes=[])
+            path_response = CheckpointPathCollection(checkpoint_paths=[])
+
+        # ---- Stage 3: 合并 reference_tree + llm_tree ----
+        optimized_tree = self._merge_reference_and_llm_trees(
+            reference_tree=reference_tree,
+            llm_tree=llm_tree,
         )
 
-        resolved_paths = self._resolve_checkpoint_paths(
-            checkpoints,
-            path_response.checkpoint_paths,
-            canonical_response.canonical_nodes,
-        )
-
-        optimized_tree = self._build_outline_tree(resolved_paths)
-
-        # 如果存在强制骨架，执行后处理修复
+        # 如果存在强制骨架，执行后处理修复（Stage 4）
         if mandatory_skeleton:
             optimized_tree = self._enforce_mandatory_skeleton(
                 optimized_tree, mandatory_skeleton
@@ -410,6 +477,93 @@ class CheckpointOutlinePlanner:
         for child in node.children:
             ids.update(self._collect_skeleton_ids(child))
         return ids
+
+    # ------------------------------------------------------------------
+    # 参考树合并
+    # ------------------------------------------------------------------
+
+    def _merge_reference_and_llm_trees(
+        self,
+        reference_tree: list[ChecklistNode],
+        llm_tree: list[ChecklistNode],
+    ) -> list[ChecklistNode]:
+        """将 LLM 生成的增量节点合并进参考树。
+
+        合并策略：
+        1. 以 reference_tree 为主干
+        2. 对 llm_tree 的每个一级节点，找标题相似的参考分支（Jaccard ≥ 0.4）
+        3. 找到 → 将 LLM children 追加到参考分支下（去重后）
+        4. 未找到 → 作为新一级分支追加
+        5. 叶子去重：同一父节点下 Jaccard ≥ 0.5 则保留参考叶子
+        """
+        if not reference_tree:
+            return llm_tree
+        if not llm_tree:
+            return reference_tree
+
+        merged = [node.model_copy(deep=True) for node in reference_tree]
+        ref_branch_index = {node.title: node for node in merged}
+
+        for llm_node in llm_tree:
+            best_match_title, best_score = self._find_best_branch_match(
+                llm_node.title, list(ref_branch_index.keys()),
+            )
+            if best_score >= 0.4 and best_match_title:
+                target = ref_branch_index[best_match_title]
+                self._merge_children_dedup(target, llm_node.children)
+            else:
+                merged.append(llm_node)
+
+        return merged
+
+    def _merge_children_dedup(
+        self,
+        target: ChecklistNode,
+        new_children: list[ChecklistNode],
+    ) -> None:
+        """将 new_children 追加到 target.children，叶子级去重。"""
+        existing_titles = {child.title for child in target.children}
+        for child in new_children:
+            is_duplicate = any(
+                self._jaccard_char(child.title, existing) >= 0.5
+                for existing in existing_titles
+            )
+            if not is_duplicate:
+                target.children.append(child)
+                existing_titles.add(child.title)
+
+    @staticmethod
+    def _find_best_branch_match(
+        title: str,
+        candidates: list[str],
+    ) -> tuple[str | None, float]:
+        """字符级 Jaccard 找最佳匹配分支。"""
+        best_title: str | None = None
+        best_score = 0.0
+        title_chars = set(title)
+
+        for candidate in candidates:
+            cand_chars = set(candidate)
+            union = title_chars | cand_chars
+            if not union:
+                continue
+            score = len(title_chars & cand_chars) / len(union)
+            if score > best_score:
+                best_score = score
+                best_title = candidate
+
+        return best_title, best_score
+
+    @staticmethod
+    def _jaccard_char(a: str, b: str) -> float:
+        """字符级 Jaccard 相似度。"""
+        set_a, set_b = set(a), set(b)
+        if not set_a and not set_b:
+            return 1.0
+        union = set_a | set_b
+        if not union:
+            return 0.0
+        return len(set_a & set_b) / len(union)
 
     def _build_path_prompt(
         self,
@@ -586,6 +740,7 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
     def checkpoint_outline_planner_node(state: CaseGenState) -> CaseGenState:
         mandatory_skeleton = state.get("mandatory_skeleton")
         xmind_reference_summary = state.get("xmind_reference_summary")
+        coverage_result = state.get("coverage_result")
         checkpoints = state.get("checkpoints", [])
 
         plan = planner.plan(
@@ -593,19 +748,8 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
             checkpoints,
             mandatory_skeleton=mandatory_skeleton,
             xmind_reference_summary=xmind_reference_summary,
+            coverage_result=coverage_result,
         )
-
-        # ---- Routing hints for checkpoint path assignment ----
-        if xmind_reference_summary and mandatory_skeleton is not None:
-            try:
-                from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
-                analyzer = XMindReferenceAnalyzer()
-                checkpoint_titles = [cp.title for cp in checkpoints]
-                routing_hints = analyzer.generate_routing_hints(xmind_reference_summary, checkpoint_titles)
-                if routing_hints:
-                    logger.info("Generated routing hints for %d checkpoints", len(checkpoint_titles))
-            except Exception:
-                logger.warning("Failed to generate routing hints", exc_info=True)
 
         return {
             "canonical_outline_nodes": plan.canonical_outline_nodes,
