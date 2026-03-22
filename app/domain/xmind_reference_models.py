@@ -10,7 +10,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from app.domain.checklist_models import ChecklistNode
 
 
 class XMindReferenceNode(BaseModel):
@@ -48,3 +53,13 @@ class XMindReferenceSummary(BaseModel):
 
     # prompt 可注入的格式化摘要
     formatted_summary: str
+
+    # ---- 增强字段：确定性参考树 ----
+    reference_tree: list = Field(
+        default_factory=list,
+        description="参考 XMind 完整转换后的 ChecklistNode 树",
+    )
+    all_leaf_titles: list[str] = Field(
+        default_factory=list,
+        description="参考 XMind 所有叶子节点标题（用于覆盖度检测）",
+    )
