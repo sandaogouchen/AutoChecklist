@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_timeout_seconds: float = 6000.0
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 16000
+    llm_max_tokens: int = 50000
 
     # ---- 迭代评估回路配置 ----
     max_iterations: int = 3

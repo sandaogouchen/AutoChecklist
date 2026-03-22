@@ -294,6 +294,19 @@ class LLMClient:
         logger.info(
             "generate_structured: 成功校验 %s", model_name,
         )
+
+        # ---- 诊断日志：主列表字段为空时记录 LLM 原始响应 ----
+        for _fname, _finfo in response_model.model_fields.items():
+            if get_origin(_finfo.annotation) is list:
+                _val = getattr(result, _fname, None)
+                if _val is not None and len(_val) == 0:
+                    logger.warning(
+                        "generate_structured: %s.%s 为空列表，"
+                        "LLM 原始响应前500字符: %.500s",
+                        model_name, _fname, raw_text,
+                    )
+                break
+
         return result
 
 
