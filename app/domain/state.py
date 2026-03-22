@@ -15,7 +15,7 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TypedDict
 
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
@@ -34,9 +34,7 @@ from app.domain.template_models import (
     TemplateLeafTarget,
 )
 from app.domain.xmind_reference_models import XMindReferenceSummary
-
-if TYPE_CHECKING:
-    from app.services.coverage_detector import CoverageResult
+from app.services.coverage_detector import CoverageResult
 
 
 class GlobalState(TypedDict, total=False):
