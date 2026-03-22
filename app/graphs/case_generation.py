@@ -6,6 +6,9 @@ scenario_planner → checkpoint_generator → checkpoint_evaluator
 其中 ``coverage_detector`` 检测 checkpoint 与参考 XMind 叶子的覆盖关系。
 其中 ``checkpoint_outline_planner`` 在 testcase 草稿前规划共享层级，
 提前产出稳定的 ``optimized_tree``。
+
+变更：
+- 新增可选 timer / iteration_index 参数，支持子图内节点级耗时计量
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from app.nodes.scenario_planner import scenario_planner_node
 from app.nodes.structure_assembler import structure_assembler_node
 from app.services.checkpoint_outline_planner import build_checkpoint_outline_planner_node
 from app.services.coverage_detector import CoverageDetector
+from app.utils.timing import maybe_wrap
 
 
 def _coverage_detector_node(state: dict) -> dict:
@@ -48,7 +52,11 @@ def _coverage_detector_node(state: dict) -> dict:
     }
 
 
-def build_case_generation_subgraph(llm_client: LLMClient):
+def build_case_generation_subgraph(
+    llm_client: LLMClient,
+    timer=None,
+    iteration_index: int = 0,
+):
     """构建并编译用例生成子图。
 
     子图结构（线性流水线）：
@@ -70,23 +78,25 @@ def build_case_generation_subgraph(llm_client: LLMClient):
 
     Args:
         llm_client: LLM 客户端实例，传递给需要 LLM 的节点。
+        timer: 可选的 ``NodeTimer`` 实例，传入时自动包装每个节点以记录耗时。
+        iteration_index: 当前迭代轮次索引。
 
     Returns:
         编译后的 LangGraph 可执行子图。
     """
     builder = StateGraph(CaseGenState)
 
-    builder.add_node("scenario_planner", scenario_planner_node)
-    builder.add_node("checkpoint_generator", build_checkpoint_generator_node(llm_client))
-    builder.add_node("checkpoint_evaluator", checkpoint_evaluator_node)
-    builder.add_node("coverage_detector", _coverage_detector_node)
+    builder.add_node("scenario_planner", maybe_wrap("scenario_planner", scenario_planner_node, timer, iteration_index))
+    builder.add_node("checkpoint_generator", maybe_wrap("checkpoint_generator", build_checkpoint_generator_node(llm_client), timer, iteration_index))
+    builder.add_node("checkpoint_evaluator", maybe_wrap("checkpoint_evaluator", checkpoint_evaluator_node, timer, iteration_index))
+    builder.add_node("coverage_detector", maybe_wrap("coverage_detector", _coverage_detector_node, timer, iteration_index))
     builder.add_node(
         "checkpoint_outline_planner",
-        build_checkpoint_outline_planner_node(llm_client),
+        maybe_wrap("checkpoint_outline_planner", build_checkpoint_outline_planner_node(llm_client), timer, iteration_index),
     )
-    builder.add_node("evidence_mapper", evidence_mapper_node)
-    builder.add_node("draft_writer", DraftWriterNode(llm_client))
-    builder.add_node("structure_assembler", structure_assembler_node)
+    builder.add_node("evidence_mapper", maybe_wrap("evidence_mapper", evidence_mapper_node, timer, iteration_index))
+    builder.add_node("draft_writer", maybe_wrap("draft_writer", DraftWriterNode(llm_client), timer, iteration_index))
+    builder.add_node("structure_assembler", maybe_wrap("structure_assembler", structure_assembler_node, timer, iteration_index))
 
     builder.add_edge(START, "scenario_planner")
     builder.add_edge("scenario_planner", "checkpoint_generator")
