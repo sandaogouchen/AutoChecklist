@@ -221,7 +221,7 @@ class WorkflowService:
                     workflow_input, result, run_state
                 )
 
-            # ---- 工作流执行（带总时间记录）----
+            # ---- 工作流执行（内部记录，不计入汇总指标）----
             wf_start = time.monotonic()
             result = workflow.invoke(workflow_input)
             wf_elapsed = time.monotonic() - wf_start
@@ -230,6 +230,7 @@ class WorkflowService:
                 wf_elapsed,
                 is_llm_node=False,
                 iteration_index=run_state.iteration_index,
+                is_internal=True,
             )
 
             run_state.status = RunStatus.EVALUATING
@@ -283,10 +284,10 @@ class WorkflowService:
         except Exception:
             logger.exception("Failed to save timing report for run %s", run_id)
 
-        # ---- 写入 run_state.timestamps ----
+        # ---- 写入 run_state.timestamps（含 iteration 索引避免覆盖）----
         try:
-            for record in timer.get_records():
-                key = f"node.{record.node_name}"
+            for record in timer.get_all_records():
+                key = f"node.{record.node_name}.iter{record.iteration_index}"
                 run_state.timestamps[key] = f"{record.elapsed_seconds:.2f}s"
             self.state_repository.save_run_state(run_state)
         except Exception:
@@ -482,10 +483,13 @@ class WorkflowService:
         if iter_log_path.exists():
             artifacts["iteration_log"] = str(iter_log_path)
 
-        # ---- timing report 产物追加 ----
-        timing_path = self.state_repository._run_dir(run_id) / "timing_report.json"
-        if timing_path.exists():
-            artifacts["timing_report"] = str(timing_path)
+        # ---- timing report 产物追加（通过 self.repository 路径一致性）----
+        try:
+            timing_path = Path(self.repository._run_dir(run_id)) / "timing_report.json"
+            if timing_path.exists():
+                artifacts["timing_report"] = str(timing_path)
+        except Exception:
+            pass
 
         run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
         run_result_path = self.repository.save(

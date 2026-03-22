@@ -28,14 +28,7 @@ from app.nodes.context_research import build_context_research_node
 from app.nodes.input_parser import input_parser_node
 from app.nodes.reflection import reflection_node
 from app.nodes.template_loader import build_template_loader_node
-
-
-def _maybe_wrap(name, fn, timer, iteration_index):
-    """当 timer 可用时包装节点，否则返回原始函数。"""
-    if timer is None:
-        return fn
-    from app.utils.timing import wrap_node
-    return wrap_node(name, fn, timer, iteration_index=iteration_index)
+from app.utils.timing import maybe_wrap
 
 
 def build_workflow(
@@ -80,21 +73,21 @@ def build_workflow(
 
     builder = StateGraph(GlobalState)
 
-    builder.add_node("input_parser", _maybe_wrap("input_parser", input_parser_node, timer, iteration_index))
-    builder.add_node("template_loader", _maybe_wrap("template_loader", build_template_loader_node(), timer, iteration_index))
+    builder.add_node("input_parser", maybe_wrap("input_parser", input_parser_node, timer, iteration_index))
+    builder.add_node("template_loader", maybe_wrap("template_loader", build_template_loader_node(), timer, iteration_index))
 
     if xmind_reference_loader_node is not None:
-        builder.add_node("xmind_reference_loader", _maybe_wrap("xmind_reference_loader", xmind_reference_loader_node, timer, iteration_index))
+        builder.add_node("xmind_reference_loader", maybe_wrap("xmind_reference_loader", xmind_reference_loader_node, timer, iteration_index))
 
     if project_context_loader is not None:
-        builder.add_node("project_context_loader", _maybe_wrap("project_context_loader", project_context_loader, timer, iteration_index))
+        builder.add_node("project_context_loader", maybe_wrap("project_context_loader", project_context_loader, timer, iteration_index))
 
     if knowledge_retrieval_node is not None:
-        builder.add_node("knowledge_retrieval", _maybe_wrap("knowledge_retrieval", knowledge_retrieval_node, timer, iteration_index))
+        builder.add_node("knowledge_retrieval", maybe_wrap("knowledge_retrieval", knowledge_retrieval_node, timer, iteration_index))
 
-    builder.add_node("context_research", _maybe_wrap("context_research", build_context_research_node(llm_client), timer, iteration_index))
-    builder.add_node("case_generation", _maybe_wrap("case_generation", _build_case_generation_bridge(case_generation_subgraph), timer, iteration_index))
-    builder.add_node("reflection", _maybe_wrap("reflection", reflection_node, timer, iteration_index))
+    builder.add_node("context_research", maybe_wrap("context_research", build_context_research_node(llm_client), timer, iteration_index))
+    builder.add_node("case_generation", maybe_wrap("case_generation", _build_case_generation_bridge(case_generation_subgraph), timer, iteration_index))
+    builder.add_node("reflection", maybe_wrap("reflection", reflection_node, timer, iteration_index))
 
     # 边连接：input_parser → template_loader → [xmind_reference_loader]
     # → [project_context_loader] → [knowledge_retrieval] → context_research

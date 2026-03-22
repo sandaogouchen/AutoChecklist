@@ -1,1 +1,1 @@
-"""Utility modules for AutoChecklist."""
+"""通用工具函数子包。"""

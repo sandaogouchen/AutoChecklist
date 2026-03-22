@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,6 +10,7 @@ from app.utils.timing import (
     NodeTimer,
     TimingRecord,
     log_timing_report,
+    maybe_wrap,
     wrap_node,
 )
 
@@ -71,6 +71,7 @@ class TestNodeTimer:
 
         d = timer.to_dict()
         assert "iterations" in d
+        assert "internal" in d
         assert "total_pipeline_seconds" in d
         assert "total_llm_nodes_seconds" in d
         assert "llm_ratio" in d
@@ -92,6 +93,41 @@ class TestNodeTimer:
         assert timer.llm_seconds() == 0.0
         assert timer.to_dict()["llm_ratio"] == 0.0
 
+    def test_internal_records_excluded_from_aggregates(self):
+        """内部记录不计入 total_seconds 和 llm_seconds。"""
+        timer = NodeTimer()
+        timer.record("a", 1.0, is_llm_node=False)
+        timer.record("b", 5.0, is_llm_node=True)
+        timer.record("__workflow_invoke__", 100.0, is_internal=True)
+
+        assert timer.total_seconds() == pytest.approx(6.0)
+        assert timer.llm_seconds() == pytest.approx(5.0)
+        assert len(timer.get_records()) == 2
+        assert len(timer.get_all_records()) == 3
+
+    def test_internal_records_in_to_dict(self):
+        """to_dict 中内部记录放在 'internal' 键下。"""
+        timer = NodeTimer()
+        timer.record("a", 1.0)
+        timer.record("__wf__", 50.0, is_internal=True)
+
+        d = timer.to_dict()
+        assert len(d["internal"]) == 1
+        assert d["internal"][0]["node_name"] == "__wf__"
+        assert d["total_pipeline_seconds"] == pytest.approx(1.0)
+
+    def test_get_records_include_internal(self):
+        """显式传入 include_internal=True 时包含内部记录。"""
+        timer = NodeTimer()
+        timer.record("a", 1.0)
+        timer.record("__internal__", 2.0, is_internal=True)
+
+        with_internal = timer.get_records(include_internal=True)
+        assert len(with_internal) == 2
+
+        without_internal = timer.get_records(include_internal=False)
+        assert len(without_internal) == 1
+
 
 # ---------------------------------------------------------------------------
 # wrap_node
@@ -111,7 +147,7 @@ class TestWrapNode:
         result = wrapped({"input": 1})
 
         assert result == {"result": True}
-        assert len(timer) == 1
+        assert len(timer.get_records()) == 1
         record = timer.get_records()[0]
         assert record.node_name == "dummy"
         assert record.elapsed_seconds >= 0.04  # at least ~50ms
@@ -129,7 +165,7 @@ class TestWrapNode:
         with pytest.raises(ValueError, match="test error"):
             wrapped({})
 
-        assert len(timer) == 1
+        assert len(timer.get_records()) == 1
         record = timer.get_records()[0]
         assert record.node_name == "failing"
         assert record.had_error is True
@@ -180,6 +216,33 @@ class TestWrapNode:
 
 
 # ---------------------------------------------------------------------------
+# maybe_wrap
+# ---------------------------------------------------------------------------
+
+class TestMaybeWrap:
+    """maybe_wrap 条件包装函数测试。"""
+
+    def test_returns_original_when_timer_is_none(self):
+        def original(state):
+            return state
+
+        result = maybe_wrap("test", original, None, 0)
+        assert result is original
+
+    def test_returns_wrapped_when_timer_provided(self):
+        timer = NodeTimer()
+
+        def original(state):
+            return state
+
+        result = maybe_wrap("test", original, timer, 0)
+        assert result is not original
+        # Call it and verify timer records
+        result({})
+        assert len(timer.get_records()) == 1
+
+
+# ---------------------------------------------------------------------------
 # log_timing_report
 # ---------------------------------------------------------------------------
 
@@ -216,6 +279,18 @@ class TestLogTimingReport:
         assert report["total_pipeline_seconds"] == pytest.approx(3.0)
         assert len(report["nodes"]) == 2
 
+    def test_internal_records_excluded_from_nodes(self):
+        """内部记录不出现在 nodes 列表但出现在 internal 列表。"""
+        timer = NodeTimer()
+        timer.record("a", 1.0)
+        timer.record("__wf__", 50.0, is_internal=True)
+
+        report = log_timing_report(timer)
+        assert len(report["nodes"]) == 1
+        assert report["nodes"][0]["node_name"] == "a"
+        assert len(report["internal"]) == 1
+        assert report["total_pipeline_seconds"] == pytest.approx(1.0)
+
 
 # ---------------------------------------------------------------------------
 # TimingRecord
@@ -238,3 +313,13 @@ class TestTimingRecord:
         assert d["elapsed_seconds"] == 1.2346  # rounded to 4 decimals
         assert d["is_llm_node"] is True
         assert d["had_error"] is False
+        assert d["is_internal"] is False
+
+    def test_internal_flag_in_dict(self):
+        record = TimingRecord(
+            node_name="__wf__",
+            elapsed_seconds=10.0,
+            is_internal=True,
+        )
+        d = record.to_dict()
+        assert d["is_internal"] is True

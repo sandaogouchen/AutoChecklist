@@ -1,8 +1,8 @@
 """流水线节点级计时基础设施。
 
-提供 ``NodeTimer`` 记录容器、``wrap_node`` 节点包装函数和
-``log_timing_report`` 汇总输出函数，用于在 LangGraph 工作流中
-对每个节点的执行耗时进行无侵入式度量。
+提供 ``NodeTimer`` 记录容器、``wrap_node`` 节点包装函数、
+``maybe_wrap`` 条件包装辅助函数和 ``log_timing_report`` 汇总输出函数，
+用于在 LangGraph 工作流中对每个节点的执行耗时进行无侵入式度量。
 
 用法示例::
 
@@ -42,6 +42,7 @@ class TimingRecord:
     timestamp_start: str = ""
     timestamp_end: str = ""
     had_error: bool = False
+    is_internal: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +53,7 @@ class TimingRecord:
             "timestamp_start": self.timestamp_start,
             "timestamp_end": self.timestamp_end,
             "had_error": self.had_error,
+            "is_internal": self.is_internal,
         }
 
 
@@ -59,6 +61,7 @@ class NodeTimer:
     """流水线节点级计时器。
 
     维护有序的 ``TimingRecord`` 列表，支持按迭代轮次筛选和导出。
+    内部记录（``is_internal=True``）不计入汇总指标。
     """
 
     def __init__(self) -> None:
@@ -73,6 +76,7 @@ class NodeTimer:
         had_error: bool = False,
         timestamp_start: str = "",
         timestamp_end: str = "",
+        is_internal: bool = False,
     ) -> None:
         """添加一条计时记录。"""
         self._records.append(
@@ -84,17 +88,34 @@ class NodeTimer:
                 timestamp_start=timestamp_start,
                 timestamp_end=timestamp_end,
                 had_error=had_error,
+                is_internal=is_internal,
             )
         )
 
-    def get_records(self, iteration_index: int | None = None) -> list[TimingRecord]:
-        """获取指定轮次（或全部）的计时记录。"""
-        if iteration_index is None:
-            return list(self._records)
-        return [r for r in self._records if r.iteration_index == iteration_index]
+    def get_records(
+        self,
+        iteration_index: int | None = None,
+        include_internal: bool = False,
+    ) -> list[TimingRecord]:
+        """获取指定轮次（或全部）的计时记录。
+
+        Args:
+            iteration_index: 指定迭代轮次，``None`` 表示全部。
+            include_internal: 是否包含内部记录（如 ``__workflow_invoke__``）。
+        """
+        records = self._records
+        if iteration_index is not None:
+            records = [r for r in records if r.iteration_index == iteration_index]
+        if not include_internal:
+            records = [r for r in records if not r.is_internal]
+        return records
+
+    def get_all_records(self) -> list[TimingRecord]:
+        """获取全部记录（含内部记录）。"""
+        return list(self._records)
 
     def total_seconds(self, iteration_index: int | None = None) -> float:
-        """获取总耗时。"""
+        """获取非内部记录的总耗时。"""
         return sum(r.elapsed_seconds for r in self.get_records(iteration_index))
 
     def llm_seconds(self, iteration_index: int | None = None) -> float:
@@ -108,14 +129,18 @@ class NodeTimer:
     def to_dict(self) -> dict:
         """导出为可序列化字典（全部轮次）。"""
         iterations: dict[int, list[dict]] = {}
-        for r in self._records:
+        for r in self.get_records(include_internal=False):
             iterations.setdefault(r.iteration_index, []).append(r.to_dict())
+
+        # 内部记录单独分组
+        internal_records = [r.to_dict() for r in self._records if r.is_internal]
 
         total = self.total_seconds()
         llm_total = self.llm_seconds()
 
         return {
             "iterations": iterations,
+            "internal": internal_records,
             "total_pipeline_seconds": round(total, 4),
             "total_llm_nodes_seconds": round(llm_total, 4),
             "llm_ratio": round(llm_total / total, 4) if total > 0 else 0.0,
@@ -193,12 +218,35 @@ def wrap_node(
     return wrapper
 
 
+def maybe_wrap(name, fn, timer, iteration_index):
+    """当 timer 可用时包装节点，否则返回原始函数。
+
+    用于 LangGraph 图构建时的条件包装，避免在每个图模块中
+    重复 ``if timer is not None`` 的判断逻辑。
+
+    Args:
+        name: 节点名称。
+        fn: 原始节点函数。
+        timer: ``NodeTimer`` 实例或 ``None``。
+        iteration_index: 当前迭代轮次索引。
+
+    Returns:
+        包装后的函数（当 timer 可用时）或原始函数。
+    """
+    if timer is None:
+        return fn
+    return wrap_node(name, fn, timer, iteration_index=iteration_index)
+
+
 def log_timing_report(
     timer: NodeTimer,
     iteration_index: int | None = None,
     run_id: str = "",
 ) -> dict:
     """输出格式化的耗时汇总报告并返回可序列化字典。
+
+    仅汇总非内部记录。内部记录（如 ``__workflow_invoke__``）
+    在报告末尾单独输出。
 
     Args:
         timer: 计时器实例。
@@ -208,7 +256,7 @@ def log_timing_report(
     Returns:
         包含节点耗时明细和汇总指标的字典。
     """
-    records = timer.get_records(iteration_index)
+    records = timer.get_records(iteration_index, include_internal=False)
 
     if not records:
         timing_logger.info("[TIMING] No timing records to report.")
@@ -221,8 +269,6 @@ def log_timing_report(
     timing_logger.info("[TIMING] %s Timing Report (%s) %s", sep_double[:3], iter_label, sep_double[:3])
 
     for r in records:
-        if r.node_name.startswith("__"):
-            continue
         llm_tag = "  ⚠ LLM" if r.is_llm_node else ""
         error_tag = "  ✗ ERROR" if r.had_error else ""
         timing_logger.info(
@@ -247,12 +293,28 @@ def log_timing_report(
             llm_total,
             llm_ratio,
         )
+
+    # 输出内部记录（如 __workflow_invoke__）
+    internal_records = [
+        r for r in timer.get_all_records()
+        if r.is_internal
+        and (iteration_index is None or r.iteration_index == iteration_index)
+    ]
+    if internal_records:
+        for r in internal_records:
+            timing_logger.info(
+                "[TIMING] %-30s : %8.2fs (internal)",
+                r.node_name,
+                r.elapsed_seconds,
+            )
+
     timing_logger.info("[TIMING] %s", sep_double)
 
     report = {
         "run_id": run_id,
         "iteration_index": iteration_index,
         "nodes": [r.to_dict() for r in records],
+        "internal": [r.to_dict() for r in internal_records],
         "total_pipeline_seconds": round(total, 4),
         "total_llm_nodes_seconds": round(llm_total, 4),
         "llm_ratio": round(llm_ratio / 100, 4) if total > 0 else 0.0,

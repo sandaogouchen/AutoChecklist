@@ -24,14 +24,7 @@ from app.nodes.scenario_planner import scenario_planner_node
 from app.nodes.structure_assembler import structure_assembler_node
 from app.services.checkpoint_outline_planner import build_checkpoint_outline_planner_node
 from app.services.coverage_detector import CoverageDetector
-
-
-def _maybe_wrap(name, fn, timer, iteration_index):
-    """当 timer 可用时包装节点，否则返回原始函数。"""
-    if timer is None:
-        return fn
-    from app.utils.timing import wrap_node
-    return wrap_node(name, fn, timer, iteration_index=iteration_index)
+from app.utils.timing import maybe_wrap
 
 
 def _coverage_detector_node(state: dict) -> dict:
@@ -93,17 +86,17 @@ def build_case_generation_subgraph(
     """
     builder = StateGraph(CaseGenState)
 
-    builder.add_node("scenario_planner", _maybe_wrap("scenario_planner", scenario_planner_node, timer, iteration_index))
-    builder.add_node("checkpoint_generator", _maybe_wrap("checkpoint_generator", build_checkpoint_generator_node(llm_client), timer, iteration_index))
-    builder.add_node("checkpoint_evaluator", _maybe_wrap("checkpoint_evaluator", checkpoint_evaluator_node, timer, iteration_index))
-    builder.add_node("coverage_detector", _maybe_wrap("coverage_detector", _coverage_detector_node, timer, iteration_index))
+    builder.add_node("scenario_planner", maybe_wrap("scenario_planner", scenario_planner_node, timer, iteration_index))
+    builder.add_node("checkpoint_generator", maybe_wrap("checkpoint_generator", build_checkpoint_generator_node(llm_client), timer, iteration_index))
+    builder.add_node("checkpoint_evaluator", maybe_wrap("checkpoint_evaluator", checkpoint_evaluator_node, timer, iteration_index))
+    builder.add_node("coverage_detector", maybe_wrap("coverage_detector", _coverage_detector_node, timer, iteration_index))
     builder.add_node(
         "checkpoint_outline_planner",
-        _maybe_wrap("checkpoint_outline_planner", build_checkpoint_outline_planner_node(llm_client), timer, iteration_index),
+        maybe_wrap("checkpoint_outline_planner", build_checkpoint_outline_planner_node(llm_client), timer, iteration_index),
     )
-    builder.add_node("evidence_mapper", _maybe_wrap("evidence_mapper", evidence_mapper_node, timer, iteration_index))
-    builder.add_node("draft_writer", _maybe_wrap("draft_writer", DraftWriterNode(llm_client), timer, iteration_index))
-    builder.add_node("structure_assembler", _maybe_wrap("structure_assembler", structure_assembler_node, timer, iteration_index))
+    builder.add_node("evidence_mapper", maybe_wrap("evidence_mapper", evidence_mapper_node, timer, iteration_index))
+    builder.add_node("draft_writer", maybe_wrap("draft_writer", DraftWriterNode(llm_client), timer, iteration_index))
+    builder.add_node("structure_assembler", maybe_wrap("structure_assembler", structure_assembler_node, timer, iteration_index))
 
     builder.add_edge(START, "scenario_planner")
     builder.add_edge("scenario_planner", "checkpoint_generator")
