@@ -1,13 +1,12 @@
 """统一 Markdown 渲染器。
-
 三种渲染模式（优先级从高到低）：
 - 模版模式（template）：当提供 template 参数时，按模版树骨架渲染
 - 树模式（tree）：当 optimized_tree 非空时，按前置条件分组结构渲染
 - 扁平模式（flat）：当 optimized_tree 为空时，与原渲染行为一致
 
-新增 source 标签支持：强制模版节点标题后追加 [模版]，overflow 节点追加 [待分配]。
+新增 source 标签支持：强制模版节点标题后追加 [模版]，overflow 节点追加 [待分配]，
+reference 节点追加 [参考]。
 """
-
 from __future__ import annotations
 
 from app.domain.case_models import TestCase
@@ -36,13 +35,13 @@ def render_test_cases_markdown(
 # 模版模式
 # ---------------------------------------------------------------------------
 
+
 def _render_template_tree(
     template: ProjectChecklistTemplateFile,
     test_cases: list[TestCase],
 ) -> str:
     leaf_cases: dict[str, list[TestCase]] = {}
     unclassified: list[TestCase] = []
-
     for case in test_cases:
         if case.template_leaf_id:
             leaf_cases.setdefault(case.template_leaf_id, []).append(case)
@@ -118,12 +117,14 @@ def _render_single_case(case: TestCase, lines: list[str]) -> str:
         [f"- {item}" for item in case.preconditions] or ["- 无"]
     )
     lines.append("")
+
     lines.append("#### 步骤")
     lines.extend(
         [f"{i}. {step}" for i, step in enumerate(case.steps, start=1)]
         or ["1. 无"]
     )
     lines.append("")
+
     lines.append("#### 预期结果")
     lines.extend(
         [f"- {item}" for item in case.expected_results] or ["- 无"]
@@ -135,11 +136,13 @@ def _render_single_case(case: TestCase, lines: list[str]) -> str:
 # 扁平模式
 # ---------------------------------------------------------------------------
 
+
 def _flat_render(test_cases: list[TestCase]) -> str:
     if not test_cases:
         return "# 生成的测试用例\n\n暂无测试用例。\n"
 
     lines = ["# 生成的测试用例", ""]
+
     for test_case in test_cases:
         lines.append(f"## {test_case.id} {test_case.title}")
         lines.append("")
@@ -153,12 +156,14 @@ def _flat_render(test_cases: list[TestCase]) -> str:
             [f"- {item}" for item in test_case.preconditions] or ["- 无"]
         )
         lines.append("")
+
         lines.append("### 步骤")
         lines.extend(
             [f"{i}. {step}" for i, step in enumerate(test_case.steps, start=1)]
             or ["1. 无"]
         )
         lines.append("")
+
         lines.append("### 预期结果")
         lines.extend(
             [f"- {item}" for item in test_case.expected_results] or ["- 无"]
@@ -172,15 +177,14 @@ def _flat_render(test_cases: list[TestCase]) -> str:
 # 树模式（新增 source 标签支持）
 # ---------------------------------------------------------------------------
 
+
 def _render_tree(
     tree: list[ChecklistNode],
     enable_source_labels: bool = True,
 ) -> str:
     lines = ["# 生成的测试用例（优化分组）", ""]
-
     for node in tree:
         _render_node(node, lines, heading_level=2, enable_source_labels=enable_source_labels)
-
     return "\n".join(lines).strip() + "\n"
 
 
@@ -218,9 +222,11 @@ def _render_group_node(
         # 新增：source 标签
         if enable_source_labels:
             if node.source == "template":
-                title = f"{title} [模版]"
+                title = f"{title} `[模版]`"
             elif node.source == "overflow":
-                title = f"{title} [待分配]"
+                title = f"{title} `[待分配]`"
+            elif node.source == "reference":
+                title = f"{title} `[参考]`"
 
         lines.append(f"{prefix} {title}")
         lines.append("")
