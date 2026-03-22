@@ -45,6 +45,7 @@ from app.services.xmind_connector import FileXMindConnector
 from app.services.xmind_delivery_agent import XMindDeliveryAgent
 from app.services.xmind_payload_builder import XMindPayloadBuilder
 from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
+from app.services.xmind_reference_tree_converter import XMindReferenceTreeConverter
 from app.utils.run_id import generate_run_id
 
 logger = logging.getLogger(__name__)
@@ -327,7 +328,8 @@ class WorkflowService:
             # Build XMind reference loader node
             xmind_parser = XMindParser()
             xmind_analyzer = XMindReferenceAnalyzer()
-            xmind_reference_loader_node = build_xmind_reference_loader_node(xmind_parser, xmind_analyzer)
+            tree_converter = XMindReferenceTreeConverter()
+            xmind_reference_loader_node = build_xmind_reference_loader_node(xmind_parser, xmind_analyzer, tree_converter)
 
             self._workflow = build_workflow(
                 self._get_llm_client(),
