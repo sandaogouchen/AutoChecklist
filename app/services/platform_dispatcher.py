@@ -8,6 +8,7 @@
 变更：
 - 使用共享的 markdown_renderer 替代内联 _render_test_cases_markdown（DRY 修复）
 - 传递 optimized_tree 到 Markdown 渲染器
+- 新增 draft_writer_timing.json 持久化（并发补充阶段耗时数据）
 """
 
 from __future__ import annotations
@@ -161,5 +162,22 @@ class PlatformDispatcher:
                 "quality_report.json",
             )
         )
+
+        # ---- draft_writer 并发耗时数据持久化 ----
+        draft_writer_timing = workflow_result.get("draft_writer_timing")
+        if draft_writer_timing:
+            artifacts["draft_writer_timing"] = str(
+                self.repository.save(
+                    run_id,
+                    draft_writer_timing,
+                    "draft_writer_timing.json",
+                )
+            )
+            logger.info(
+                "draft_writer_timing.json 已保存: run_id=%s, batches=%d, elapsed=%.1fs",
+                run_id,
+                draft_writer_timing.get("total_batches", 0),
+                draft_writer_timing.get("total_elapsed_seconds", 0),
+            )
 
         return artifacts
