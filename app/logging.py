@@ -29,3 +29,7 @@ def configure_app_logging(*, level: str = "INFO") -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(name)s: %(message)s"))
     app_logger.addHandler(handler)
+
+    # ---- 确保 timing 子 logger 继承 app logger 的配置 ----
+    timing_logger = logging.getLogger("app.timing")
+    timing_logger.setLevel(resolved_level)

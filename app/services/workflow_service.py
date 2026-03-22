@@ -13,11 +13,14 @@
 - 新增 template_file_path 传递到工作流输入
 - 新增 knowledge_retrieval_node 集成：当启用知识检索且 GraphRAG 引擎就绪时，
   构建知识检索节点并传入 build_workflow()
+- 新增节点级计时基础设施集成：在 _execute_with_iteration 中创建 NodeTimer，
+  包装所有节点记录耗时，并持久化 timing_report.json
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +50,7 @@ from app.services.xmind_payload_builder import XMindPayloadBuilder
 from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
 from app.services.xmind_reference_tree_converter import XMindReferenceTreeConverter
 from app.utils.run_id import generate_run_id
+from app.utils.timing import NodeTimer, log_timing_report
 
 logger = logging.getLogger(__name__)
 
@@ -179,14 +183,22 @@ class WorkflowService:
     ) -> dict:
         """执行带迭代评估回路的工作流。
 
-        变更：新增 template_file_path 传递到工作流输入。
+        变更：
+        - 新增 template_file_path 传递到工作流输入。
+        - 新增 NodeTimer 计时集成：每轮迭代构建带计时的工作流，
+          记录每个节点和 evaluate 的耗时，最终持久化 timing_report.json。
         """
-        workflow = self._get_workflow()
+        timer = NodeTimer()
         result: dict = {}
 
         while True:
             run_state.status = RunStatus.RUNNING
             self.state_repository.save_run_state(run_state)
+
+            # 每轮迭代构建带计时包装的工作流（不使用缓存）
+            workflow = self._build_timed_workflow(
+                timer, run_state.iteration_index,
+            )
 
             workflow_input = {
                 "run_id": run_id,
@@ -209,17 +221,35 @@ class WorkflowService:
                     workflow_input, result, run_state
                 )
 
+            # ---- 工作流执行（带总时间记录）----
+            wf_start = time.monotonic()
             result = workflow.invoke(workflow_input)
+            wf_elapsed = time.monotonic() - wf_start
+            timer.record(
+                "__workflow_invoke__",
+                wf_elapsed,
+                is_llm_node=False,
+                iteration_index=run_state.iteration_index,
+            )
 
             run_state.status = RunStatus.EVALUATING
             run_state.current_stage = RunStage.EVALUATION
             self.state_repository.save_run_state(run_state)
 
+            # ---- 评估（带计时）----
+            eval_start = time.monotonic()
             evaluation = evaluate(
                 test_cases=result.get("test_cases", []),
                 checkpoints=result.get("checkpoints", []),
                 research_output=result.get("research_output"),
                 previous_score=run_state.last_evaluation_score,
+            )
+            eval_elapsed = time.monotonic() - eval_start
+            timer.record(
+                "evaluation",
+                eval_elapsed,
+                is_llm_node=False,
+                iteration_index=run_state.iteration_index,
             )
 
             self.state_repository.save_evaluation_report(
@@ -243,7 +273,70 @@ class WorkflowService:
             if decision.action in ("pass", "fail"):
                 break
 
+        # ---- 输出耗时汇总报告 ----
+        timing_dict = log_timing_report(timer, run_id=run_id)
+
+        # ---- 持久化 timing_report.json ----
+        try:
+            self.repository.save(run_id, timing_dict, "timing_report.json")
+            logger.info("Timing report saved for run %s", run_id)
+        except Exception:
+            logger.exception("Failed to save timing report for run %s", run_id)
+
+        # ---- 写入 run_state.timestamps ----
+        try:
+            for record in timer.get_records():
+                key = f"node.{record.node_name}"
+                run_state.timestamps[key] = f"{record.elapsed_seconds:.2f}s"
+            self.state_repository.save_run_state(run_state)
+        except Exception:
+            logger.exception("Failed to update run_state timestamps for run %s", run_id)
+
         return result
+
+    def _build_timed_workflow(self, timer: NodeTimer, iteration_index: int):
+        """构建带计时包装的工作流（每轮迭代重新构建，不缓存）。"""
+        project_loader = None
+        if self.project_context_service is not None:
+            project_loader = build_project_context_loader(
+                self.project_context_service
+            )
+
+        # ---- 构建知识检索节点（如果可用）----
+        knowledge_node = None
+        if (
+            self.settings.enable_knowledge_retrieval
+            and self._graphrag_engine is not None
+        ):
+            try:
+                from app.nodes.knowledge_retrieval import (
+                    build_knowledge_retrieval_node,
+                )
+
+                if self._graphrag_engine.is_ready():
+                    knowledge_node = build_knowledge_retrieval_node(
+                        self._graphrag_engine,
+                        self.settings,
+                    )
+            except Exception:
+                logger.exception("构建知识检索节点失败")
+
+        # Build XMind reference loader node
+        xmind_parser = XMindParser()
+        xmind_analyzer = XMindReferenceAnalyzer()
+        tree_converter = XMindReferenceTreeConverter()
+        xmind_reference_loader_node = build_xmind_reference_loader_node(
+            xmind_parser, xmind_analyzer, tree_converter,
+        )
+
+        return build_workflow(
+            self._get_llm_client(),
+            project_context_loader=project_loader,
+            knowledge_retrieval_node=knowledge_node,
+            xmind_reference_loader_node=xmind_reference_loader_node,
+            timer=timer,
+            iteration_index=iteration_index,
+        )
 
     def _prepare_retry_input(
         self,
@@ -288,7 +381,7 @@ class WorkflowService:
         )
 
     def _get_workflow(self):
-        """构建并缓存 LangGraph 工作流实例。
+        """构建并缓存 LangGraph 工作流实例（无计时，用于非迭代场景）。
 
         变更：新增 knowledge_retrieval_node 集成。
         当启用知识检索且 GraphRAG 引擎就绪时，构建知识检索节点
@@ -388,6 +481,11 @@ class WorkflowService:
         iter_log_path = self.state_repository._run_dir(run_id) / "iteration_log.json"
         if iter_log_path.exists():
             artifacts["iteration_log"] = str(iter_log_path)
+
+        # ---- timing report 产物追加 ----
+        timing_path = self.state_repository._run_dir(run_id) / "timing_report.json"
+        if timing_path.exists():
+            artifacts["timing_report"] = str(timing_path)
 
         run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
         run_result_path = self.repository.save(

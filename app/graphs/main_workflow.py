@@ -15,6 +15,7 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
 - 边连接链路调整为 input_parser → template_loader → [xmind_reference_loader]
   → [project_context_loader] → [knowledge_retrieval] → context_research
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
+- 新增可选 timer / iteration_index 参数，支持节点级耗时计量
 """
 from __future__ import annotations
 
@@ -29,11 +30,21 @@ from app.nodes.reflection import reflection_node
 from app.nodes.template_loader import build_template_loader_node
 
 
+def _maybe_wrap(name, fn, timer, iteration_index):
+    """当 timer 可用时包装节点，否则返回原始函数。"""
+    if timer is None:
+        return fn
+    from app.utils.timing import wrap_node
+    return wrap_node(name, fn, timer, iteration_index=iteration_index)
+
+
 def build_workflow(
     llm_client: LLMClient,
     project_context_loader=None,
     knowledge_retrieval_node=None,
     xmind_reference_loader_node=None,
+    timer=None,
+    iteration_index: int = 0,
 ):
     """构建并编译主工作流图。
 
@@ -57,29 +68,33 @@ def build_workflow(
             context_research 之前。
         xmind_reference_loader_node: 可选的 XMind 参考加载节点（闭包 callable），
             插入在 template_loader 之后、project_context_loader 之前。
+        timer: 可选的 ``NodeTimer`` 实例，传入时自动包装每个节点以记录耗时。
+        iteration_index: 当前迭代轮次索引，用于在 timer 中区分不同轮次。
 
     Returns:
         编译后的 LangGraph 可执行工作流。
     """
-    case_generation_subgraph = build_case_generation_subgraph(llm_client)
+    case_generation_subgraph = build_case_generation_subgraph(
+        llm_client, timer=timer, iteration_index=iteration_index,
+    )
 
     builder = StateGraph(GlobalState)
 
-    builder.add_node("input_parser", input_parser_node)
-    builder.add_node("template_loader", build_template_loader_node())
+    builder.add_node("input_parser", _maybe_wrap("input_parser", input_parser_node, timer, iteration_index))
+    builder.add_node("template_loader", _maybe_wrap("template_loader", build_template_loader_node(), timer, iteration_index))
 
     if xmind_reference_loader_node is not None:
-        builder.add_node("xmind_reference_loader", xmind_reference_loader_node)
+        builder.add_node("xmind_reference_loader", _maybe_wrap("xmind_reference_loader", xmind_reference_loader_node, timer, iteration_index))
 
     if project_context_loader is not None:
-        builder.add_node("project_context_loader", project_context_loader)
+        builder.add_node("project_context_loader", _maybe_wrap("project_context_loader", project_context_loader, timer, iteration_index))
 
     if knowledge_retrieval_node is not None:
-        builder.add_node("knowledge_retrieval", knowledge_retrieval_node)
+        builder.add_node("knowledge_retrieval", _maybe_wrap("knowledge_retrieval", knowledge_retrieval_node, timer, iteration_index))
 
-    builder.add_node("context_research", build_context_research_node(llm_client))
-    builder.add_node("case_generation", _build_case_generation_bridge(case_generation_subgraph))
-    builder.add_node("reflection", reflection_node)
+    builder.add_node("context_research", _maybe_wrap("context_research", build_context_research_node(llm_client), timer, iteration_index))
+    builder.add_node("case_generation", _maybe_wrap("case_generation", _build_case_generation_bridge(case_generation_subgraph), timer, iteration_index))
+    builder.add_node("reflection", _maybe_wrap("reflection", reflection_node, timer, iteration_index))
 
     # 边连接：input_parser → template_loader → [xmind_reference_loader]
     # → [project_context_loader] → [knowledge_retrieval] → context_research
