@@ -1,10 +1,7 @@
-"""XMind 参考文件加载节点。
+"""XMind 参考文件加载器节点。
 
-作为 LangGraph 主工作流的节点，加载并分析用户提供的参考 XMind 文件，
-将结构摘要写入 GlobalState。
-
-遵循项目工厂闭包模式（``build_*_node()``），
-与 knowledge_retrieval 节点的降级策略对齐——解析失败时不阻断工作流。
+将用户提供的参考 XMind 文件解析并分析为 ``XMindReferenceSummary``，
+同时生成确定性 ChecklistNode 参考树，存入 GlobalState。
 """
 
 from __future__ import annotations
@@ -15,6 +12,7 @@ from typing import Any, Callable
 from app.domain.state import GlobalState
 from app.parsers.xmind_parser import XMindParseError, XMindParser
 from app.services.xmind_reference_analyzer import XMindReferenceAnalyzer
+from app.services.xmind_reference_tree_converter import XMindReferenceTreeConverter
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +20,26 @@ logger = logging.getLogger(__name__)
 def build_xmind_reference_loader_node(
     parser: XMindParser,
     analyzer: XMindReferenceAnalyzer,
+    tree_converter: XMindReferenceTreeConverter | None = None,
 ) -> Callable[[GlobalState], dict[str, Any]]:
-    """构建 XMind 参考加载节点。
+    """构建 XMind 参考加载器节点。
 
-    Args:
-        parser: XMind 解析器实例。
-        analyzer: XMind 参考分析器实例。
+    Parameters
+    ----------
+    parser : XMindParser
+        XMind 文件解析器。
+    analyzer : XMindReferenceAnalyzer
+        参考结构分析器。
+    tree_converter : XMindReferenceTreeConverter | None
+        参考树转换器。为 None 时跳过确定性树转换。
 
-    Returns:
+    Returns
+    -------
+    Callable
         LangGraph 节点函数。
     """
 
     def node(state: GlobalState) -> dict[str, Any]:
-        """加载并分析参考 XMind 文件。
-
-        当 ``reference_xmind_path`` 为空时直接跳过（返回空增量）。
-        解析失败时记录 warning 日志并降级为无参考模式。
-        """
         ref_path = state.get("reference_xmind_path")
         if not ref_path:
             return {}
@@ -46,25 +47,38 @@ def build_xmind_reference_loader_node(
         try:
             root = parser.parse(ref_path)
             summary = analyzer.analyze(root, source_file=ref_path)
-            logger.info(
-                "XMind 参考文件加载成功: %s（%d 个节点, %d 个叶子）",
-                ref_path,
-                summary.total_nodes,
-                summary.total_leaf_nodes,
-            )
+
+            # 增强：生成确定性参考树 & 叶子标题列表
+            if tree_converter is not None:
+                try:
+                    reference_tree = tree_converter.convert(root)
+                    all_leaf_titles = tree_converter.get_leaf_titles(root)
+                    summary.reference_tree = reference_tree
+                    summary.all_leaf_titles = all_leaf_titles
+                    logger.info(
+                        "参考树转换完成: %d 一级分支, %d 叶子节点",
+                        len(reference_tree),
+                        len(all_leaf_titles),
+                    )
+                except Exception:
+                    logger.warning(
+                        "参考树转换失败，降级为仅 summary 模式",
+                        exc_info=True,
+                    )
+
             return {"xmind_reference_summary": summary}
-        except (FileNotFoundError, XMindParseError) as exc:
-            logger.warning(
-                "XMind 参考文件加载失败，降级为无参考模式: %s — %s",
-                ref_path,
-                exc,
-            )
+
+        except FileNotFoundError:
+            logger.warning("参考 XMind 文件未找到: %s", ref_path)
             return {}
-        except Exception as exc:
+        except XMindParseError:
+            logger.warning("参考 XMind 文件解析失败: %s", ref_path, exc_info=True)
+            return {}
+        except Exception:
             logger.warning(
-                "XMind 参考文件处理异常，降级为无参考模式: %s — %s",
+                "加载参考 XMind 时发生意外错误: %s",
                 ref_path,
-                exc,
+                exc_info=True,
             )
             return {}
 
