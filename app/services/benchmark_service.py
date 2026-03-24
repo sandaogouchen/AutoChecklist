@@ -67,7 +67,7 @@ class BenchmarkService:
 
         self._evaluator = BenchmarkEvaluator(self._llm)
         self._analyzer = BenchmarkAnalyzer(self._llm)
-        self._output_dir = Path(settings.output_dir).parent / "benchmark_runs"
+        self._output_dir = Path(settings.output_dir) / "benchmark_runs"
 
     def run_benchmark(self, request: BenchmarkRequest) -> BenchmarkReport:
         """执行完整的评测基准对比流程。
@@ -78,6 +78,10 @@ class BenchmarkService:
         Returns:
             完整的 BenchmarkReport。
         """
+        for p in [request.ai_xmind_path, request.gt_xmind_path]:
+            if not Path(p).exists():
+                raise FileNotFoundError(f"XMind file not found: {p}")
+
         benchmark_id = generate_run_id(
             output_dir=self._output_dir,
             timezone=self._settings.timezone,

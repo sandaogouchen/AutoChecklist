@@ -137,8 +137,8 @@ class BenchmarkRequest(BaseModel):
 
     ai_xmind_path: str
     gt_xmind_path: str
-    similarity_threshold: float = 0.7
-    batch_size: int = 5
+    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    batch_size: int = Field(default=5, ge=1, le=50)
 
 
 class BenchmarkReport(BaseModel):

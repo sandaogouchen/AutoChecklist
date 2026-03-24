@@ -85,24 +85,24 @@ class BenchmarkAnalyzer:
 
         # 相似度分桶统计
         buckets = {
-            "0.0-0.3": 0,
-            "0.3-0.5": 0,
-            "0.5-0.7": 0,
-            "0.7-0.9": 0,
-            "0.9-1.0": 0,
+            "[0.0, 0.3)": 0,
+            "[0.3, 0.5)": 0,
+            "[0.5, 0.7)": 0,
+            "[0.7, 0.9)": 0,
+            "[0.9, 1.0]": 0,
         }
         for p in scored_pairs:
             s = p.llm_similarity
             if s < 0.3:
-                buckets["0.0-0.3"] += 1
+                buckets["[0.0, 0.3)"] += 1
             elif s < 0.5:
-                buckets["0.3-0.5"] += 1
+                buckets["[0.3, 0.5)"] += 1
             elif s < 0.7:
-                buckets["0.5-0.7"] += 1
+                buckets["[0.5, 0.7)"] += 1
             elif s < 0.9:
-                buckets["0.7-0.9"] += 1
+                buckets["[0.7, 0.9)"] += 1
             else:
-                buckets["0.9-1.0"] += 1
+                buckets["[0.9, 1.0]"] += 1
 
         return BenchmarkMetrics(
             total_ai_cases=total_ai,
