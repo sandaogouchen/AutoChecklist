@@ -5,6 +5,7 @@
 
 新增：GraphRAG 知识检索引擎的生命周期管理和知识库 API 路由注册。
 变更：WorkflowService 创建时注入 graphrag_engine，使知识检索节点在运行时自动接入工作流。
+新增：评测基准对比服务（BenchmarkService）注册和路由挂载。
 """
 
 from __future__ import annotations
@@ -135,6 +136,13 @@ def create_app(
     # ---- 注册知识库管理 API ----
     from app.api.knowledge_routes import router as knowledge_router
     app.include_router(knowledge_router)
+
+    # ---- 注册评测基准对比 API ----
+    from app.api.benchmark_routes import router as benchmark_router
+    from app.services.benchmark_service import BenchmarkService
+
+    app.state.benchmark_service = BenchmarkService(settings=app_settings)
+    app.include_router(benchmark_router)
 
     return app
 
