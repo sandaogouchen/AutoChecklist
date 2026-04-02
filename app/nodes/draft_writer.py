@@ -8,6 +8,9 @@
 
 变更：参考叶子节点补充改为 ThreadPoolExecutor 并发，
 batch_size 从 10 提升至 40，大幅缩短 draft_writer 耗时。
+
+变更：新增 _apply_code_consistency_to_xmind_node() 辅助函数，
+用于将代码一致性验证结果应用到 XMind 节点结构。
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -65,7 +69,7 @@ _SYSTEM_PROMPT = (
     "1. 表述规范化：使用统一的句式结构，同一含义只用一种表达方式。"
     "例如：始终使用「用户已登录系统」而非混用「登录状态下」「已完成登录」。\n"
     "2. 层级化描述：前置条件按逻辑顺序排列，从环境/系统状态 → 用户状态 → 数据准备 → 页面/入口。"
-    "例如：[\"系统已部署 v2.0 版本\", \"用户已登录管理后台\", \"已创建至少一条测试数据\"]。\n"
+    "例如：[\"系统已部署 v2.0 版本\", \"用户已登录管理后台\", \"已创建至少一条测试数据\"]\u3002\n"
     "3. 原子性：每条前置条件仅描述一个独立的准备动作或状态，不要合并多个条件到一句话中。"
     "错误示例：「用户已登录且进入设置页面」→ 应拆分为两条。\n"
     "4. 充分性：列出执行测试步骤前所需的全部准备条件，不遗漏隐含的前置状态。\n"
@@ -284,6 +288,65 @@ def _generate_reference_leaf_details(
     }
 
     return all_cases, timing_metadata
+
+
+def _apply_code_consistency_to_xmind_node(
+    node: ChecklistNode,
+    consistency_lookup: dict[str, dict[str, Any]],
+) -> ChecklistNode:
+    """将代码一致性验证结果应用到 XMind 节点结构。
+
+    遍历 ChecklistNode 树，对于包含 checkpoint_id 的叶子节点，
+    查找对应的 code_consistency 信息并应用为额外的子节点标注。
+
+    标注规则：
+    - confirmed: 添加 [✓ 代码已确认] 标记
+    - mismatch: 添加 [⚠ 代码不一致] 标记和详情
+    - unverified: 添加 [? 未验证] 标记
+
+    Args:
+        node: 要处理的 ChecklistNode。
+        consistency_lookup: checkpoint_id → code_consistency dict 的查找表。
+
+    Returns:
+        处理后的 ChecklistNode（原地修改）。
+    """
+    if not consistency_lookup:
+        return node
+
+    # 如果是叶子节点且有 checkpoint_id，尝试添加一致性标注
+    node_id = node.node_id or ""
+    consistency = consistency_lookup.get(node_id)
+
+    if consistency and not node.children:
+        status = consistency.get("status", "")
+        detail = consistency.get("detail", "")
+
+        if status == "confirmed":
+            annotation_title = "✓ 代码已确认"
+        elif status == "mismatch":
+            annotation_title = f"⚠ 代码不一致: {detail[:100]}" if detail else "⚠ 代码不一致"
+        elif status == "unverified":
+            annotation_title = "? 未验证代码实现"
+        else:
+            annotation_title = f"[{status}] {detail[:80]}" if detail else f"[{status}]"
+
+        # 添加为子节点标注
+        annotation_node = ChecklistNode(
+            node_id=f"{node_id}_code_consistency",
+            title=annotation_title,
+            node_type="annotation",
+            source="code_analysis",
+            hidden=False,
+            children=[],
+        )
+        node.children.append(annotation_node)
+
+    # 递归处理子节点
+    for child in node.children:
+        _apply_code_consistency_to_xmind_node(child, consistency_lookup)
+
+    return node
 
 
 class DraftWriterNode:
