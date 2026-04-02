@@ -10,7 +10,6 @@ import pytest
 
 from app.domain.mr_models import (
     CodebaseSource,
-    ConsistencyIssue,
     MRAnalysisResult,
     MRCodeFact,
     MRDiffFile,
@@ -133,77 +132,48 @@ def test_mr_analyzer_runs_local_analysis_synchronously(
     assert result[result_key].mr_summary == "更新登录逻辑"
 
 
-def test_mr_analyzer_runs_one_coco_task_per_fact_and_updates_fact_todo(monkeypatch) -> None:
+def test_mr_analyzer_runs_single_coco_task_and_keeps_research_output_unchanged(monkeypatch) -> None:
     from app.services import coco_client as coco_client_module
 
-    calls: list[str] = []
+    calls: list[dict[str, str]] = []
 
-    async def _fake_run_mr_fact_task(self, *, fact, mr_context, changed_files_summary):
-        del self, mr_context, changed_files_summary
-        calls.append(fact.fact_id)
-        await asyncio.sleep(0.05 if fact.fact_id == "FACT-001" else 0.01)
-
-        if fact.fact_id == "FACT-001":
-            return (
-                MRAnalysisResult(
-                    mr_summary="更新 campaign length 校验",
-                    changed_modules=["schedule"],
-                    code_facts=[
-                        MRCodeFact(
-                            fact_id="MR-FACT-001",
-                            description="Custom lineup 最短天数校验调整为 7 天",
-                            source_file="apps/rf-creation/src/constants/schedule-budget.ts",
-                            fact_type="boundary",
-                            related_prd_fact_ids=["FACT-001"],
-                        )
-                    ],
-                ),
-                coco_client_module.Task1FactRevisionItem(
-                    fact_id="FACT-001",
-                    status="confirmed",
-                    confidence=0.94,
-                ),
-                {"task_id": "task-fact-001"},
-            )
-
+    async def _fake_run_mr_analysis_task(self, *, mr_context, prd_summary, changed_files_summary):
+        del self
+        calls.append(
+            {
+                "mr_url": mr_context["mr_url"],
+                "branch": mr_context["branch"],
+                "prd_summary": prd_summary,
+                "changed_files_summary": changed_files_summary,
+            }
+        )
+        await asyncio.sleep(0.01)
         return (
             MRAnalysisResult(
-                mr_summary="frequency cap 默认值仍未更新",
-                changed_modules=["frequency-cap"],
+                mr_summary="提取到 Pulse lineup 的排期与频控改动",
+                changed_modules=["schedule", "frequency-cap"],
                 code_facts=[
                     MRCodeFact(
+                        fact_id="MR-FACT-001",
+                        description="Custom lineup 最短天数校验调整为 7 天",
+                        source_file="apps/rf-creation/src/constants/schedule-budget.ts",
+                        fact_type="boundary",
+                    ),
+                    MRCodeFact(
                         fact_id="MR-FACT-002",
-                        description="Custom lineup frequency cap 默认值仍为 3/7days",
+                        description="Custom lineup 默认 frequency cap 调整为 4/1",
                         source_file="apps/rf-creation/src/constants/frequency.ts",
                         fact_type="state_change",
-                        related_prd_fact_ids=["FACT-002"],
-                    )
-                ],
-                consistency_issues=[
-                    ConsistencyIssue(
-                        issue_id="CONSIST-001",
-                        severity="major",
-                        prd_expectation="默认 frequency cap 必须为 4 impressions per 1 day",
-                        mr_implementation="当前默认 frequency cap 仍为 3 impressions per 7 days",
-                        discrepancy="默认值未按需求更新",
-                        confidence=0.93,
-                    )
+                    ),
                 ],
             ),
-            coco_client_module.Task1FactRevisionItem(
-                fact_id="FACT-002",
-                status="mismatch",
-                todo="代码当前默认值仍为 3 impressions per 7 days，生成 checklist 时保留 TODO 并覆盖默认值与提交流程",
-                actual_implementation="UI 默认 frequency cap 仍展示为 3 impressions per 7 days",
-                confidence=0.93,
-            ),
-            {"task_id": "task-fact-002"},
+            {"task_id": "task-mr-analysis"},
         )
 
     monkeypatch.setattr(
         coco_client_module.CocoClient,
-        "run_mr_fact_task",
-        _fake_run_mr_fact_task,
+        "run_mr_analysis_task",
+        _fake_run_mr_analysis_task,
     )
 
     node = build_mr_analyzer_node(
@@ -249,9 +219,14 @@ def test_mr_analyzer_runs_one_coco_task_per_fact_and_updates_fact_todo(monkeypat
     result = node(state)
     elapsed = time.monotonic() - started
 
-    assert calls == ["FACT-001", "FACT-002"]
+    assert len(calls) == 1
+    assert calls[0]["mr_url"] == "https://example.com/mr/123"
+    assert calls[0]["branch"] == "feat/pulse-setup"
+    assert "FACT-001" in calls[0]["prd_summary"]
+    assert "FACT-002" in calls[0]["prd_summary"]
     assert elapsed < 0.1
     assert len(result["mr_code_facts"]) == 2
+    assert result["mr_consistency_issues"] == []
+    assert result["research_output"] is state["research_output"]
     assert result["research_output"].facts[0].code_todo == ""
-    assert "3 impressions per 7 days" in result["research_output"].facts[1].code_todo
-    assert result["research_output"].facts[1].code_consistency_status == "mismatch"
+    assert result["research_output"].facts[1].code_consistency_status == ""

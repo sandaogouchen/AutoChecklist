@@ -126,19 +126,6 @@ class RelatedSnippetItem(BaseModel):
     relation_type: str = "caller"
 
 
-class Task1FactRevisionItem(BaseModel):
-    """Task 1 — 单个 PRD fact 的代码修订结果。"""
-
-    fact_id: str = ""
-    status: str = "confirmed"
-    revised_description: str = ""
-    revised_requirement: str = ""
-    revised_branch_hint: str = ""
-    todo: str = ""
-    actual_implementation: str = ""
-    confidence: float = 0.0
-
-
 class Task1Response(BaseModel):
     """Task 1 Coco 响应的完整 Schema（MR 代码 case 生成）。"""
 
@@ -147,7 +134,6 @@ class Task1Response(BaseModel):
     code_facts: list[CodeFactItem] = Field(default_factory=list)
     consistency_issues: list[ConsistencyIssueItem] = Field(default_factory=list)
     related_code_snippets: list[RelatedSnippetItem] = Field(default_factory=list)
-    fact_revision: Task1FactRevisionItem | None = None
 
 
 class Task2Response(BaseModel):
@@ -198,6 +184,23 @@ class CocoClient:
             "Content-Type": "application/json",
             "X-Code-User-JWT": self._jwt_token,
         }
+
+    @staticmethod
+    def _parse_http_error(exc: httpx.HTTPStatusError) -> tuple[int, str, str]:
+        """提取 HTTP 错误中的状态码、业务错误码和响应体。"""
+        response_text = exc.response.text.strip()
+        error_code = ""
+        try:
+            payload = exc.response.json()
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            error_code = (
+                payload.get("ResponseMetadata", {})
+                .get("Error", {})
+                .get("Code", "")
+            )
+        return exc.response.status_code, error_code, response_text[:1000]
 
     @staticmethod
     def _resolve_agent_name(agent_name: str | None) -> str:
@@ -309,6 +312,66 @@ class CocoClient:
             raise CocoTaskError(f"Coco API 响应异常: 缺少 Result 字段, action={action}")
         return data["Result"]
 
+    async def _collect_task_messages_via_sse(
+        self,
+        task_id: str,
+        timeout: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """通过 SSE 订阅收集 full_message 事件中的消息。"""
+        url = f"{self._base_url.rstrip('/')}/?Action=SubscribeCopilotTaskEvents"
+        max_wait = max(float(timeout or self._timeout), 10.0)
+        messages: list[dict[str, Any]] = []
+        logger.info("开始订阅 Coco SSE: task_id=%s, timeout=%.1fs", task_id, max_wait)
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=max_wait, write=30.0, pool=30.0)) as client:
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers=self._headers(),
+                    json={"TaskId": task_id},
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        line = (line or "").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw_payload = line[len("data:"):].strip()
+                        if not raw_payload:
+                            continue
+                        try:
+                            payload = json.loads(raw_payload)
+                        except json.JSONDecodeError:
+                            logger.debug("Coco SSE 事件解析失败: task_id=%s, payload=%s", task_id, raw_payload[:500])
+                            continue
+
+                        event = payload.get("Event", {})
+                        event_type = event.get("Type", "")
+                        detail = event.get("Detail", {})
+
+                        if event_type == "full_message":
+                            message = detail.get("FullMessage", {}).get("Message", {})
+                            if message:
+                                messages.append(message)
+                            continue
+
+                        if event_type == "task_status_update":
+                            update = detail.get("TaskStatusUpdate", {})
+                            if update.get("Final"):
+                                logger.info(
+                                    "Coco SSE 结束: task_id=%s, final_status=%s, messages=%d",
+                                    task_id,
+                                    update.get("Status", ""),
+                                    len(messages),
+                                )
+                                break
+        except httpx.HTTPError as exc:
+            logger.warning("Coco SSE 订阅失败: task_id=%s, error=%s", task_id, exc)
+            return []
+
+        logger.info("Coco SSE 收集完成: task_id=%s, messages=%d", task_id, len(messages))
+        return messages
+
     # ------------------------------------------------------------------
     # Task 发送
     # ------------------------------------------------------------------
@@ -401,13 +464,51 @@ class CocoClient:
         max_wait = timeout or self._timeout
         start = time.monotonic()
         poll_interval = self._poll_start
+        not_found_grace_window = min(max_wait, 15)
 
         logger.info("开始轮询 Coco 任务: task_id=%s, timeout=%ds", task_id, max_wait)
 
         while time.monotonic() - start < max_wait:
             try:
                 result = await self._post("GetCopilotTask", {"TaskId": task_id})
-            except Exception as exc:
+            except httpx.HTTPStatusError as exc:
+                status_code, error_code, response_text = self._parse_http_error(exc)
+                elapsed = time.monotonic() - start
+                if status_code == 404 and error_code == "NotFound.Task":
+                    if elapsed < not_found_grace_window:
+                        logger.warning(
+                            "Coco 任务暂不可见: task_id=%s, elapsed=%.1fs, 将重试",
+                            task_id,
+                            elapsed,
+                        )
+                        await asyncio.sleep(poll_interval)
+                        poll_interval = min(poll_interval + 5, self._poll_max)
+                        continue
+                    raise CocoTaskError(
+                        (
+                            f"Coco 任务 {task_id} 查询失败: "
+                            "GetCopilotTask 返回 NotFound.Task；"
+                            "当前 task_id 可能并非可查询的实际任务 ID"
+                        ),
+                        task_id=task_id,
+                        status="not_found",
+                    ) from exc
+
+                if 400 <= status_code < 500:
+                    raise CocoTaskError(
+                        (
+                            f"Coco 任务 {task_id} 查询失败: HTTP {status_code}"
+                            + (f", code={error_code}" if error_code else "")
+                            + (f", response={response_text}" if response_text else "")
+                        ),
+                        task_id=task_id,
+                    ) from exc
+
+                logger.warning("Coco 轮询请求失败: %s, 将重试", exc)
+                await asyncio.sleep(poll_interval)
+                poll_interval = min(poll_interval + 5, self._poll_max)
+                continue
+            except httpx.HTTPError as exc:
                 logger.warning("Coco 轮询请求失败: %s, 将重试", exc)
                 await asyncio.sleep(poll_interval)
                 poll_interval = min(poll_interval + 5, self._poll_max)
@@ -417,12 +518,20 @@ class CocoClient:
             status = task.get("Status", "")
             elapsed = time.monotonic() - start
 
-            logger.debug(
+            logger.info(
                 "Coco 任务状态: task_id=%s, status=%s, elapsed=%.1fs",
                 task_id, status, elapsed,
             )
 
             if status == "completed":
+                messages = await self._collect_task_messages_via_sse(
+                    task_id,
+                    timeout=max(10, int(max_wait - elapsed)),
+                )
+                if messages:
+                    task = {**task, "Messages": messages}
+                else:
+                    logger.warning("Coco 任务完成但 SSE 未拿到消息: task_id=%s", task_id)
                 logger.info("Coco 任务完成: task_id=%s, elapsed=%.1fs", task_id, elapsed)
                 return task
 
@@ -449,7 +558,7 @@ class CocoClient:
         """从 Coco 任务结果中提取 assistant 回复文本。"""
         messages = task.get("Messages", [])
         for msg in reversed(messages):
-            if msg.get("Role") == "assistant":
+            if msg.get("Role") in {"assistant", "agent"}:
                 parts = msg.get("Parts", [])
                 if parts:
                     text_obj = parts[0].get("Text", {})
@@ -468,7 +577,9 @@ class CocoClient:
             解析后的 MRAnalysisResult。
         """
         parsed, meta = await self.extract_task1_payload(task)
-        return self._map_task1_to_result(parsed, meta)
+        result = self._map_task1_to_result(parsed, meta)
+        result.consistency_issues = []
+        return result
 
     async def extract_task1_payload(
         self,
@@ -549,21 +660,21 @@ class CocoClient:
             search_trace=search_trace,
         )
 
-    async def run_mr_fact_task(
+    async def run_mr_analysis_task(
         self,
         *,
-        fact: Any,
         mr_context: dict[str, str],
+        prd_summary: str,
         changed_files_summary: str,
-    ) -> tuple[MRAnalysisResult, Task1FactRevisionItem, dict[str, Any]]:
-        """Task 1 — 针对单个 fact 执行 Coco MR 分析。"""
-        from app.nodes.mr_analyzer import _build_coco_task1_prompt_for_fact
+    ) -> tuple[MRAnalysisResult, dict[str, Any]]:
+        """Task 1 — 对单个 MR 上下文执行一次 Coco MR 分析。"""
+        from app.nodes.mr_analyzer import _build_coco_task1_prompt
 
-        prompt = _build_coco_task1_prompt_for_fact(
+        prompt = _build_coco_task1_prompt(
             mr_url=mr_context.get("mr_url", ""),
             git_url=mr_context.get("git_url", ""),
             branch=mr_context.get("branch", ""),
-            fact=fact,
+            prd_summary=prd_summary,
             changed_files_summary=changed_files_summary,
         )
         task_id = await self.send_task(
@@ -572,21 +683,18 @@ class CocoClient:
             git_url=mr_context.get("git_url", ""),
         )
         task = await self.poll_task(task_id)
-        parsed, meta = await self.extract_task1_payload(task)
-        result = self._map_task1_to_result(parsed, meta)
-        revision = parsed.fact_revision or Task1FactRevisionItem(
-            fact_id=getattr(fact, "fact_id", ""),
-            status="confirmed",
-            confidence=0.0,
+        result = await self.extract_result(task)
+        logger.info(
+            "Coco Task1 MR 分析完成: task_id=%s, summary=%s, code_facts=%d",
+            task_id,
+            (result.mr_summary or "")[:60],
+            len(result.code_facts),
         )
-        if not revision.fact_id:
-            revision.fact_id = getattr(fact, "fact_id", "")
-        return result, revision, {
+        return result, {
             "prompt": prompt,
             "task_id": task_id,
             "task": task,
             "result": result,
-            "fact_revision": revision,
         }
 
     # ------------------------------------------------------------------

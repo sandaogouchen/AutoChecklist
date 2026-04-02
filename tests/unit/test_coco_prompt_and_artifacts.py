@@ -13,7 +13,6 @@ from app.nodes.mr_analyzer import (
     _build_candidate_module_summary,
     _build_candidate_module_summary_for_fact,
     _build_coco_task1_prompt,
-    _build_coco_task1_prompt_for_fact,
     _build_prd_summary,
     _normalize_codebase_context,
 )
@@ -32,31 +31,9 @@ def test_task1_prompt_mentions_repo_branch_and_analysis_flow() -> None:
     assert "分支" in prompt
     assert "feat/pulse-setup" in prompt
     assert "先定位与场景相关的模块" in prompt
-    assert "再结合代码逻辑判断是否符合预期" in prompt
-
-
-def test_task1_fact_prompt_focuses_single_fact_and_requests_revision() -> None:
-    prompt = _build_coco_task1_prompt_for_fact(
-        mr_url="https://example.com/org/repo/merge_requests/1",
-        git_url="https://example.com/org/repo.git",
-        branch="feat/pulse-setup",
-        fact=ResearchFact(
-            fact_id="FACT-001",
-            description="Campaign length 最短支持 7 天",
-            requirement="最短 campaign length 必须从 14 天下调为 7 天",
-            branch_hint="边界值校验分支（<7, =7, >7）",
-        ),
-        changed_files_summary="[显式代码变更]\napps/rf-creation/src/constants/schedule-budget.ts",
-    )
-
-    assert "FACT-001" in prompt
-    assert "Campaign length 最短支持 7 天" in prompt
-    assert "fact_revision" in prompt
-    assert '"todo"' in prompt
-    assert "Branch: feat/pulse-setup" in prompt
-    assert "核心任务只有一个" in prompt
-    assert "只返回支撑结论所必需的信息" in prompt
-    assert "不要混入其他 FACT" in prompt
+    assert "提炼可用于 checklist / checkpoint 设计的代码事实" in prompt
+    assert "code_facts" in prompt
+    assert "fact_revision" not in prompt
 
 
 def test_fact_candidate_summary_only_keeps_current_fact_related_context() -> None:

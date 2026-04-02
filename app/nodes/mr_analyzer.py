@@ -4,7 +4,7 @@
 负责三个阶段的处理：
 - 阶段 1：MR Diff 解析与变更摘要
 - 阶段 2：Agentic Search（LLM Tool Calling + AST 分析）
-- 阶段 3：代码级 Fact 提取 + PRD ↔ MR 一致性校验
+- 阶段 3：代码级 Fact 提取，用于补充 checkpoint / checklist 设计线索
 
 支持前后端 MR 分离分析，以及 Coco Agent 委托路径。
 """
@@ -154,7 +154,7 @@ _PHASE3_EXTRACT_PROMPT = """\
 """
 
 _COCO_TASK1_PROMPT = """\
-你是一名资深 QA 工程师，请分析以下仓库分支上的 MR 代码变更并给出可用于测试设计的结论。
+你是一名资深 QA 工程师，请分析以下仓库分支上的 MR 代码变更，并提炼可用于 checklist / checkpoint 设计的代码事实。
 
 [代码仓库]
 - MR URL: {mr_url}
@@ -169,59 +169,20 @@ _COCO_TASK1_PROMPT = """\
 
 请严格按以下顺序执行：
 1. 先定位与场景相关的模块、入口函数、调用链和配置定义。
-2. 再结合代码逻辑判断是否符合预期；判断当前实现是否符合场景预期时，不要只复述 MR 标题。
+2. 结合 MR 实现提炼补充测试线索，不要逐条判断 FACT 是否实现，也不要生成 fact 修订结论。
 3. 对每个结论给出明确的代码依据；若无法确认，说明缺失的代码上下文。
 4. 输出代码级 fact 时优先覆盖分支、边界、错误处理、状态变化、副作用。
+5. 只保留对后续生成 checklist / checkpoint 真正有帮助的信息，避免重复复述 PRD。
+6. 结果必须精简，总输出尽量控制在 1200 中文字符内。
+7. 不要返回大段代码；若必须引用代码，片段控制在 160 字以内。
+8. `changed_modules` 最多 3 个，`code_facts` 最多 5 条，`related_code_snippets` 最多 2 条。
 
 请严格按以下 JSON 格式输出：
 {{
-  "mr_summary": "MR 变更摘要",
-  "changed_modules": ["模块1", "模块2"],
-  "code_facts": [{{"fact_id": "...", "description": "...", "source_file": "...", "fact_type": "..."}}],
-  "consistency_issues": [{{"issue_id": "...", "severity": "...", "prd_expectation": "...", "mr_implementation": "...", "discrepancy": "...", "confidence": 0.0}}],
-  "related_code_snippets": [{{"file_path": "...", "code_content": "...", "relation_type": "..."}}]
-}}
-"""
-
-_COCO_TASK1_FACT_PROMPT = """\
-你是一名资深 QA 工程师，请只围绕下面这一条 FACT 分析当前 MR/分支中的代码实现。
-
-核心任务只有一个：校验这个预期是否被正确实现；如果不是，就指出当前代码里的实际实现结果，并给出一个可透传到 checklist 的 TODO。
-
-[代码仓库]
-- MR URL: {mr_url}
-- Git URL: {git_url}
-- Branch: {branch}
-
-[当前 FACT]
-{fact_summary}
-
-[当前 FACT 相关模块 / 锚点]
-{changed_files_summary}
-
-请严格按以下顺序执行：
-1. 先定位与该 FACT 最相关的模块、入口函数、调用链和配置定义。
-2. 只结合当前 FACT 判断代码是否符合预期；不要混入其他 FACT 的结论。
-3. 只返回支撑结论所必需的信息；如果没有直接证据，不要臆测。
-4. 若当前实现与 FACT 不一致，请直接给出面向后续 checklist 生成的修订说明和 TODO。
-
-请严格按以下 JSON 格式输出：
-{{
-  "mr_summary": "一句话说明当前 FACT 是否已实现",
-  "changed_modules": ["只保留直接相关的模块，通常 0-2 个"],
-  "code_facts": [{{"fact_id": "...", "description": "...", "source_file": "...", "code_snippet": "...", "fact_type": "...", "related_prd_fact_ids": ["{fact_id}"]}}],
-  "consistency_issues": [{{"issue_id": "...", "severity": "...", "prd_expectation": "...", "mr_implementation": "...", "discrepancy": "...", "confidence": 0.0}}],
-  "related_code_snippets": [{{"file_path": "...", "code_content": "...", "relation_type": "..."}}],
-  "fact_revision": {{
-    "fact_id": "{fact_id}",
-    "status": "confirmed | mismatch | unverified",
-    "revised_description": "必要时修订后的描述，没有则返回空字符串",
-    "revised_requirement": "必要时修订后的预期/约束，没有则返回空字符串",
-    "revised_branch_hint": "必要时修订后的分支提示，没有则返回空字符串",
-    "todo": "若代码与预期不一致，需要透传到 checklist 的 TODO；一致时为空字符串",
-    "actual_implementation": "当前代码中的实际实现描述",
-    "confidence": 0.0
-  }}
+  "mr_summary": "不超过 80 字的 MR 变更摘要",
+  "changed_modules": ["最多 3 个直接相关模块"],
+  "code_facts": [{{"fact_id": "...", "description": "不超过 80 字", "source_file": "...", "code_snippet": "最多 160 字", "fact_type": "..."}}],
+  "related_code_snippets": [{{"file_path": "...", "code_content": "最多 200 字", "relation_type": "..."}}]
 }}
 """
 
@@ -386,25 +347,6 @@ def _build_coco_task1_prompt(
         git_url=git_url or "unknown",
         branch=branch or "unknown",
         prd_summary=prd_summary,
-        changed_files_summary=changed_files_summary or "（无显式变更文件摘要）",
-    )
-
-
-def _build_coco_task1_prompt_for_fact(
-    mr_url: str,
-    git_url: str,
-    branch: str,
-    fact: ResearchFact,
-    changed_files_summary: str,
-) -> str:
-    """构建单 fact 的 Coco Task 1 提示词。"""
-    fact_summary = _format_fact_summary(fact)
-    return _COCO_TASK1_FACT_PROMPT.format(
-        mr_url=mr_url,
-        git_url=git_url or "unknown",
-        branch=branch or "unknown",
-        fact_id=fact.fact_id or "FACT-UNKNOWN",
-        fact_summary=fact_summary,
         changed_files_summary=changed_files_summary or "（无显式变更文件摘要）",
     )
 
@@ -579,23 +521,6 @@ def _get_value(item: Any, *keys: str) -> str:
     return ""
 
 
-def _format_fact_summary(fact: ResearchFact) -> str:
-    """将单个 ResearchFact 格式化为 prompt 段落。"""
-    lines = [
-        f"- Fact ID: {fact.fact_id or 'FACT-UNKNOWN'}",
-        f"- 场景/动作: {fact.description}",
-    ]
-    if fact.requirement:
-        lines.append(f"- 预期/约束: {fact.requirement}")
-    if fact.branch_hint:
-        lines.append(f"- 分支提示: {fact.branch_hint}")
-    if fact.code_actual_implementation:
-        lines.append(f"- 当前代码实现: {fact.code_actual_implementation}")
-    if fact.code_todo:
-        lines.append(f"- TODO: {fact.code_todo}")
-    return "\n".join(lines)
-
-
 def _get_research_output(state: dict[str, Any]) -> ResearchOutput | None:
     """从 state 中读取 ResearchOutput。"""
     research = state.get("research_output")
@@ -604,31 +529,6 @@ def _get_research_output(state: dict[str, Any]) -> ResearchOutput | None:
     if isinstance(research, dict):
         return ResearchOutput.model_validate(research)
     return None
-
-
-def _apply_fact_revision(
-    fact: ResearchFact,
-    revision: Any,
-) -> ResearchFact:
-    """将 per-fact Coco 校验结果回写到 ResearchFact。"""
-    update_fields: dict[str, Any] = {
-        "code_todo": getattr(revision, "todo", "") or "",
-        "code_actual_implementation": getattr(revision, "actual_implementation", "") or "",
-        "code_consistency_status": getattr(revision, "status", "") or "",
-        "code_consistency_confidence": getattr(revision, "confidence", 0.0) or 0.0,
-    }
-
-    revised_description = getattr(revision, "revised_description", "") or ""
-    revised_requirement = getattr(revision, "revised_requirement", "") or ""
-    revised_branch_hint = getattr(revision, "revised_branch_hint", "") or ""
-    if revised_description:
-        update_fields["description"] = revised_description
-    if revised_requirement:
-        update_fields["requirement"] = revised_requirement
-    if revised_branch_hint:
-        update_fields["branch_hint"] = revised_branch_hint
-
-    return fact.model_copy(update=update_fields)
 
 
 def _dedupe_text_items(values: list[str]) -> list[str]:
@@ -720,8 +620,6 @@ async def _analyze_via_coco(
     )
     diff_files = getattr(state.get("mr_input"), "diff_files", []) or []
     changed_files_summary = _build_candidate_module_summary(state, diff_files)[:2000]
-    research_output = _get_research_output(state)
-    research_facts = list(research_output.facts) if research_output else []
     coco_dir = _get_coco_dir(state)
     start_time = time.monotonic()
     try:
@@ -731,113 +629,27 @@ async def _analyze_via_coco(
             "branch": branch,
         }
         artifacts_to_record: dict[str, Path] = {}
-
-        if research_facts:
-            async def _run_single_fact(fact: ResearchFact) -> tuple[ResearchFact, MRAnalysisResult, Any, dict[str, Any]]:
-                result, revision, artifacts = await client.run_mr_fact_task(
-                    fact=fact,
-                    mr_context=mr_context,
-                    changed_files_summary=_build_candidate_module_summary_for_fact(
-                        state,
-                        diff_files,
-                        fact,
-                    )[:2000],
-                )
-                return fact, result, revision, artifacts
-
-            fact_results = await asyncio.gather(
-                *[_run_single_fact(fact) for fact in research_facts]
-            )
-
-            updated_facts: list[ResearchFact] = []
-            summaries: list[str] = []
-            changed_modules: list[str] = []
-            code_facts: list[MRCodeFact] = []
-            consistency_issues: list[ConsistencyIssue] = []
-            related_snippets: list[RelatedCodeSnippet] = []
-            task_ids: list[str] = []
-
-            for fact, partial_result, revision, artifacts in fact_results:
-                updated_facts.append(_apply_fact_revision(fact, revision))
-                if partial_result.mr_summary:
-                    summaries.append(partial_result.mr_summary)
-                changed_modules.extend(partial_result.changed_modules)
-
-                for code_fact in partial_result.code_facts:
-                    if not code_fact.related_prd_fact_ids:
-                        code_fact.related_prd_fact_ids = [fact.fact_id]
-                    code_facts.append(code_fact)
-
-                consistency_issues.extend(partial_result.consistency_issues)
-                related_snippets.extend(partial_result.related_code_snippets)
-
-                if coco_dir is not None:
-                    fact_key = fact.fact_id or f"fact_{len(updated_facts):03d}"
-                    prompt_path = write_text(
-                        coco_dir / f"task1_{side}_{fact_key}_prompt.txt",
-                        artifacts.get("prompt", ""),
-                    )
-                    result_path = write_json(
-                        coco_dir / f"task1_{side}_{fact_key}_result.json",
-                        partial_result,
-                    )
-                    revision_path = write_json(
-                        coco_dir / f"task1_{side}_{fact_key}_fact_revision.json",
-                        revision,
-                    )
-                    task_path = write_json(
-                        coco_dir / f"task1_{side}_{fact_key}_task.json",
-                        artifacts.get("task", {}),
-                    )
-                    artifacts_to_record[f"task1_{side}_{fact_key}_prompt"] = prompt_path
-                    artifacts_to_record[f"task1_{side}_{fact_key}_result"] = result_path
-                    artifacts_to_record[f"task1_{side}_{fact_key}_fact_revision"] = revision_path
-                    artifacts_to_record[f"task1_{side}_{fact_key}_task"] = task_path
-                task_id = artifacts.get("task_id", "")
-                if task_id:
-                    task_ids.append(task_id)
-
-            if research_output is not None:
-                updated_research_output = research_output.model_copy(update={"facts": updated_facts})
-                state["research_output"] = updated_research_output
-
-            result = MRAnalysisResult(
-                mr_summary="\n".join(_dedupe_text_items(summaries)),
-                changed_modules=_dedupe_text_items(changed_modules),
-                code_facts=code_facts,
-                consistency_issues=consistency_issues,
-                related_code_snippets=_dedupe_related_snippets(related_snippets),
-                search_trace=["via_coco_agent", f"per_fact_tasks={len(fact_results)}"],
-            )
-            if coco_dir is not None:
-                aggregate_path = write_json(coco_dir / f"task1_{side}_result.json", result)
-                artifacts_to_record[f"task1_{side}_result"] = aggregate_path
-        else:
-            prd_summary = _build_prd_summary(state)
-            prompt = _build_coco_task1_prompt(
-                mr_url=mr_config.mr_url,
-                git_url=git_url,
-                branch=branch,
-                prd_summary=prd_summary[:3000],
-                changed_files_summary=changed_files_summary,
-            )
-            if coco_dir is not None:
-                prompt_path = write_text(coco_dir / f"task1_{side}_prompt.txt", prompt)
-                artifacts_to_record[f"task1_{side}_prompt"] = prompt_path
-
-            task_id = await client.send_task(
-                prompt=prompt,
-                mr_url=mr_config.mr_url,
-                git_url=git_url,
-            )
-            task = await client.poll_task(task_id)
-            result = await client.extract_result(task)
-            task_ids = [task_id]
-            if coco_dir is not None:
-                task_path = write_json(coco_dir / f"task1_{side}_task.json", task)
-                result_path = write_json(coco_dir / f"task1_{side}_result.json", result)
-                artifacts_to_record[f"task1_{side}_task"] = task_path
-                artifacts_to_record[f"task1_{side}_result"] = result_path
+        prd_summary = _build_prd_summary(state)
+        logger.info(
+            "Coco Task 1 [%s] 开始: branch=%s, has_prd_summary=%s",
+            side,
+            branch,
+            bool(prd_summary.strip()),
+        )
+        result, artifacts = await client.run_mr_analysis_task(
+            mr_context=mr_context,
+            prd_summary=prd_summary[:3000],
+            changed_files_summary=changed_files_summary,
+        )
+        task_id = artifacts.get("task_id", "")
+        task_ids = [task_id] if task_id else []
+        if coco_dir is not None:
+            prompt_path = write_text(coco_dir / f"task1_{side}_prompt.txt", artifacts.get("prompt", ""))
+            task_path = write_json(coco_dir / f"task1_{side}_task.json", artifacts.get("task", {}))
+            result_path = write_json(coco_dir / f"task1_{side}_result.json", result)
+            artifacts_to_record[f"task1_{side}_prompt"] = prompt_path
+            artifacts_to_record[f"task1_{side}_task"] = task_path
+            artifacts_to_record[f"task1_{side}_result"] = result_path
 
         elapsed = time.monotonic() - start_time
         if coco_dir is not None:
