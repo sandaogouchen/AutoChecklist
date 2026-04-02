@@ -112,3 +112,88 @@ builder.add_edge(prev_node, "context_research")
 1. **零侵入**: 当 `knowledge_retrieval_node=None` 时，工作流拓扑与 PR #24 前完全一致
 2. **`prev_node` 模式优雅**: 相比硬编码 if/else 组合拓扑，链式变量追踪更具扩展性——后续新增节点只需追加同样的三行代码
 3. **维护成本**: 与 `project_context_loader` 共享同一模式，维护一致性好
+
+## §6 PR #36 变更 — MR 分析节点接入工作流
+
+> 同步自 PR #36 `feat/mr-code-analysis-integration`
+
+PR #36 修改了 `case_generation.py` 和 `main_workflow.py`，将 MR 分析的 3 个新节点接入工作流拓扑。
+
+### §6.1 修改文件：case_generation.py
+
+**变更：** 子图拓扑新增 3 个条件节点。
+
+**更新后的拓扑：**
+
+```
+scenario_planner → checkpoint_generator → checkpoint_evaluator →
+  [mr_analyzer] → [mr_checkpoint_injector] →
+  checkpoint_outline_planner → evidence_mapper → draft_writer →
+  structure_assembler → [coco_consistency_validator]
+```
+
+**条件节点接入方式：**
+
+```python
+# mr_analyzer 和 mr_checkpoint_injector 插入在 checkpoint_evaluator 之后
+if mr_analyzer_node is not None:
+    builder.add_edge("checkpoint_evaluator", "mr_analyzer")
+    builder.add_edge("mr_analyzer", "mr_checkpoint_injector")
+    builder.add_edge("mr_checkpoint_injector", "checkpoint_outline_planner")
+else:
+    builder.add_edge("checkpoint_evaluator", "checkpoint_outline_planner")
+
+# coco_consistency_validator 追加在 structure_assembler 之后
+if coco_validator_node is not None:
+    builder.add_edge("structure_assembler", "coco_consistency_validator")
+    # coco_consistency_validator 成为新的子图出口
+```
+
+**拓扑组合矩阵：**
+
+| MR 节点 | Coco 节点 | 实际拓扑 |
+|---------|-----------|---------|
+| 无 | 无 | 原有 7 节点线性流水线（完全向后兼容） |
+| 有 | 无 | checkpoint_evaluator → mr_analyzer → mr_checkpoint_injector → checkpoint_outline_planner ... |
+| 无 | 有 | ... → structure_assembler → coco_consistency_validator |
+| 有 | 有 | 完整 10 节点流水线 |
+
+**设计说明：**
+- 采用与 PR #24 `knowledge_retrieval_node` 相同的可选节点注入模式
+- `mr_analyzer` 和 `mr_checkpoint_injector` 作为一组插入（MR 分析必然伴随 checkpoint 注入）
+- `coco_consistency_validator` 独立插入，支持无 MR 场景下的独立一致性验证（理论可扩展）
+- 子图出口动态调整：有 coco 节点时出口为 `coco_consistency_validator`，否则为 `structure_assembler`
+
+### §6.2 修改文件：main_workflow.py
+
+**变更：** 桥接函数新增 MR 分析字段的传入与传出映射。
+
+**新增桥接字段：**
+
+| 字段 | 方向 | 说明 |
+|------|------|------|
+| `mr_analysis_result` | GlobalState → CaseGenState | MR 分析结果传入子图 |
+| `mr_code_facts` | GlobalState ↔ CaseGenState | 双向：初始传入 + 子图内补充后回写 |
+| `code_consistency_checks` | CaseGenState → GlobalState | 一致性校验结果回传主图 |
+
+**`_build_case_generation_bridge()` 更新：**
+- 传入映射：增加 `mr_analysis_result`、`mr_code_facts` 两个字段的 `state.get()` 提取
+- 传出映射：增加 `mr_code_facts`（可能在子图内被 agentic search 补充）和 `code_consistency_checks` 的回写
+- None 安全：与 `mandatory_skeleton` 字段一致，使用 `{k: v for k, v in ... if v is not None}` 清理
+
+**`build_workflow()` 签名变更：**
+
+```python
+# 修改前
+build_workflow(llm_client, project_context_loader=None, knowledge_retrieval_node=None)
+
+# 修改后
+build_workflow(llm_client, project_context_loader=None, knowledge_retrieval_node=None,
+               mr_analyzer_node=None, mr_checkpoint_injector_node=None,
+               coco_validator_node=None)
+```
+
+**设计评价：**
+1. **参数膨胀**：`build_workflow` 已有 6 个参数（含 self），可选节点参数持续增长。建议后续重构为 `WorkflowConfig` 配置对象
+2. **桥接维护成本**：新增 3 个字段映射，手动维护成本进一步增加。技术债务 #8（状态桥接手动维护）的影响加深
+3. **双向映射**：`mr_code_facts` 是首个需要双向映射的字段（传入 + 回写），增加了桥接的复杂度。此前 `mandatory_skeleton` 为单向传入，`optimized_tree` 和 `test_cases` 为单向传出

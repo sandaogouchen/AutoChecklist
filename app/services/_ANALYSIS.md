@@ -86,8 +86,8 @@ PR #23 对 `CheckpointOutlinePlanner` 进行了重大增强，引入双重约束
 **plan() 方法变更：**
 - 签名新增可选参数：`mandatory_skeleton: MandatorySkeletonNode | None = None`
 - 当 `mandatory_skeleton` 非 None 时：
-1. **软约束注入**：在 `_OUTLINE_SYSTEM_PROMPT` 和 `_PATH_SYSTEM_PROMPT` 末尾追加 `_MANDATORY_CONSTRAINT_TEMPLATE`
-2. **硬约束后处理**：LLM 输出后调用 `_enforce_mandatory_skeleton()` 修复
+  1. **软约束注入**：在 `_OUTLINE_SYSTEM_PROMPT` 和 `_PATH_SYSTEM_PROMPT` 末尾追加 `_MANDATORY_CONSTRAINT_TEMPLATE`
+  2. **硬约束后处理**：LLM 输出后调用 `_enforce_mandatory_skeleton()` 修复
 **新增 prompt 模版 — `_MANDATORY_CONSTRAINT_TEMPLATE`：**
 ```
 ## 强制模版约束
@@ -108,14 +108,14 @@ PR #23 对 `CheckpointOutlinePlanner` 进行了重大增强，引入双重约束
 ├── 1. 建立 LLM 树的 node_id → ChecklistNode 索引
 │
 ├── 2. 遍历骨架的每个顶层子节点:
-│ └── _merge_skeleton_node(): 递归合并
-│ ├── 查找 LLM 树中的对应节点
-│ ├── 保留骨架的 id + title (不可变)
-│ ├── 递归处理子骨架节点
-│ └── 保留 LLM 为该节点生成的非骨架子节点
+│   └── _merge_skeleton_node(): 递归合并
+│       ├── 查找 LLM 树中的对应节点
+│       ├── 保留骨架的 id + title (不可变)
+│       ├── 递归处理子骨架节点
+│       └── 保留 LLM 为该节点生成的非骨架子节点
 │
 ├── 3. 收集未被骨架覆盖的 LLM 节点
-│ └── 追加到结果列表（非强制层级的额外节点）
+│   └── 追加到结果列表（非强制层级的额外节点）
 │
 └── 返回: 合并后的 list[ChecklistNode]
 ```
@@ -170,15 +170,15 @@ PR #23 对 `CheckpointOutlinePlanner` 进行了重大增强，引入双重约束
 ```
 compile_and_run()
 ├── 构建 LangGraph subgraph
-│ ├── checkpoint_outline_planner node
-│ ├── evidence_mapper node
-│ ├── draft_writer node
-│ └── structure_assembler node
+│   ├── checkpoint_outline_planner node
+│   ├── evidence_mapper node
+│   ├── draft_writer node
+│   └── structure_assembler node
 ├── invoke subgraph（含迭代循环）
-│ └── IterationController.evaluate_and_decide()
+│   └── IterationController.evaluate_and_decide()
 └── 输出渲染
- ├── MarkdownRenderer → markdown 文件
- └── PlatformDispatcher → xmind 等
+    ├── MarkdownRenderer → markdown 文件
+    └── PlatformDispatcher → xmind 等
 ```
 **设计特点**:
 - 基于 LangGraph 的声明式工作流定义
@@ -230,9 +230,9 @@ compile_and_run()
 **树模式渲染增强：**
 - `_render_tree()` 和 `_render_node()` 传播 `enable_source_labels` 参数
 - `_render_group_node()` 在渲染标题时检查 `node.source` 字段：
- - `source == "template"` → 标题后追加 ` [模版]`
- - `source == "overflow"` → 标题后追加 ` [待分配]`
- - `source == "generated"` → 无额外标签（默认行为）
+  - `source == "template"` → 标题后追加 ` [模版]`
+  - `source == "overflow"` → 标题后追加 ` [待分配]`
+  - `source == "generated"` → 无额外标签（默认行为）
 - 标签渲染受 `enable_source_labels` 参数控制，可通过 `settings.enable_mandatory_source_labels` 全局关闭
 **渲染示例：**
 ```markdown
@@ -280,8 +280,8 @@ compile_and_run()
 **新增全局常量 — `_SOURCE_MARKERS`：**
 ```python
 _SOURCE_MARKERS: dict[str, str] = {
- "template": "flag-blue", # 蓝色旗标 = 模版强制节点
- "overflow": "flag-red", # 红色旗标 = 溢出未匹配节点
+    "template": "flag-blue",   # 蓝色旗标 = 模版强制节点
+    "overflow": "flag-red",    # 红色旗标 = 溢出未匹配节点
 }
 ```
 **变更影响：**
@@ -324,377 +324,150 @@ _SOURCE_MARKERS: dict[str, str] = {
 │
 ├── 1. 提取 mandatory_levels（如 [1, 2]）
 ├── 2. 检查是否存在任何强制约束
-│ ├── mandatory_levels 非空？
-│ └── 任何节点 mandatory == True？
-│ → 均为否则返回 None
+│   ├── mandatory_levels 非空？
+│   └── 任何节点 mandatory == True？
+│   → 均为否则返回 None
 │
 ├── 3. 递归遍历模版树:
-│ 对每个节点 (depth=当前深度):
-│ ├── is_level_mandatory = depth ∈ mandatory_levels
-│ ├── is_node_mandatory = node.mandatory
-│ ├── 递归处理子节点 → skeleton_children
-│ ├── 如果不是强制的且无强制子节点 → 跳过（返回 None）
-│ └── 构建 MandatorySkeletonNode:
-│ id, title, depth, is_mandatory
-│ original_metadata = {priority, note, status, description}
-│ children = skeleton_children
+│   对每个节点 (depth=当前深度):
+│   ├── 规则 1: depth ∈ mandatory_levels → 标记 mandatory
+│   ├── 规则 2: node.mandatory == True → 标记 mandatory
+│   ├── 递归处理子节点
+│   ├── 规则 3: 任何子节点被保留 → 保留当前节点（路径连接）
+│   └── 无子节点被保留且自身非 mandatory → 返回 None（剪枝）
 │
-├── 4. 构建虚拟根节点:
-│ id = "__mandatory_root__"
-│ children = 所有顶层骨架节点
-│
-└── 返回: MandatorySkeletonNode (根节点)
+└── 4. 返回: MandatorySkeletonNode 根节点（或 None）
 ```
-**虚拟根节点设计：**
-- ID 为 `"__mandatory_root__"`，不对应任何模版节点
-- 作为骨架树的统一入口，简化下游消费代码
-- `_serialize_skeleton()` 在序列化时跳过虚拟根，直接输出其子节点
-**original_metadata 保留策略：**
-- 仅在字段非空时保留（避免空值污染 dict）
-- 保留的字段：`priority`、`note`、`status`、`description`
-- 下游 `_merge_skeleton_node()` 从中读取 `priority` 作为合并后节点的优先级
-**示例 — brand_spp_consideration.yaml + mandatory_levels=[1,2]：**
-```
-__mandatory_root__ (depth=0, virtual)
-├── doc (depth=1, mandatory=True ← level 1)
-│ ├── prd (depth=2, mandatory=True ← level 2)
-│ ├── FE-tech-design (depth=2, mandatory=True ← level 2)
-│ ├── BE-tech-design (depth=2, mandatory=True ← level 2)
-│ └── test-plan (depth=2, mandatory=True ← level 2)
-└── create (depth=1, mandatory=True ← level 1)
- ├── campaign (depth=2, mandatory=True ← level 2)
- │ └── campaign-name (depth=3, mandatory=True ← node.mandatory)
- ├── adgroup (depth=2, mandatory=True ← level 2)
- └── ad (depth=2, mandatory=True ← level 2)
-```
-注意 `campaign-name` 虽然在 depth=3（不在 mandatory_levels=[1,2] 中），但因其 `mandatory: true` 属性而被纳入骨架。其父节点 `campaign` 因层级规则和路径连接规则双重满足而保留。
+**输出模型 — `MandatorySkeletonNode`：**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | str | 节点唯一 ID（与模版节点 ID 对应） |
+| `title` | str | 节点标题 |
+| `mandatory` | bool | 是否为强制节点（True = 不可省略/重命名） |
+| `children` | list[MandatorySkeletonNode] | 子骨架节点 |
 **设计评价：**
-- 纯算法实现，不依赖 LLM，完全确定性
-- 三条规则的组合覆盖了业务常见的约束场景
-- 路径连接规则（规则 3）确保骨架树始终连通，不会出现"孤立"的强制叶节点
-- `None` 返回值是显式的"无约束"信号，避免了空骨架对象的歧义
-### §3.15 `template_loader.py` — ProjectTemplateLoader (PR #23 增强)
-**核心类**: `ProjectTemplateLoader`
-**职责**: 项目级 Checklist 模版的加载、校验、拍平和强制骨架构建。
-**PR #23 变更摘要：**
-| 变更 | 说明 |
-|------|------|
-| 新增 `__init__()` | 初始化 `MandatorySkeletonBuilder` 实例 |
-| 新增 `load_by_name()` | 按名称从 `templates/` 目录加载模版 |
-| 新增 `build_mandatory_skeleton()` | 委托 `MandatorySkeletonBuilder.build()` 构建骨架 |
-| 增强 `_parse_node()` | 解析 description/priority/note/status/mandatory 字段；过滤空 ID 节点 |
-| 新增 `_get_max_depth()` | 获取模版树的最大深度，用于 mandatory_levels 校验 |
-| 增强 `validate_template()` | 新增 mandatory_levels 超深度 Warning |
-**新增方法详解：**
-**`load_by_name(template_name, template_dir="templates")`：**
-```python
-def load_by_name(self, template_name: str, template_dir: str = "templates"):
- """按名称从模版目录加载模版。
- 扫描 .yaml 和 .yml 扩展名，找到第一个匹配文件并调用 load()。
- Raises: FileNotFoundError 当模版不存在时。
- """
-```
-- 用途：支持 API 请求中的 `template_name` 字段（如 `"brand_spp_consideration"`）
-- 搜索顺序：`.yaml` 优先于 `.yml`
-**`build_mandatory_skeleton(template)`：**
-- 纯委托方法：`return self._skeleton_builder.build(template)`
-- 设计原因：将骨架构建能力集成到 loader 的公开接口中，避免调用方直接依赖 `MandatorySkeletonBuilder`
-**`_parse_node()` 增强：**
-- 新增字段解析：`description`、`priority`、`note`、`status`、`mandatory`
-- 空 ID 过滤：子节点中 `id` 为空的 dict 被跳过并记录 warning
-- `mandatory` 字段使用 `bool(raw.get("mandatory", False))` 确保类型安全
-**`_get_max_depth()` 实现：**
-```python
-def _get_max_depth(self, nodes, current_depth):
- """递归获取模版树最大深度。"""
- if not nodes:
- return current_depth - 1
- return max(
- self._get_max_depth(node.children, current_depth + 1)
- if node.children else current_depth
- for node in nodes
- )
-```
-- 用途：`validate_template()` 中校验 `mandatory_levels` 是否超出实际深度
-**`validate_template()` 增强 — 新增校验规则 #5：**
-- 当 `mandatory_levels` 包含超过模版实际最大深度的层级时，记录 Warning（不抛异常）
-- 设计选择：Warning 而非 Error，因为超深度的 mandatory_level 只是被忽略，不影响骨架构建的正确性
-**依赖关系变更：**
-- 新增内部依赖：`MandatorySkeletonBuilder`（组合关系，`__init__` 中实例化）
-- 新增导入：`MandatorySkeletonNode` 类型
+- 三规则判定体系覆盖了"层级强制"和"节点强制"两种常见的模版约束模式
+- 规则 3（路径连接）确保输出的骨架树是连通的——不会出现孤立的强制节点
+- 剪枝策略有效：无强制约束时返回 None，避免下游处理空骨架
+- 与 `CheckpointOutlinePlanner` 的 `_enforce_mandatory_skeleton()` 形成完整的约束链
+---
 ## §4 服务依赖图
-### §4.1 调用链全景
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ WorkflowService │
-│ (主编排 · LangGraph) │
+┌─────────────────────────────────────────────────────────────────┐
+│ WorkflowService (§3.5) │
+│ 主编排服务 │
 │ │
-│ ┌──────────────────┐ ┌──────────────────┐ │
-│ │ IterationController│ │ ProjectContext │ │
-│ │ (迭代控制) │ │ Service │ │
-│ └────────┬─────────┘ └──────────────────┘ │
+│ ┌──────────┐ ┌──────────────────┐ ┌──────────────────┐ │
+│ │Iteration │ │CheckpointOutline │ │ Precondition │ │
+│ │Controller│ │Planner │ │ Grouper │ │
+│ │ (§3.6) │ │ (§3.2) │ │ (§3.4) │ │
+│ └──────────┘ └──────────────────┘ └──────────────────┘ │
+│ │
+│ 方案 A (弃用): 方案 B (当前): │
+│ ┌──────────────┐ ┌──────────────────┐ │
+│ │ Semantic │ │CheckpointOutline │ │
+│ │ PathNorm │ │ Planner │ │
+│ │ (§3.3) │ │ (§3.2) │ │
+│ └──────┬───────┘ └──────────────────┘ │
 │ │ │
-│ ┌────────▼──────────────────────────────────────┐ │
-│ │ LangGraph Subgraph Nodes │ │
+│ ┌──────┴───────┐ │
+│ │ Checklist │ │
+│ │ Merger │ │
+│ │ (§3.1) │ │
+│ └──────────────┘ │
+│ │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ 输出管线 │ │
 │ │ │ │
-│ │ ┌─────────────────────┐ ┌────────────────┐ │ │
-│ │ │ CheckpointOutline │ │ EvidenceMapper │ │ │
-│ │ │ Planner (方案 B) │ │ (graph 层) │ │ │
-│ │ └────────┬────────────┘ └────────────────┘ │ │
-│ │ │ │ │
-│ │ ┌────────▼────────────┐ ┌────────────────┐ │ │
-│ │ │ PreconditionGrouper │ │ DraftWriter │ │ │
-│ │ │ (前置条件分组) │ │ (graph 层) │ │ │
-│ │ └────────┬────────────┘ └────────────────┘ │ │
-│ │ │ │ │
-│ │ ┌────────▼────────────────────────────────┐ │ │
-│ │ │ StructureAssembler (graph 层) │ │ │
-│ │ └────────┬────────────────────────────────┘ │ │
-│ └───────────┼────────────────────────────────────┘ │
-│ │ │
-│ ┌───────────▼───────────────────────────────────────┐ │
+│ │ TextNormalizer → MarkdownRenderer │ │
+│ │ (§3.7) (§3.8) │ │
+│ │ │ │
 │ │ PlatformDispatcher │ │
-│ │ │ │
-│ │ ┌──────────────────┐ ┌────────────────────────┐ │ │
-│ │ │ MarkdownRenderer │ │ XMindPayloadBuilder │ │ │
-│ │ └──────────────────┘ └──────────┬─────────────┘ │ │
-│ │ │ │ │
-│ │ ┌──────────▼─────────────┐ │ │
+│ │ (§3.9) │ │
+│ │ ┌──────────────────────────┐ │ │
+│ │ │ XMind 子管线 │ │ │
+│ │ │ XMindPayloadBuilder │ │ │
+│ │ │ (§3.12) │ │ │
+│ │ │ ↓ │ │ │
 │ │ │ XMindDeliveryAgent │ │ │
-│ │ └──────────┬─────────────┘ │ │
-│ │ │ │ │
-│ │ ┌──────────▼─────────────┐ │ │
-│ │ │ FileXMindConnector │ │ │
-│ │ └────────────────────────┘ │ │
-│ └────────────────────────────────────────────────────┘ │
+│ │ │ (§3.11) │ │ │
+│ │ │ ↓ │ │ │
+│ │ │ XMindConnector │ │ │
+│ │ │ (§3.10) │ │ │
+│ │ └──────────────────────────┘ │ │
+│ └──────────────────────────────────────────────────────────┘ │
 │ │
-│ ┌───────────────────────────────────────────────────┐ │
-│ │ TextNormalizer (横切关注点 · 各节点均可调用) │ │
-│ └───────────────────────────────────────────────────┘ │
+│ ┌──────────────────────┐ │
+│ │ ProjectContextService│ │
+│ │ (§3.13) │ │
+│ │ SQLite 持久化 │ │
+│ └──────────────────────┘ │
 │ │
-│ ══════════════ 已弃用组件（方案 A）══════════════ │
-│ ┌─────────────────────┐ ┌──────────────────┐ │
-│ │ SemanticPath │→│ ChecklistMerger │ │
-│ │ Normalizer │ │ (trie 合并) │ │
-│ └─────────────────────┘ └──────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
+│ ┌──────────────────────────────────┐ │
+│ │ MandatorySkeletonBuilder │ ← PR #23 新增 │
+│ │ (强制骨架构建) │ │
+│ └────────────┬─────────────────────┘ │
+│ │ 被 ProjectTemplateLoader 调用 │
+│ ↓ │
+│ CheckpointOutlinePlanner │
+│ (骨架约束注入) │
+└─────────────────────────────────────────────────────────────────┘
 ```
-### §4.2 数据流向
-```
-Checkpoints (输入)
-│
-▼
-CheckpointOutlinePlanner.plan(mandatory_skeleton=...)
-│ LLM → CanonicalOutlineNode JSON
-▼
-attach_expected_results_to_outline()
-│ checkpoint.expected_behaviors → 叶节点
-▼
-PreconditionGrouper
-│ 关键词分桶 → precondition_group 节点插入
-▼
-ChecklistNode 树 (核心中间数据结构)
-│
-├──→ MarkdownRenderer → .md 文件
-└──→ XMindPayloadBuilder → XMindDeliveryAgent → .xmind 文件
-```
-### §4.3 横切依赖
-| 服务 | 被依赖者 | 说明 |
-|------|---------|------|
-| `TextNormalizer` | 几乎所有节点 | 文本归一化作为预处理步骤被广泛调用 |
-| `ProjectContextService` | `WorkflowService` | 提供项目级配置上下文 |
-| `IterationController` | `WorkflowService` | 控制迭代循环的终止条件 |
 ---
 ## §5 Checklist 整合方案深度分析
-> **这是整个分析的核心部分。** Checklist 整合——即将散乱的 checkpoint 列表转化为结构清晰、层级合理的 checklist 树——是 AutoChecklist 系统最关键、也是当前效果最需提升的环节。以下从架构、代码路径、问题根因、改进方向四个维度展开深入分析。
+### §5.1 方案总览
+本项目存在**两套 Checklist 整合方案**（checkpoint → 结构化 ChecklistNode 树的转换路径），其中方案 A 已弃用、方案 B 为当前使用方案。两套方案共享同一套输出管线（TextNormalizer → MarkdownRenderer / PlatformDispatcher）。
+```
+Checkpoints (from checkpoint_generator/evaluator)
+│
+├── 方案 A (弃用): SemanticPathNormalizer → ChecklistMerger
+│ 自底向上：先将 checkpoint 归一化为路径，再通过 trie 合并
+│
+└── 方案 B (当前): CheckpointOutlinePlanner → (PreconditionGrouper)
+ 自顶向下：LLM 直接生成整体 outline，再挂载 expected_results
+```
+### §5.2 方案 B 当前流程详解
+```
+checkpoint 列表 (来自 checkpoint_evaluator 的输出)
+│
+├── Step 1: CheckpointOutlinePlanner.plan()
+│ └── LLM 输入: 所有 checkpoint 标题
+│ └── LLM 输出: CanonicalOutlineNode JSON 数组 (层级化的 outline)
+│
+├── Step 2: CheckpointOutlinePlanner.attach_expected_results_to_outline()
+│ └── 遍历 outline 叶节点
+│ └── 按 checkpoint 名称匹配 → 挂载 expected_behaviors
+│ └── 产出: ChecklistNode 树 (含 expected_result 叶节点)
+│
+├── Step 3: PreconditionGrouper (可选)
+│ └── 对 ChecklistNode 树中的测试用例按前置条件分组
+│ └── 插入 precondition_group 中间层节点
+│
+├── Step 4: TextNormalizer
+│ └── 中英文文本归一化处理
+│
+└── Step 5: 输出管线
+ ├── MarkdownRenderer → .md 文件
+ └── PlatformDispatcher → XMind 等
+```
+### §5.3 方案 B 深度问题分析
+#### §5.3.1 LLM 单次规划的规模上限
+**问题描述**: `CheckpointOutlinePlanner.plan()` 将所有 checkpoint 标题一次性发送给 LLM 进行 outline 规划。当 checkpoint 数量大于约 30 个时，LLM 的规划质量显著下降。
+**表现**:
+- outline 层级变浅（趋于扁平化）
+- 分组逻辑混乱（相关 checkpoint 被拆散到不同分组）
+- 部分 checkpoint 被遗漏或重复归类
+**量化观察**:
+| Checkpoint 数量 | Outline 质量 | 典型问题 |
+|----------------|-------------|---------|
+| 1-10 | 高 | 层级合理，分组准确 |
+| 11-20 | 中 | 偶尔出现分组不合理 |
+| 21-30 | 中偏低 | 层级开始扁平化，部分遗漏 |
+| 30+ | 低 | 严重扁平化，大量遗漏和错配 |
+**根因**: LLM 的 context window 和 reasoning 能力有限，当输入超过一定规模时，难以维持全局一致的层级规划。
 ---
-### §5.1 现有方案架构
-当前系统中存在**两套并行的 Checklist 整合方案**，方案 A 已弃用但代码仍保留，方案 B 为当前生产路径。
-#### 方案 A（已弃用）: SemanticPathNormalizer → ChecklistMerger
-**设计思路**: 先归一化，后合并。将每个 checkpoint 的语义信息提取为标准化路径，再通过 trie 树结构自动合并为层级树。
-**流程**:
-```
-Checkpoints
-│
-▼
-SemanticPathNormalizer
-│ Phase 1: 从 title + description 提取原始路径
-│ Phase 2: LLM 将原始路径归一化为标准形式
-▼
-list[NormalizedChecklistPath]
-│ 例: ["登录模块", "正常流程", "用户名密码登录"]
-│ ["登录模块", "正常流程", "手机号验证码登录"]
-│ ["登录模块", "异常流程", "密码错误"]
-▼
-ChecklistMerger._build_trie()
-│ 将路径段逐层插入 trie 节点
-▼
-ChecklistMerger._trie_to_checklist()
-│ trie 递归转换为 ChecklistNode 树
-▼
-list[ChecklistNode]
-```
-**优点**:
-- 路径归一化的抽象层次正确：将非结构化的 checkpoint 信息转化为结构化路径是合理的中间表示
-- Trie 合并是确定性算法，可预测、可调试
-- 路径粒度可控：通过控制路径段数量来控制树的深度
-**弃用原因**:
-1. **路径归一化质量不稳定**: LLM 对不同 checkpoint 生成的路径层级深度不一致（有的 2 层，有的 5 层），导致 trie 树极度不平衡
-2. **LLM 输出格式不一致**: Phase 2 的归一化结果偶发性地不遵循约定格式（如混入自然语言描述而非纯路径），导致解析失败
-3. **同义词统一困难**: "登录"/"登陆"/"Sign In"/"用户认证" 等语义等价的路径段被 trie 视为不同分支，产生冗余
-4. **Trie 合并产生过深/过浅的层级**: 缺乏全局视角，纯局部合并容易产生退化的树结构（如单链退化或根节点下直接挂叶子）
----
-#### 方案 B（当前使用）: CheckpointOutlinePlanner → PreconditionGrouper
-**设计思路**: 先规划整体骨架，后挂载叶节点。用 LLM 一次性理解所有 checkpoint 并生成层级 outline，再将具体的 expected_results 挂载到 outline 叶节点。
-**流程**:
-```
-Checkpoints
-│
-▼
-CheckpointOutlinePlanner.plan(checkpoints)
-│ 将所有 checkpoint 标题组装为 prompt
-│ LLM 返回 CanonicalOutlineNode JSON
-│ ┌──────────────────────────────────┐
-│ │ CanonicalOutlineNode 结构: │
-│ │ name: "登录功能" │
-│ │ children: │
-│ │ - name: "正常登录" │
-│ │ children: │
-│ │ - name: "用户名密码" │
-│ │ - name: "手机号验证码" │
-│ │ - name: "异常登录" │
-│ │ children: │
-│ │ - name: "密码错误" │
-│ └──────────────────────────────────┘
-▼
-attach_expected_results_to_outline(outline_nodes, checkpoints)
-│ 遍历 outline 叶节点
-│ 对每个叶节点：
-│ 1. 在 checkpoints 中查找匹配的 checkpoint
-│ 2. 将 checkpoint.expected_behaviors 作为 expected_result 子节点挂载
-▼
-ChecklistNode 树 (含 expected_result 叶节点)
-│
-▼
-PreconditionGrouper
-│ 遍历树中的 expected_result 节点
-│ 提取关联 TestCase 的 precondition 字段
-│ 基于中文关键词的相似度进行分桶
-│ 在原层级中插入 precondition_group 节点
-▼
-最终 ChecklistNode 树
-```
-**优点**:
-- LLM 具有全局视角，能理解 checkpoint 之间的逻辑关系
-- 一次调用产出完整的层级结构，避免了逐个路径合并的碎片化问题
-- PreconditionGrouper 补充了按前置条件的横切分组维度
-**现存问题** (详见 §5.3):
-1. LLM 单次处理大量 checkpoint 时层级规划质量下降
-2. PreconditionGrouper 使用关键词匹配而非语义理解，分组精度有限
-3. expected_results 挂载是简单的字符串匹配，可能遗漏或错配
-4. 缺乏对 outline 质量的自动评估和反馈机制
----
-### §5.2 关键代码路径分析
-#### §5.2.1 主流程调用链
-以下为从 `WorkflowService` 入口到最终 ChecklistNode 树产出的完整代码路径：
-```
-WorkflowService.compile_and_run()
-│
-├── 1. 构建 LangGraph subgraph
-│ └── 定义节点: outline_planner → evidence_mapper → draft_writer → structure_assembler
-│
-├── 2. invoke subgraph（迭代执行）
-│ │
-│ ├── [Node] checkpoint_outline_planner
-│ │ │
-│ │ ├── CheckpointOutlinePlanner.plan(checkpoints)
-│ │ │ ├── 组装 prompt: checkpoint 标题列表 + 层级规划指令
-│ │ │ ├── LLM 调用: → JSON 响应
-│ │ │ ├── JSON 解析: → list[CanonicalOutlineNode]
-│ │ │ └── 返回 outline 骨架
-│ │ │
-│ │ └── attach_expected_results_to_outline(outline, checkpoints)
-│ │ ├── 遍历 outline 叶节点
-│ │ ├── 对每个叶节点:
-│ │ │ ├── 在 checkpoints 中按名称查找匹配项
-│ │ │ ├── 提取 checkpoint.expected_behaviors
-│ │ │ └── 创建 expected_result 子节点挂载
-│ │ └── 返回 list[ChecklistNode]（含 expected_result 叶节点）
-│ │
-│ ├── [Node] evidence_mapper
-│ │ └── 将 evidence 映射到 ChecklistNode 节点（graph 层实现）
-│ │
-│ ├── [Node] draft_writer
-│ │ ├── _resolve_path_context(optimized_tree)
-│ │ │ └── 为每个叶节点注入完整的层级路径上下文
-│ │ │ 例: "登录功能 > 正常登录 > 用户名密码"
-│ │ └── LLM 调用: 基于路径上下文 + evidence 生成 TestCase
-│ │
-│ └── [Node] structure_assembler
-│ ├── 收集所有 draft_writer 产出的 TestCase
-│ ├── attach_expected_results_to_outline() ← 再次调用，最终版本
-│ │ └── 将最终的 TestCase 挂载到 ChecklistNode 树
-│ └── PreconditionGrouper 后处理
-│ ├── 提取各 TestCase 的 precondition 字段
-│ ├── 中文关键词提取
-│ ├── 关键词相似度分桶
-│ └── 插入 precondition_group 节点
-│
-├── 3. IterationController.evaluate_and_decide()
-│ ├── 评估当前轮次的 ChecklistNode 树质量
-│ └── 返回 IterationDecision: pass / retry / abort
-│
-└── 4. 输出渲染
- ├── MarkdownRenderer → render_test_cases_markdown(tree_mode)
- └── PlatformDispatcher
- └── XMindPayloadBuilder → XMindDeliveryAgent → FileXMindConnector
-```
-#### §5.2.2 关键数据变换节点
-| 变换节点 | 输入 | 输出 | 变换类型 |
-|----------|------|------|----------|
-| `plan()` | `list[Checkpoint]` | `list[CanonicalOutlineNode]` | LLM 生成（非确定性） |
-| `attach_expected_results` | `outline + checkpoints` | `list[ChecklistNode]` | 规则匹配（确定性） |
-| `_resolve_path_context` | `ChecklistNode tree` | 带路径上下文的树 | 树遍历（确定性） |
-| `draft_writer LLM` | 路径上下文 + evidence | `list[TestCase]` | LLM 生成（非确定性） |
-| `PreconditionGrouper` | `ChecklistNode tree` | 增强的树（含分组节点） | 关键词匹配（确定性） |
-#### §5.2.3 `attach_expected_results_to_outline` 匹配逻辑详解
-这是连接 outline 骨架和 checkpoint 实际内容的桥梁，匹配逻辑的精度直接影响最终 checklist 的完整性：
-```
-对每个 outline 叶节点 leaf:
- 1. 在 checkpoints 中查找 checkpoint.title 包含 leaf.name 的匹配项
- 或 leaf.name 包含 checkpoint.title 的匹配项
- 2. 如果找到匹配:
- - 遍历 checkpoint.expected_behaviors
- - 为每个 expected_behavior 创建一个 expected_result 类型的 ChecklistNode
- - 作为 leaf 的子节点挂载
- 3. 如果未找到匹配:
- - leaf 保持无子节点（空叶节点）
- - 后续可能被 draft_writer 兜底处理
-```
-**匹配失败的典型场景**:
-- LLM outline 中使用了概括性名称（如"登录验证"），而 checkpoint 标题是具体描述（如"使用正确的用户名和密码登录系统"）
-- 一个 checkpoint 的 expected_behaviors 应该分散到多个 outline 叶节点下，但当前是一对一匹配
-- 多个 checkpoint 的 expected_behaviors 有重叠，导致同一条 expected_result 出现在多个叶节点下
----
-### §5.3 效果不佳的根本原因分析
-#### §5.3.1 单次 LLM 规划的信息瓶颈
-**问题描述**: `CheckpointOutlinePlanner.plan()` 将所有 checkpoint 的标题一次性输入 LLM，要求其返回完整的层级 outline。
-**影响**:
-- 当 checkpoint 数量超过 **20-30 个**时，LLM 的注意力分散，产生的层级结构趋于扁平（大量节点直接挂在根下）或过度嵌套（不必要的中间层级）
-- checkpoint 之间的微妙逻辑关系（如"登录→权限→操作"的因果链）在大量输入中被淹没
-- LLM 倾向于按表面词汇相似度而非业务逻辑进行分组
-**量化表现**:
-- 10 个以下 checkpoint: outline 质量通常可接受
-- 10-30 个 checkpoint: 质量不稳定，部分层级合理、部分混乱
-- 30 个以上 checkpoint: 质量显著下降，常出现"杂项"/"其他"兜底分组
-**根因**: 单次 LLM 调用缺乏分治机制，将 O(n) 复杂度的结构化任务压缩为单次推理。
----
-#### §5.3.2 缺乏领域知识锚定
-**问题描述**: outline 规划完全依赖 LLM 的通用知识，未利用已有的结构化信息（如 PRD 原文的章节结构、PlannedScenario 的分组信息）作为锚点。
-**影响**:
-- LLM "发明"的层级结构可能与 PRD 的实际模块划分不一致
-- 同一组 checkpoint 在不同运行中可能产生不同的 outline 结构（非幂等性）
-- 缺乏业务约束导致 LLM 可能按技术维度（如"前端测试"/"后端测试"）而非业务维度（如"用户管理"/"订单管理"）分组
+#### §5.3.2 outline 分组维度偏差
+**问题描述**: LLM 有时按技术维度（如"前端测试"/"后端测试"）而非业务维度（如"用户管理"/"订单管理"）分组
 **根因**: prompt 中缺少结构化的领域锚点信息，LLM 只能依靠 checkpoint 标题的文本特征进行推理。
 ---
 #### §5.3.3 前置条件分组过于机械
@@ -754,11 +527,11 @@ WorkflowService.compile_and_run()
 改进 prompt:
 "以下是 PRD 的章节结构：
 1. 用户管理
- 1.1 注册
- 1.2 登录
+    1.1 注册
+    1.2 登录
 2. 订单管理
- 2.1 创建订单
- 2.2 支付
+    2.1 创建订单
+    2.2 支付
 请将以下 checkpoint 分配到对应的 PRD 章节下，并在需要时创建子层级..."
 ```
 **预期效果**: outline 的顶层结构与 PRD 对齐，LLM 的规划空间减小，输出质量提升。
@@ -769,12 +542,12 @@ WorkflowService.compile_and_run()
 **实施方式**:
 ```python
 def plan_batched(self, checkpoints, scenarios):
- sub_outlines = []
- for scenario in scenarios:
- scenario_cps = [cp for cp in checkpoints if cp.scenario_id == scenario.id]
- sub_outline = self.plan(scenario_cps) # 小规模调用
- sub_outlines.append((scenario.name, sub_outline))
- return self._merge_sub_outlines(sub_outlines)
+    sub_outlines = []
+    for scenario in scenarios:
+        scenario_cps = [cp for cp in checkpoints if cp.scenario_id == scenario.id]
+        sub_outline = self.plan(scenario_cps)  # 小规模调用
+        sub_outlines.append((scenario.name, sub_outline))
+    return self._merge_sub_outlines(sub_outlines)
 ```
 **预期效果**: 每次 LLM 调用处理的 checkpoint 数量可控（通常 < 10），规划质量稳定。
 **风险**: 需要处理跨 scenario 的 checkpoint 以及子 outline 合并时的命名冲突。
@@ -827,17 +600,17 @@ similarity = cosine_similarity(embedding_a, embedding_b)
 **流程设计**:
 ```
 Phase 1 — 路径预处理（方案 A 改进版）:
- checkpoints → SemanticPathNormalizer (改进版) → NormalizedChecklistPath 列表
+    checkpoints → SemanticPathNormalizer (改进版) → NormalizedChecklistPath 列表
 Phase 2 — LLM 精调（方案 B 适配版）:
- 将归一化路径列表输入 LLM，要求其：
- 1. 审查路径的合理性（修正不合理的归一化结果）
- 2. 补充缺失的中间层级
- 3. 统一命名风格
- → 输出修正后的路径列表
+    将归一化路径列表输入 LLM，要求其：
+    1. 审查路径的合理性（修正不合理的归一化结果）
+    2. 补充缺失的中间层级
+    3. 统一命名风格
+    → 输出修正后的路径列表
 Phase 3 — 确定性合并:
- 修正后的路径 → ChecklistMerger (增强版) → ChecklistNode 树
+    修正后的路径 → ChecklistMerger (增强版) → ChecklistNode 树
 Phase 4 — 后处理:
- → PreconditionGrouper (embedding 版) → 最终 ChecklistNode 树
+    → PreconditionGrouper (embedding 版) → 最终 ChecklistNode 树
 ```
 **优势**: LLM 的工作从"从零生成 outline"降级为"审查和修正已有路径"，任务难度显著降低，输出质量更可控。
 ---
@@ -862,11 +635,11 @@ Phase 4 — 后处理:
 **迭代流程**:
 ```
 Round 1: LLM 生成初始 outline → 评估节点打分
- → 如果不合格:
+    → 如果不合格:
 Round 2: 将评估结果 + 初始 outline 反馈给 LLM → 修正版 outline → 评估
- → 如果不合格:
+    → 如果不合格:
 Round 3: 进一步修正 → 评估
- → 最多 N 轮后 abort（使用最高分版本）
+    → 最多 N 轮后 abort（使用最高分版本）
 ```
 **关键设计**: 每轮迭代的 prompt 需要明确指出上轮的问题所在（如"以下 5 个 checkpoint 未被覆盖"），避免 LLM 盲目修改。
 ---
@@ -887,18 +660,18 @@ Round 3: 进一步修正 → 评估
 ```
 测试场景分类体系:
 ├── 功能测试
-│ ├── 用户管理 (注册/登录/权限/个人信息)
-│ ├── 核心业务流程 (按行业/产品类型细分)
-│ ├── 数据管理 (CRUD/导入导出/搜索过滤)
-│ └── 系统集成 (第三方API/消息队列/文件系统)
+│   ├── 用户管理 (注册/登录/权限/个人信息)
+│   ├── 核心业务流程 (按行业/产品类型细分)
+│   ├── 数据管理 (CRUD/导入导出/搜索过滤)
+│   └── 系统集成 (第三方API/消息队列/文件系统)
 ├── 非功能测试
-│ ├── 性能 (响应时间/并发/容量)
-│ ├── 安全 (认证/授权/输入验证/数据加密)
-│ └── 兼容性 (浏览器/设备/操作系统)
+│   ├── 性能 (响应时间/并发/容量)
+│   ├── 安全 (认证/授权/输入验证/数据加密)
+│   └── 兼容性 (浏览器/设备/操作系统)
 └── 边界与异常
- ├── 输入边界 (空值/极值/特殊字符)
- ├── 状态异常 (网络断开/超时/并发冲突)
- └── 数据异常 (格式错误/缺失字段/重复数据)
+    ├── 输入边界 (空值/极值/特殊字符)
+    ├── 状态异常 (网络断开/超时/并发冲突)
+    └── 数据异常 (格式错误/缺失字段/重复数据)
 ```
 **应用**: 在 outline 规划时，LLM 可参考知识库中的标准分类，确保覆盖常见的测试维度，同时保持与具体产品特性的适配。
 ---
@@ -961,3 +734,169 @@ def _get_workflow(self):
 1. **依赖注入一致**: 与 `project_context_loader` 的注入模式完全对称，学习成本低
 2. **就绪检查**: 通过 `is_ready()` 门控，避免将未初始化的引擎注入工作流
 3. **惰性构建**: 工作流在首次执行时构建，引擎的注入不影响 WorkflowService 的初始化速度
+
+## §7 PR #36 变更 — MR 代码分析服务层新增
+
+> 同步自 PR #36 `feat/mr-code-analysis-integration`
+
+PR #36 在 `app/services/` 下新增 3 个文件，为 MR（Merge Request）代码分析功能提供服务层支撑：Agentic search 工具集、Coco Agent 异步客户端、以及 Coco 响应容错验证器。
+
+### §7.1 新增文件清单
+
+| # | 文件名 | 行数(估) | 核心类/函数 | 职责摘要 |
+|---|--------|----------|-------------|----------|
+| 16 | `codebase_tools.py` | ~627 | `CODEBASE_TOOLS`, `execute_tool()` | Agentic search 工具实现，为 LLM 提供代码库搜索能力 |
+| 17 | `coco_client.py` | ~482 | `CocoClient` | ByteDance Coco Agent 异步客户端（任务提交 + 轮询 + 结果提取） |
+| 18 | `coco_response_validator.py` | ~335 | `CocoResponseValidator` | Coco Agent 响应的 3 层容错验证 |
+
+### §7.2 `codebase_tools.py` — Agentic Search 工具集
+
+**职责**: 为 LLM function calling 提供代码库搜索工具，支撑 MR 分析节点的 agentic search 循环。
+
+**核心组件**:
+
+| 组件 | 类型 | 说明 |
+|------|------|------|
+| `CODEBASE_TOOLS` | `list[dict]` | 5 个工具的 JSON Schema 定义列表，供 LLM function calling 使用 |
+| `execute_tool()` | 函数 | 工具调度器：根据 LLM 返回的 tool name 分发到对应实现函数 |
+
+**5 个工具定义**:
+
+| # | 工具名 | 实现方式 | 说明 |
+|---|--------|---------|------|
+| 1 | `grep_codebase` | `subprocess.run("grep -rn ...")` | 在代码库中搜索关键词，返回匹配行及行号 |
+| 2 | `find_references` | 基于 grep 的引用搜索 | 查找符号（函数名、类名等）的引用位置 |
+| 3 | `get_file_content` | 文件读取 | 获取指定文件的完整内容或指定行范围 |
+| 4 | `ast_analyze` | Python `ast` 模块 | 对 Python 文件进行 AST 分析，提取类/函数/导入等结构信息 |
+| 5 | `get_call_graph` | AST 分析 + 引用搜索 | 构建指定函数/类的调用关系图 |
+
+**安全机制**:
+- **Path traversal 防护**: 所有文件路径参数经过校验，防止 `../` 等路径穿越攻击
+- **Subprocess 超时**: `grep` 等子进程调用设置超时限制，避免恶意输入导致的长时间阻塞
+
+**设计模式**:
+- **Stateless 工具函数**: 每个工具函数无状态，接收参数、返回结果，适合 LLM 多轮调用
+- **JSON Schema 定义**: 工具定义遵循 OpenAI function calling schema 规范，包含 `name`、`description`、`parameters` 字段
+- **调度器模式**: `execute_tool()` 作为统一入口，根据 tool name 路由到具体实现，便于新增工具
+
+### §7.3 `coco_client.py` — Coco Agent 异步客户端
+
+**核心类**: `CocoClient`
+
+**职责**: 封装与 ByteDance Coco Agent（`codebase-api.byted.org`）的异步 HTTP 交互，支持任务提交、轮询和结果提取。
+
+**关键方法**:
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `send_task()` | `async (payload) → task_id` | 向 Coco Agent 提交分析任务，返回任务 ID |
+| `poll_task()` | `async (task_id) → raw_response` | 轮询任务状态，指数退避（5s → 20s），直到完成或超时 |
+| `extract_result()` | `(raw_response) → (model, metadata)` | 使用 `CocoResponseValidator` 验证并提取结构化结果 |
+| `send_validation_task()` | `async (payload) → task_id` | 提交 Task 2 一致性校验任务 |
+
+**轮询策略**:
+```
+初始间隔: 5s
+最大间隔: 20s
+退避策略: 指数退避（每次间隔翻倍，上限 20s）
+超时控制: 由 CocoSettings.coco_task_timeout 配置
+```
+
+**响应模型（Pydantic）**:
+
+| 模型 | 说明 |
+|------|------|
+| `Task1Response` | Task 1（代码事实提取）的响应模型 |
+| `Task2Response` | Task 2（一致性校验）的响应模型 |
+| `CodeFactItem` | 单条代码事实（函数签名、逻辑摘要等） |
+| `ConsistencyIssueItem` | 单条一致性问题（代码与需求的不一致项） |
+| `RelatedSnippetItem` | 相关代码片段引用 |
+
+**异常处理**:
+- `CocoTaskError`: Coco 任务级异常（提交失败、轮询超时、响应解析失败）
+
+**依赖**:
+- `httpx`: 异步 HTTP 客户端
+- `coco_response_validator`: 响应验证（见 §7.4）
+
+### §7.4 `coco_response_validator.py` — Coco 响应容错验证
+
+**核心类**: `CocoResponseValidator`
+
+**职责**: 对 Coco Agent 的原始响应进行 3 层渐进式容错验证，确保即使响应格式异常也能提取有效信息。
+
+**验证流程**:
+
+```
+输入: Coco Agent 原始响应 (str/dict)
+│
+├── Layer 1 — JSON 提取: validate_and_fix() → _extract_json()
+│   ├── 成功: 进入 Schema 校验
+│   └── 失败: 进入 Layer 3
+│
+├── Layer 2 — Schema 校验: Pydantic model_validate()
+│   ├── 成功: 返回 (BaseModel, metadata={layer: "json_extract"})
+│   └── 失败: 进入 Layer 3
+│
+├── Layer 3a — LLM 部分推理: _llm_partial_infer()
+│   ├── 成功: 返回 (BaseModel, metadata={layer: "llm_partial"})
+│   └── 失败: 进入 Layer 3b
+│
+├── Layer 3b — LLM 完整推理: _llm_full_infer()
+│   ├── 成功: 返回 (BaseModel, metadata={layer: "llm_full"})
+│   └── 失败: 进入 defaults
+│
+└── Layer 4 — 默认值填充: _fill_defaults()
+    └── 返回 (BaseModel with defaults, metadata={layer: "defaults"})
+```
+
+**返回格式**: `(BaseModel, metadata)` 元组
+- `BaseModel`: 验证后的 Pydantic 模型实例（Task1Response 或 Task2Response）
+- `metadata`: 字典，记录响应由哪一层处理成功，用于监控和调试
+
+**设计理念 — 渐进式降级**:
+1. **JSON 提取** → 最快路径，零 LLM 调用
+2. **Schema 校验** → Pydantic 强类型验证
+3. **LLM 部分推理** → 利用 LLM 修复格式异常的 JSON
+4. **LLM 完整推理** → 利用 LLM 从非结构化文本中提取结构化数据
+5. **默认值填充** → 最终兜底，确保不返回 None
+
+**设计评价**:
+- 多层容错是处理外部 API 不稳定响应的最佳实践，每层的 metadata 标注使得降级路径可观测
+- LLM 兜底层引入额外延迟和成本，但保证了系统的鲁棒性
+- `_fill_defaults()` 作为最终兜底确保调用方永远不会收到 None，简化了下游错误处理
+
+### §7.5 服务层 PR #36 变更总结
+
+**新增文件统计**:
+
+| 维度 | 值 |
+|------|-----|
+| 新增文件数 | 3 |
+| 新增总行数 | ~1,444 |
+| 外部依赖 | httpx（异步 HTTP） |
+| LLM 依赖 | `coco_response_validator` 的 Layer 3 降级路径需要 LLM 客户端 |
+
+**架构角色**:
+
+```
+MR 分析节点 (app/nodes/)
+    │
+    ├── codebase_tools.py ← Agentic search 工具（LLM function calling）
+    │
+    ├── coco_client.py ← Coco Agent 交互（任务提交/轮询/结果提取）
+    │   │
+    │   └── coco_response_validator.py ← 响应容错验证（3 层降级）
+    │
+    └── CocoSettings (app/config/) ← 连接配置
+```
+
+**与现有服务的关系**:
+- `codebase_tools.py` 被 MR 分析节点（`app/nodes/mr_analyzer.py`）在 agentic search 循环中调用
+- `coco_client.py` 被 Coco 一致性验证节点（`app/nodes/coco_consistency_validator.py`）调用
+- 三个新文件与现有服务（§3 中的 14 个文件）无直接依赖关系，保持了良好的模块隔离
+
+**设计模式一致性**:
+- `CocoClient` 遵循与 `ProjectContextService` 类似的异步客户端模式
+- `CODEBASE_TOOLS` 的 JSON Schema 定义与 LangGraph 工具调用规范一致
+- `CocoResponseValidator` 的渐进式降级设计是本项目首次引入的容错模式，可作为后续外部 API 集成的参考
