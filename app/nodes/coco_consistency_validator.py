@@ -63,7 +63,7 @@ def build_coco_consistency_validator_node(
         ``coco_consistency_validator_node(state: CaseGenState) -> dict`` 节点函数。
     """
 
-    async def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
+    async def _run_validation(state: dict[str, Any]) -> dict[str, Any]:
         """Coco Task 2 — 逐 checkpoint 一致性校验主逻辑。
 
         当 use_coco 未启用或无 checkpoint 时直接 pass-through。
@@ -197,6 +197,10 @@ def build_coco_consistency_validator_node(
             "checkpoints": annotated,
             "coco_validation_summary": summary,
         }
+
+    def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
+        """同步 LangGraph 节点入口，内部显式执行异步校验流程。"""
+        return asyncio.run(_run_validation(state))
 
     return coco_consistency_validator_node
 
@@ -389,5 +393,5 @@ def _set_attr_safe(obj: Any, attr: str, value: Any) -> None:
     else:
         try:
             setattr(obj, attr, value)
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError, ValueError):
             logger.debug("无法设置属性 %s on %s", attr, type(obj).__name__)
