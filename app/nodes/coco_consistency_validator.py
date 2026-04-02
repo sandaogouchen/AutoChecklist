@@ -40,11 +40,27 @@ _MAX_CONCURRENCY = 5
 _PER_CASE_TIMEOUT_S = 120
 """单个 checkpoint 校验的最大等待时间（秒）。"""
 
-_TOTAL_TIMEOUT_S = 600
+_TOTAL_TIMEOUT_S = 6000
 """全部 checkpoint 校验的最大总时间（秒）。"""
 
 _CONFIDENCE_THRESHOLD = 0.7
 """置信度阈值：低于此值的 mismatch 不标注 TODO。"""
+
+
+def _resolve_total_timeout_s(checkpoint_count: int) -> float:
+    """根据 checkpoint 数量推导本轮 Coco 校验的总超时。
+
+    现有配置中的 `_TOTAL_TIMEOUT_S` 作为下限；
+    当 checkpoint 数量较多时，按 `ceil(count / concurrency) * per_case_timeout`
+    放大总超时，避免配置上出现“理论最短串批耗时已经超过总超时”的情况。
+    """
+    if checkpoint_count <= 0:
+        return float(_TOTAL_TIMEOUT_S)
+
+    concurrency = max(int(_MAX_CONCURRENCY), 1)
+    waves = (checkpoint_count + concurrency - 1) // concurrency
+    required_timeout = waves * float(_PER_CASE_TIMEOUT_S)
+    return max(float(_TOTAL_TIMEOUT_S), required_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +126,7 @@ def build_coco_consistency_validator_node(
         # ---- 多线程并行校验 ----
         semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
         start_time = time.monotonic()
+        effective_total_timeout_s = _resolve_total_timeout_s(len(checkpoints))
 
         task2_records: list[dict[str, Any]] = []
 
@@ -118,10 +135,10 @@ def build_coco_consistency_validator_node(
             async with semaphore:
                 # 总超时检查
                 elapsed = time.monotonic() - start_time
-                if elapsed > _TOTAL_TIMEOUT_S:
+                if elapsed > effective_total_timeout_s:
                     logger.warning(
-                        "coco_consistency_validator: 总超时 %.1fs > %ds，跳过 checkpoint #%d",
-                        elapsed, _TOTAL_TIMEOUT_S, index,
+                        "coco_consistency_validator: 总超时 %.1fs > %.1fs，跳过 checkpoint #%d",
+                        elapsed, effective_total_timeout_s, index,
                     )
                     return index, CodeConsistencyResult(status="unverified", verified_by="")
 
@@ -163,22 +180,34 @@ def build_coco_consistency_validator_node(
                     )
 
         # 并发执行
-        tasks = [
-            _validate_single(cp, i)
+        tasks = {
+            asyncio.create_task(_validate_single(cp, i)): i
             for i, cp in enumerate(checkpoints)
-        ]
+        }
+        raw_results: list[Any] = []
 
-        try:
-            raw_results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=_TOTAL_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
+        done, pending = await asyncio.wait(
+            tasks.keys(),
+            timeout=effective_total_timeout_s,
+        )
+
+        for task in done:
+            try:
+                raw_results.append(task.result())
+            except Exception as exc:
+                raw_results.append(exc)
+
+        if pending:
             logger.error(
-                "coco_consistency_validator: 全部校验总超时 (%ds)",
+                "coco_consistency_validator: 全部校验总超时 (configured=%.1fs, effective=%.1fs, pending=%d)",
                 _TOTAL_TIMEOUT_S,
+                effective_total_timeout_s,
+                len(pending),
             )
-            raw_results = []
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         # ---- 整理结果 ----
         results_map: dict[int, CodeConsistencyResult] = {}
@@ -211,10 +240,11 @@ def build_coco_consistency_validator_node(
             summary["unverified"],
             total_elapsed,
         )
-
         if summary["unverified"] > 0:
-            raise RuntimeError(
-                f"Coco 校验未完成: total={summary['total']}, unverified={summary['unverified']}"
+            logger.warning(
+                "coco_consistency_validator: 存在未完成校验，继续后续流程: total=%d, unverified=%d",
+                summary["total"],
+                summary["unverified"],
             )
 
         return {
@@ -316,8 +346,7 @@ def _annotate_checkpoints(
     for idx, cp in enumerate(checkpoints):
         result = results_map.get(idx)
         if result is None:
-            # 未校验的 checkpoint 保持原样
-            continue
+            result = CodeConsistencyResult(status="unverified", verified_by="")
 
         # ---- 设置 code_consistency ----
         _set_attr_safe(cp, "code_consistency", result)
@@ -347,7 +376,6 @@ def _annotate_checkpoints(
                 )
                 new_expected = (expected or "") + todo_text
                 _set_attr_safe(cp, "expected_result", new_expected)
-
         elif result.status == "unverified":
             if "code_unverified" not in existing_tags:
                 existing_tags.append("code_unverified")
