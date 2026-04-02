@@ -12,11 +12,12 @@ TypedDict 的 ``total=False`` 表示所有字段均为可选，
 新增知识检索相关状态字段，支持 GraphRAG 知识注入。
 新增 XMind 参考相关状态字段，支持已有 Checklist 结构参考。
 新增 draft_writer_timing 字段，支持并发补充阶段的耗时数据流转与持久化。
+新增 MR 分析相关状态字段，支持代码变更分析与一致性校验。
 """
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from app.domain.api_models import CaseGenerationRequest, ErrorInfo, ModelConfigOverride
 from app.domain.case_models import QualityReport, TestCase
@@ -53,6 +54,12 @@ class GlobalState(TypedDict, total=False):
     - reference_xmind_path: 参考 XMind 文件路径
     - xmind_reference_summary: 参考 XMind 结构分析摘要
     - draft_writer_timing: draft_writer 并发补充阶段的耗时元数据
+    - frontend_mr_config: 前端 MR 源配置
+    - backend_mr_config: 后端 MR 源配置
+    - mr_analysis_result: MR 分析结果
+    - mr_code_facts: MR 代码级事实列表
+    - mr_consistency_issues: MR 一致性问题列表
+    - mr_combined_summary: MR 合并摘要
     """
 
     run_id: str
@@ -104,6 +111,17 @@ class GlobalState(TypedDict, total=False):
     # ---- draft_writer 并发耗时数据 ----
     draft_writer_timing: dict
 
+    # ---- MR 分析字段 ----
+    frontend_mr_config: Any
+    backend_mr_config: Any
+    mr_input: Any
+    mr_analysis_result: Any
+    frontend_mr_result: Any
+    backend_mr_result: Any
+    mr_code_facts: list
+    mr_consistency_issues: list
+    mr_combined_summary: str
+
 
 class CaseGenState(TypedDict, total=False):
     """用例生成子图状态。
@@ -115,6 +133,12 @@ class CaseGenState(TypedDict, total=False):
     - mandatory_skeleton: 强制骨架树
     - xmind_reference_summary: 参考 XMind 结构分析摘要
     - draft_writer_timing: draft_writer 并发补充阶段的耗时元数据
+    - frontend_mr_config: 前端 MR 源配置
+    - backend_mr_config: 后端 MR 源配置
+    - mr_analysis_result: MR 分析结果
+    - mr_code_facts: MR 代码级事实列表
+    - mr_consistency_issues: MR 一致性问题列表
+    - mr_combined_summary: MR 合并摘要
     """
 
     language: str
@@ -147,3 +171,14 @@ class CaseGenState(TypedDict, total=False):
 
     # ---- draft_writer 并发耗时数据 ----
     draft_writer_timing: dict
+
+    # ---- MR 分析字段 ----
+    frontend_mr_config: Any
+    backend_mr_config: Any
+    mr_input: Any
+    mr_analysis_result: Any
+    frontend_mr_result: Any
+    backend_mr_result: Any
+    mr_code_facts: list
+    mr_consistency_issues: list
+    mr_combined_summary: str
