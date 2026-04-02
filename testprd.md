@@ -171,3 +171,323 @@ The 2 new secondary goals override the previous allowlist logic. New and old pla
 creative
 
 Aligning with cpnew allowlist —— selecting optimize a3+a4 (a4 high weight) defaults to making cta required
+Aligning with cpnew allowlist —— selecting optimize a3+a4 (a4 high weight) defaults to making cta required
+
+
+
+
+
+[Backend Tech Design] Cads New Secondary Optimize Goals
+
+
+Design Preparation
+
+Backgroud
+
+Consideration ads currently have multiple models such as a3+a4 (a3 high weight) (<=> A3), a3+a4 (a4 high weight), and a3+vtr, with the success rate of each model basically stable and meeting expectations. Now we need to platformize these three products.
+Advertisers can freely select the optimize goal that best suits their needs when creating ads. This enhances advertiser flexibility and deepens their understanding of CADS, while significantly reducing ops and rds workloads, facilitating overall management and statistical analysis.
+Cads(Consideration Ads)
+VideView
+Add a3+a4(a4 high)
+Add a3+vtr
+PRD: [PRD] Consideration ads New Secondary Optimize Goals
+
+
+General Design
+
+Add two fields：
+ttms_secondary_optimize_goal：store secondary optimization goals. The delivery side decides which delivery flow to follow based on this field.
+real_acc_model_id：Store the real Acc model ID, used by TTMS and the placement side.
+UI screenshot
+
+Ad Level
+field	value
+ad group > ttms_account_id	eg: 7387981492036763666, Not editable
+ad group > optimize_goal	Cads: 129(A3), VV: 118(ENGAGED_VIEW), Not editable
+ad group > [new field] ttms_secondary_optimize_goal	nil/0/1/2
+enum TtmsSecondaryOptimizeGoal {
+    UNSET = 0           // 展示，但不打开 toggle
+    MORE_VTR = 1        // a3+vtr
+    MORE_CONVERSION = 2 // a3+a4(a4 high)
+}
+Not editable
+== nil, 前端不展示 toggle
+| ad group > [new field] real_acc_model_id | eg: 101000, Not editable |
+If >0 is new ad group, else Is old ad group
+Cads Goal
+
+goal	model	简称	Judgment caliber
+Consideration audience acquisition	a3+a4(a3 high weight)	a3	optimize_goal = 129 && ttms_secondary_optimize_goal in (nil, 0)
+More video watch time	a3+vtr	vtr	Cads: (short term) optimize_goal = 129 && ttms_secondary_optimize_goal = 1; VV: (long term) optimize_goal = 118 && ttms_secondary_optimize_goal = 1
+More assisted new conversions	a3+a4(a4 high weight)	a4	optimize_goal = 129 && ttms_secondary_optimize_goal = 2
+TTMS Account 与 Secondary Goal 关系
+
+TTS: All goals available
+More video watch time （a3+vtr)
+More assisted new conversions (a3+a4(a4 high))
+Web & App: Only A3 and consideration audience with more 6-second views
+More video watch time（a3+vtr)
+Architecture Design
+
+Required field
+Main logic:
+TTAM creation:
+Query TTMS account list/info with realAccModels
+According to conversion type to enable secondary optimize goals
+Store ttms_secondary_optimize_goal and real_acc_model_id for ttms and delivery.
+TTMS:
+https://bytedance.larkoffice.com/wiki/GnETw5cGTioWctkOhMicFHkznze
+Return realAccModels
+Delivery side
+Technical docs：
+TTAM reporting: Reporting A4-related metrics
+MAPI
+Bulk CSV
+Working flow Design
+
+Required field
+All key changes must be reflected in the flowchart or sequence diagram.
+Query ttms account List/Info
+
+In the ad group page initial stage, FE query ttms account list from TTMS by brand_bff/brand_core.
+In edit page, FE query ttms account info
+Creation process
+
+In the ad core creation process, we need to support 1NN(snap/sketch), normal update/detail flow, Manual and S+2.0.
+In BuildStore/CreationRPC, we will do some logic validation and field adapation. And query the ttms account list and new allowlist.
+Snap + Sketch
+
+In the draft stage, we only write snap redis and sketch db, without logic tree. And we haven't any logical change. So we only need to pay attention to request params and storage.
+Redis: toutiao.redis.ad_snap
+MySQL: ad_sketch
+CBO
+
+Two features:
+Old Cads CBO Campaign - can't create new ad group
+How to identify old Cads CBO campaign？
+campaign.data.budget_optimize_switch == 1 && 
+ad.data.real_acc_model_id == nil/0
+New CBO Campaign
+Cads CBO: ttms_secondary_optimize_goal must be same.
+VideoView CBO: can't support toggle logic.
+ad core creation flow
+
+11N and normal creation use the same code. I put them together.
+Manual in BuildStone and S+2.0 in CreationRPC(BS2.0). The technical details here take CreationRPC as an example
+Ad Group Level:
+In all write + read interfaces, add two fields(ttms_secondary_optimize_goal + real_acc_model_id).
+These two fields are not editable.
+Derived flow
+use template values directly
+NOTICE: need to regress to the derived and edit response process
+Special logic for Cads and VideoView
+Cads - a3+a4(a4 high)
+ttms_secondary_optimize_goal must match with accModel.conversion_type.
+VideoView - a3+vtr
+Validate allowlist - VIDEOVIEW_A3_OPTIMIZATION
+Fixed some fields
+optimize_goal = 118(EngageView)
+smart_bid_type=7(NO_BID)
+Don't support CBO
+Creative Level:
+In Cads, if users select the a3+a4(a4 high) opt goal and selected TTMS account is TTS type , CTA is required
+[Required] Allowlist/Experimental Design
+
+New allowlist/experimental Design
+
+Allowlist ID/Libra link, complete the design before technical review
+VIDEOVIEW_A3_OPTIMIZATION = TODO
+CADS_MORE_VTR = 11194
+CADS_MORE_CONVERSION = 11195
+Stock Allowlist/Experimental Impact Assessment
+
+Evaluate the whitelists/experiments affected after the required whitelist is enabled. We need to focus on code compatibility and test regression. Query tool: https://quantum-sg.bytedance.net/page-galaxy/whitelist
+none
+Storage Design
+
+Optional
+field_name	field_path	field_table	field_type	Value	Reading service
+ttms_account_id	ad.data	ad	int64	123456789012345678	ad.nebula.build_stone_i18n, ad.tt4b.creation_rpc
+[new] real_acc_model_id	ad.data	ad	int64	123456789012345678	ad.nebula.build_stone_i18n, ad.tt4b.creation_rpc
+optimize_goal	ad.data	ad	enum OptimizeGoal { ENGAGED_VIEW = 118, A3 = 129 }	129	ad.nebula.build_stone_i18n, ad.tt4b.creation_rpc
+[new] ttms_secondary_optimize_goal	ad.data	ad	enum TtmsSecondaryOptimizeGoal { UNSET = 0, MORE_VTR = 1, MORE_CONVERSION = 2 }	1	ad.nebula.build_stone_i18n, ad.tt4b.creation_rpc
+Detailed Design
+
+Scenario Influence Evaluation
+
+Scenario	Status
+11N Ad Creation	✅
+1NN Ad Creation	✅
+Edit	✅
+Copy	✅
+1NN Copy	✅
+Draft	✅
+Allowlist
+
+enum AdverFunc {
+    CADS_MORE_VTR = 11194          // a3+vtr
+    CADS_MORE_CONVERSION = 11195   // a3+a4(a4 high weight)
+}
+ad.tt4b.creation_bff — Update IDL, Add new fields
+ad.platform.tt_ads — Update IDL, Add new fields
+brand_bff_i18n — Update IDL, Add new fields
+brand_core_i18n — Update IDL, Add new fields
+ad.nebula.build_stone_i18n
+CBO consistency check
+a. If Cads, check ttms_secondary_optimize_goal.
+ttam_monorepo/app/build_stone_i18n/biz/snap_creation/snap_context/check_snap_cbo_consistency_context.go
+ad.tt4b.creation_rpc
+CBO
+If Cads, check ttms_secondary_optimize_goal.
+If firstAd.real_acc_model_id == nil/0, block creation.
+ttam_monorepo/app/tt4b_creation_rpc/biz/spp_1mn_consistence/spp_1mn_consistence.go
+API Design
+
+Optional
+IDL design or API documentation.
+HTTP
+
+ad.platform.brand_bff_i18n
+/api/v4/i18n/brand/tool/ttms_account_list/ | query ttms account list by advid
+Get advID from cookies, so there is no need req parms in the body.
+Add RealAccModels fields
+/api/v4/i18n/brand/tool/ttms_account_info/ | query ttms account info by ttms account id.
+Add RealAccModels fields
+ad.platform.tt_ads & ad.tt4b.creation_bff
+Related API (ad/snap/sketch)
+BAM: https://cloud-i18n.bytedance.net/bam/rd/ad.tt4b.creation_bff/api_doc/show_doc?api_branch=feat-traffic-cads&endpoint_id=1681847&cluster=default
+Service	Tag	HTTP API	RPC API (ad.nebula.build_stone_i18n/ad.tt4b.creation_rpc)	Our Changes
+ad.tt4b.creation_bff	Save Snap/Sketch	/api/v4/i18n/creation/ad_snap/save/	SaveAdSnap	Update Sketch Form Data, Add new fields
+Get Snap/Sketch	/api/v4/i18n/creation/snap/detail/	MGetSnapByIds	
+Copy creative snap/sketch in creation flow	/api/v4/i18n/creation/ad_snap/copy/	CopyAdSnap	
+ad.platform.tt_ads	Consideration Auction creation flow	/api/v3/i18n/perf/ad/update/	CreateAd	
+/api/v3/i18n/perf/ad/detail/, /api/v3/i18n/perf/ad/copy/	MGetAdInfoByIds	
+Write Interface
+path="/api/v4/i18n/creation/ad_snap/save"
+     "/api/v3/i18n/perf/ad/update"
+method="GET"
+req={
+    "ad_sketch_form_data or base_info": {
+        "ttms_account_id": 7340171258740473857，
+        "real_acc_model_id": 1234567890
+        "ttms_secondary_optimize_goal": -1/0/1/2
+    }
+}
+
+res={
+    "msg": "success",
+    "code": 0,
+    "data": {},
+    "extra": {}
+}
+Read Interface
+path="/api/v4/i18n/creation/snap/detail/"
+     "/api/v4/i18n/creation/ad_snap/copy/"
+     "/api/v3/i18n/perf/ad/detail/"
+     "/api/v3/i18n/perf/ad/copy/"
+method="GET"
+req={
+    "ad_id or ad_snap_id or": 
+}
+
+res={
+    "msg": "success",
+    "code": 0,
+    "data": {
+        "ad_snap_map/xxxx or base_info": {
+            "ttms_account_id": 7340171258740473857，
+            "real_acc_model_id": 1234567890
+            "ttms_secondary_optimize_goal": -1/0/1/2
+        } 
+    },
+    "extra": {}
+}
+RPC
+
+ad.platform.brand_core_i18n
+Same as brand_bff_i18n.
+Outer Dependencies
+
+TTMS
+
+Cads Secondary Optimize Goals TTMS 后端适配方案
+接口升级
+PSM: ad.ttms.circuit
+升级接口：
+GetAccountsByAdvId
+GetAccountInfo
+IDL：
+红色下划线 表示本次变更：接口整体不变，仅在 Account 结构体中新增了 AccModel 字段
+enum AccountStatus {
+    ENABLE = 1
+    DISABLE = 2
+}
+
+enum ConversionType {
+    // @desc: Tiktok Shop
+    TTS = 1
+    // @desc: Web
+    WEB = 2
+    // @desc: App
+    APP = 3
+}
+
+struct RealAccModel {
+    1: required i64 accModelId
+    // 101000 | 201000
+    2: required i64 realAccModelId
+    // TTS Purchase | Web payment
+    3: required string name
+    // TTS | WEB
+    4: required ConversionType conversionType
+}
+
+struct Account {
+    // @desc: TTMS账户ID
+    1: required i64 accountId
+    // @desc: TTMS账户名称
+    2: required string accountName
+    // @desc: 账户Logo图片地址（有效期24小时）
+    3: required string logoUrl
+    // @desc: 国家码
+    4: required string countryCode
+    // @desc: 国家名称（英文）
+    5: required string countryName
+    // @desc: 入驻行业ID
+    6: required i64 industryId
+    // @desc: 入驻行业名称（英文）
+    7: required string industryName
+    // @desc: TTMS账户状态
+    8: required AccountStatus status
+    // @desc: ACC模型信息 (本次新增)
+    9: optional list<RealAccModel> realAccModels
+}
+
+struct GetAccountsByAdvIdRequest {
+    // @desc: Advertiser ID
+    1: required i64 advId
+    255: base.Base Base
+}
+
+struct GetAccountsByAdvIdResponse {
+    // @desc: 关联的TTMS账户列表
+    1: optional list<open.Account> accounts
+    255: base.BaseResp BaseResp
+}
+
+struct GetAccountInfoRequest {
+    // @desc: TTMS账户ID
+    1: required i64 accountId
+    255: base.Base Base
+}
+
+struct GetAccountInfoResponse {
+    // @desc: 品牌信息
+    1: optional open.Account account
+    255: base.BaseResp BaseResp
+}
+
+service TTMSOpenService {
+    GetAccountsByAdvIdResponse GetAccountsByAdvId(1: GetAccountsByAdvIdRequest req) (api.category = 'Account')
+    GetAccountInfoResponse GetAccountInfo(1: GetAccountInfoRequest req) (api.category = 'Account')
+}

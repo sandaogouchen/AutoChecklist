@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -213,6 +214,23 @@ class TestWrapNode:
         wrapped({})
 
         assert timer.get_records()[0].iteration_index == 2
+
+    def test_logs_when_node_returns_awaitable(self, caplog):
+        timer = NodeTimer()
+
+        async def async_node(state):
+            return {"ok": True}
+
+        wrapped = wrap_node("mr_analyzer", async_node, timer)
+
+        with caplog.at_level("ERROR", logger="app.timing"):
+            result = wrapped({"mr_input": {"diff_files": ["a.py"]}})
+
+        assert asyncio.iscoroutine(result)
+        assert "Node returned awaitable instead of dict" in caplog.text
+        assert "node=mr_analyzer" in caplog.text
+        assert "return_type=coroutine" in caplog.text
+        result.close()
 
 
 # ---------------------------------------------------------------------------

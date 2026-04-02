@@ -21,6 +21,8 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
 """
 from __future__ import annotations
 
+import logging
+
 from langgraph.graph import END, START, StateGraph
 
 from app.clients.llm import LLMClient
@@ -31,6 +33,8 @@ from app.nodes.input_parser import input_parser_node
 from app.nodes.reflection import reflection_node
 from app.nodes.template_loader import build_template_loader_node
 from app.utils.timing import maybe_wrap
+
+logger = logging.getLogger(__name__)
 
 
 def build_workflow(
@@ -163,7 +167,19 @@ def _build_case_generation_bridge(case_generation_subgraph):
         # 清理 None 值
         subgraph_input = {k: v for k, v in subgraph_input.items() if v is not None}
 
-        subgraph_result = case_generation_subgraph.invoke(subgraph_input)
+        try:
+            subgraph_result = case_generation_subgraph.invoke(subgraph_input)
+        except Exception as exc:
+            logger.exception(
+                "case_generation subgraph failed: error_type=%s, input_keys=%s, "
+                "has_frontend_mr=%s, has_backend_mr=%s, has_mr_input=%s",
+                exc.__class__.__name__,
+                sorted(subgraph_input.keys()),
+                bool(subgraph_input.get("frontend_mr_config")),
+                bool(subgraph_input.get("backend_mr_config")),
+                bool(subgraph_input.get("mr_input")),
+            )
+            raise
 
         return {
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
