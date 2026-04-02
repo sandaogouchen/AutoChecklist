@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import subprocess
 import time
 from typing import Any
 
@@ -101,6 +103,8 @@ class CodeFactItem(BaseModel):
     fact_type: str = "logic_branch"
     severity: str = "medium"
     related_function: str = ""
+    code_snippet: str = ""
+    related_prd_fact_ids: list[str] = Field(default_factory=list)
 
 
 class ConsistencyIssueItem(BaseModel):
@@ -122,6 +126,19 @@ class RelatedSnippetItem(BaseModel):
     relation_type: str = "caller"
 
 
+class Task1FactRevisionItem(BaseModel):
+    """Task 1 — 单个 PRD fact 的代码修订结果。"""
+
+    fact_id: str = ""
+    status: str = "confirmed"
+    revised_description: str = ""
+    revised_requirement: str = ""
+    revised_branch_hint: str = ""
+    todo: str = ""
+    actual_implementation: str = ""
+    confidence: float = 0.0
+
+
 class Task1Response(BaseModel):
     """Task 1 Coco 响应的完整 Schema（MR 代码 case 生成）。"""
 
@@ -130,6 +147,7 @@ class Task1Response(BaseModel):
     code_facts: list[CodeFactItem] = Field(default_factory=list)
     consistency_issues: list[ConsistencyIssueItem] = Field(default_factory=list)
     related_code_snippets: list[RelatedSnippetItem] = Field(default_factory=list)
+    fact_revision: Task1FactRevisionItem | None = None
 
 
 class Task2Response(BaseModel):
@@ -165,6 +183,7 @@ class CocoClient:
         self._base_url: str = getattr(settings, "coco_api_base_url", "https://codebase-api.byted.org/v2/")
         self._jwt_token: str = getattr(settings, "coco_jwt_token", "")
         self._agent_name: str = getattr(settings, "coco_agent_name", "sandbox")
+        self._model_name: str = getattr(settings, "coco_model_name", "")
         self._timeout: int = getattr(settings, "coco_task_timeout", 300)
         self._poll_start: int = getattr(settings, "coco_poll_interval_start", 5)
         self._poll_max: int = getattr(settings, "coco_poll_interval_max", 20)
@@ -180,34 +199,115 @@ class CocoClient:
             "X-Code-User-JWT": self._jwt_token,
         }
 
+    @staticmethod
+    def _resolve_agent_name(agent_name: str | None) -> str:
+        """将 agent 名称约束到 OpenAPI 支持的取值范围。"""
+        supported_agents = {"copilot", "sandbox"}
+        normalized = (agent_name or "").strip().lower()
+        if normalized in supported_agents:
+            return normalized
+        if normalized:
+            logger.warning(
+                "Coco agent_name=%s 不受 OpenAPI 支持，自动回退为 sandbox",
+                agent_name,
+            )
+        return "sandbox"
+
+    @staticmethod
+    def _extract_repo_path(mr_url: str, git_url: str) -> str:
+        """从内部仓库 URL 中提取 org/repo 路径。"""
+        candidates = [git_url, mr_url]
+        patterns = [
+            r"^https://code\.byted\.org/([^/]+/[^/.]+)(?:\.git)?(?:$|[/?#])",
+            r"^git@code\.byted\.org:([^/]+/[^/.]+)\.git$",
+            r"^https://bits\.bytedance\.net/code/([^/]+/[^/]+)(?:$|/)",
+        ]
+        for value in candidates:
+            candidate = (value or "").strip()
+            if not candidate:
+                continue
+            for pattern in patterns:
+                match = re.match(pattern, candidate)
+                if match:
+                    return match.group(1)
+        return ""
+
+    @staticmethod
+    def _lookup_repo_id(repo_path: str) -> str:
+        """通过 bytedcli 查询内部仓库的数值型 RepoId。"""
+        if not repo_path:
+            return ""
+        try:
+            completed = subprocess.run(
+                ["bytedcli", "--json", "codebase", "repo", "view", repo_path],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except FileNotFoundError:
+            logger.warning("未找到 bytedcli，跳过 Coco RepoId 自动解析")
+            return ""
+        except subprocess.TimeoutExpired:
+            logger.warning("bytedcli 查询 RepoId 超时: repo_path=%s", repo_path)
+            return ""
+
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            stdout = (completed.stdout or "").strip()
+            logger.warning(
+                "bytedcli 查询 RepoId 失败: repo_path=%s, returncode=%s, detail=%s",
+                repo_path,
+                completed.returncode,
+                stderr or stdout[:500],
+            )
+            return ""
+
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            logger.warning("bytedcli RepoId 响应无法解析 JSON: repo_path=%s", repo_path)
+            return ""
+
+        repo_id = payload.get("data", {}).get("Repository", {}).get("Id", "")
+        if repo_id:
+            return str(repo_id)
+        logger.warning("bytedcli RepoId 响应缺少 Repository.Id: repo_path=%s", repo_path)
+        return ""
+
+    def _resolve_repo_id(self, mr_url: str, git_url: str) -> str:
+        """为 Coco sandbox 任务解析可接受的 RepoId。"""
+        repo_path = self._extract_repo_path(mr_url=mr_url, git_url=git_url)
+        if not repo_path:
+            return ""
+        repo_id = self._lookup_repo_id(repo_path)
+        if repo_id:
+            logger.info("已解析 Coco RepoId: repo_path=%s, repo_id=%s", repo_path, repo_id)
+        return repo_id
+
     async def _post(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发送 POST 请求到 Coco API。"""
         url = f"{self._base_url.rstrip('/')}/?Action={action}"
         logger.debug("Coco API 请求: %s, payload keys=%s", action, list(payload.keys()))
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                response_text = exc.response.text.strip()
+                if response_text:
+                    logger.error(
+                        "Coco API %s 失败: status=%s, response=%s",
+                        action,
+                        exc.response.status_code,
+                        response_text[:1000],
+                    )
+                raise
             data = resp.json()
 
         if "Result" not in data:
             raise CocoTaskError(f"Coco API 响应异常: 缺少 Result 字段, action={action}")
         return data["Result"]
-
-    @staticmethod
-    def _extract_repo_id(mr_url: str) -> str:
-        """从 MR URL 提取仓库标识。
-
-        支持 GitHub / GitLab / code.bytedance.org 等 URL 格式。
-        """
-        if not mr_url:
-            return ""
-        # 去掉协议前缀，提取 org/repo 部分
-        # 例: https://github.com/org/repo/pull/123 -> org/repo
-        import re
-        m = re.search(r"(?:github\.com|gitlab\.com|code\.bytedance\.org)/([^/]+/[^/]+)", mr_url)
-        if m:
-            return m.group(1)
-        return mr_url
 
     # ------------------------------------------------------------------
     # Task 发送
@@ -238,14 +338,18 @@ class CocoClient:
             raise CocoTaskError("COCO_JWT_TOKEN 未配置，无法使用 Coco Agent")
 
         payload = {
-            "AgentName": agent_name or self._agent_name,
+            "AgentName": self._resolve_agent_name(agent_name or self._agent_name),
             "Message": {
                 "Id": "",
                 "Role": "user",
                 "Parts": [{"Text": {"Text": prompt}}],
             },
-            "RepoId": self._extract_repo_id(mr_url or git_url),
         }
+        if self._model_name.strip():
+            payload["ModelName"] = self._model_name.strip()
+        repo_id = self._resolve_repo_id(mr_url=mr_url, git_url=git_url)
+        if repo_id:
+            payload["RepoId"] = repo_id
 
         try:
             result = await self._post("SendCopilotTaskMessage", payload)
@@ -254,6 +358,13 @@ class CocoClient:
                 raise CocoTaskError("Coco 返回的 Task.Id 为空")
             logger.info("Coco 任务已发送: task_id=%s, mr_url=%s", task_id, mr_url)
             return task_id
+        except httpx.HTTPStatusError as exc:
+            response_text = exc.response.text.strip()
+            detail = f"{exc}"
+            if response_text:
+                detail = f"{detail}; response={response_text[:500]}"
+            logger.error("Coco 任务发送失败 (HTTP): %s", detail)
+            raise CocoTaskError(f"Coco 任务发送 HTTP 错误: {detail}") from exc
         except httpx.HTTPError as exc:
             logger.error("Coco 任务发送失败 (HTTP): %s", exc)
             raise CocoTaskError(f"Coco 任务发送 HTTP 错误: {exc}") from exc
@@ -356,12 +467,22 @@ class CocoClient:
         Returns:
             解析后的 MRAnalysisResult。
         """
+        parsed, meta = await self.extract_task1_payload(task)
+        return self._map_task1_to_result(parsed, meta)
+
+    async def extract_task1_payload(
+        self,
+        task: dict[str, Any],
+    ) -> tuple[Task1Response, dict[str, Any]]:
+        """提取并解析 Task 1 原始响应。"""
         raw_text = self._get_assistant_text(task)
         if not raw_text:
             logger.warning("Coco 任务未返回有效文本，返回空结果")
-            return MRAnalysisResult(mr_summary="Coco 未返回有效结果")
+            return Task1Response(mr_summary="Coco 未返回有效结果"), {
+                "layer": "empty",
+                "inferred_fields": [],
+            }
 
-        # 使用三层容错解析
         from app.services.coco_response_validator import CocoResponseValidator
 
         validator = CocoResponseValidator(self._llm_client)
@@ -376,9 +497,7 @@ class CocoClient:
             meta.get("layer", "unknown"),
             meta.get("inferred_fields", []),
         )
-
-        # 映射到内部模型
-        return self._map_task1_to_result(parsed, meta)
+        return parsed, meta
 
     @staticmethod
     def _map_task1_to_result(
@@ -391,7 +510,9 @@ class CocoClient:
                 fact_id=f.fact_id or f"CF-{i + 1:03d}",
                 description=f.description,
                 source_file=f.source_file,
+                code_snippet=f.code_snippet,
                 fact_type=f.fact_type,
+                related_prd_fact_ids=f.related_prd_fact_ids,
             )
             for i, f in enumerate(parsed.code_facts)
         ]
@@ -427,6 +548,46 @@ class CocoClient:
             related_code_snippets=related_snippets,
             search_trace=search_trace,
         )
+
+    async def run_mr_fact_task(
+        self,
+        *,
+        fact: Any,
+        mr_context: dict[str, str],
+        changed_files_summary: str,
+    ) -> tuple[MRAnalysisResult, Task1FactRevisionItem, dict[str, Any]]:
+        """Task 1 — 针对单个 fact 执行 Coco MR 分析。"""
+        from app.nodes.mr_analyzer import _build_coco_task1_prompt_for_fact
+
+        prompt = _build_coco_task1_prompt_for_fact(
+            mr_url=mr_context.get("mr_url", ""),
+            git_url=mr_context.get("git_url", ""),
+            branch=mr_context.get("branch", ""),
+            fact=fact,
+            changed_files_summary=changed_files_summary,
+        )
+        task_id = await self.send_task(
+            prompt=prompt,
+            mr_url=mr_context.get("mr_url", ""),
+            git_url=mr_context.get("git_url", ""),
+        )
+        task = await self.poll_task(task_id)
+        parsed, meta = await self.extract_task1_payload(task)
+        result = self._map_task1_to_result(parsed, meta)
+        revision = parsed.fact_revision or Task1FactRevisionItem(
+            fact_id=getattr(fact, "fact_id", ""),
+            status="confirmed",
+            confidence=0.0,
+        )
+        if not revision.fact_id:
+            revision.fact_id = getattr(fact, "fact_id", "")
+        return result, revision, {
+            "prompt": prompt,
+            "task_id": task_id,
+            "task": task,
+            "result": result,
+            "fact_revision": revision,
+        }
 
     # ------------------------------------------------------------------
     # Task 2: 逐 case 一致性校验

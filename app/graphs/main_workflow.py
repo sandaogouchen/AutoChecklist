@@ -184,6 +184,7 @@ def _build_case_generation_bridge(case_generation_subgraph):
             raise
 
         return {
+            "research_output": subgraph_result.get("research_output", state["research_output"]),
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "checkpoints": subgraph_result.get("checkpoints", []),
             "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),

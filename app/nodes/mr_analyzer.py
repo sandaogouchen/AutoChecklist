@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from app.domain.mr_models import (
     CocoTaskStatus,
@@ -25,6 +27,7 @@ from app.domain.mr_models import (
     MRSourceConfig,
     RelatedCodeSnippet,
 )
+from app.domain.research_models import ResearchFact, ResearchOutput
 from app.services.codebase_tools import CODEBASE_TOOLS, execute_tool
 from app.utils.filesystem import ensure_directory, write_json, write_text
 
@@ -158,7 +161,7 @@ _COCO_TASK1_PROMPT = """\
 - Git URL: {git_url}
 - Branch: {branch}
 
-[候选变更模块]
+[候选变更模块 / 验证锚点]
 {changed_files_summary}
 
 [PRD / 场景摘要]
@@ -177,6 +180,46 @@ _COCO_TASK1_PROMPT = """\
   "code_facts": [{{"fact_id": "...", "description": "...", "source_file": "...", "fact_type": "..."}}],
   "consistency_issues": [{{"issue_id": "...", "severity": "...", "prd_expectation": "...", "mr_implementation": "...", "discrepancy": "...", "confidence": 0.0}}],
   "related_code_snippets": [{{"file_path": "...", "code_content": "...", "relation_type": "..."}}]
+}}
+"""
+
+_COCO_TASK1_FACT_PROMPT = """\
+你是一名资深 QA 工程师，请只围绕下面这一条 FACT 分析当前 MR/分支中的代码实现，并输出可直接用于 checklist 设计的结论。
+
+[代码仓库]
+- MR URL: {mr_url}
+- Git URL: {git_url}
+- Branch: {branch}
+
+[当前 FACT]
+{fact_summary}
+
+[候选变更模块 / 验证锚点]
+{changed_files_summary}
+
+请严格按以下顺序执行：
+1. 先定位与该 FACT 最相关的模块、入口函数、调用链和配置定义。
+2. 只结合当前 FACT 判断代码是否符合预期；不要混入其他 FACT 的结论。
+3. 输出代码级 fact 时优先覆盖分支、边界、错误处理、状态变化、副作用。
+4. 若当前实现与 FACT 不一致，请直接给出面向后续 checklist 生成的修订说明和 TODO。
+
+请严格按以下 JSON 格式输出：
+{{
+  "mr_summary": "围绕当前 FACT 的 MR 变更摘要",
+  "changed_modules": ["模块1", "模块2"],
+  "code_facts": [{{"fact_id": "...", "description": "...", "source_file": "...", "code_snippet": "...", "fact_type": "...", "related_prd_fact_ids": ["{fact_id}"]}}],
+  "consistency_issues": [{{"issue_id": "...", "severity": "...", "prd_expectation": "...", "mr_implementation": "...", "discrepancy": "...", "confidence": 0.0}}],
+  "related_code_snippets": [{{"file_path": "...", "code_content": "...", "relation_type": "..."}}],
+  "fact_revision": {{
+    "fact_id": "{fact_id}",
+    "status": "confirmed | mismatch | unverified",
+    "revised_description": "必要时修订后的描述，没有则返回空字符串",
+    "revised_requirement": "必要时修订后的预期/约束，没有则返回空字符串",
+    "revised_branch_hint": "必要时修订后的分支提示，没有则返回空字符串",
+    "todo": "若代码与预期不一致，需要透传到 checklist 的 TODO；一致时为空字符串",
+    "actual_implementation": "当前代码中的实际实现描述",
+    "confidence": 0.0
+  }}
 }}
 """
 
@@ -274,6 +317,7 @@ def build_mr_analyzer_node(
             "mr_consistency_issues": all_consistency_issues,
             "mr_combined_summary": combined_summary,
             "coco_artifacts": state.get("coco_artifacts", {}),
+            "research_output": state.get("research_output"),
         }
 
         if frontend_result:
@@ -344,6 +388,216 @@ def _build_coco_task1_prompt(
     )
 
 
+def _build_coco_task1_prompt_for_fact(
+    mr_url: str,
+    git_url: str,
+    branch: str,
+    fact: ResearchFact,
+    changed_files_summary: str,
+) -> str:
+    """构建单 fact 的 Coco Task 1 提示词。"""
+    fact_summary = _format_fact_summary(fact)
+    return _COCO_TASK1_FACT_PROMPT.format(
+        mr_url=mr_url,
+        git_url=git_url or "unknown",
+        branch=branch or "unknown",
+        fact_id=fact.fact_id or "FACT-UNKNOWN",
+        fact_summary=fact_summary,
+        changed_files_summary=changed_files_summary or "（无显式变更文件摘要）",
+    )
+
+
+def _normalize_codebase_context(
+    mr_url: str,
+    git_url: str,
+    branch: str,
+) -> tuple[str, str]:
+    """归一化 MR 代码仓信息，兼容 Bits 页面链接输入。"""
+    normalized_git_url = (git_url or "").strip()
+    normalized_branch = (branch or "").strip()
+
+    tree_match = re.match(
+        r"^https://bits\.bytedance\.net/code/([^/]+/[^/]+)/tree/([^?#]+)$",
+        normalized_git_url,
+    )
+    if tree_match:
+        repo_path, branch_from_url = tree_match.groups()
+        normalized_git_url = f"https://code.byted.org/{repo_path}.git"
+        if not normalized_branch:
+            normalized_branch = unquote(branch_from_url.strip("/"))
+
+    if not normalized_git_url:
+        mr_match = re.match(
+            r"^https://bits\.bytedance\.net/code/([^/]+/[^/]+)/merge_requests/\d+$",
+            (mr_url or "").strip(),
+        )
+        if mr_match:
+            normalized_git_url = f"https://code.byted.org/{mr_match.group(1)}.git"
+
+    return normalized_git_url, normalized_branch
+
+
+def _build_candidate_module_summary(
+    state: dict[str, Any],
+    diff_files: list[Any],
+) -> str:
+    """构建 Coco Task 1 的候选变更模块/验证锚点摘要。"""
+    sections: list[str] = []
+
+    diff_summary = _build_diff_summary(diff_files)
+    if diff_summary:
+        sections.append("[显式代码变更]\n" + diff_summary)
+
+    validation_targets = _build_validation_target_lines(state)
+    if validation_targets:
+        sections.append(
+            "[基于 PRD / Tech Design 的候选验证锚点]\n"
+            + "\n".join(validation_targets)
+        )
+
+    return "\n\n".join(sections) if sections else "（无显式变更文件摘要）"
+
+
+def _build_validation_target_lines(state: dict[str, Any]) -> list[str]:
+    """将 research facts / checkpoints 转为可读的验证锚点。"""
+    lines: list[str] = []
+
+    research = state.get("research_output")
+    facts = getattr(research, "facts", None)
+    if facts is None and isinstance(research, dict):
+        facts = research.get("facts", research.get("research_facts", []))
+    for fact in (facts or [])[:8]:
+        fact_id = _get_value(fact, "fact_id", "id")
+        description = _get_value(fact, "description", "content", "summary")
+        requirement = _get_value(fact, "requirement")
+        branch_hint = _get_value(fact, "branch_hint")
+
+        parts = []
+        if description:
+            parts.append(f"场景/动作={description}")
+        if requirement:
+            parts.append(f"预期={requirement}")
+        if branch_hint:
+            parts.append(f"分支={branch_hint}")
+        if parts:
+            prefix = f"- FACT {fact_id}: " if fact_id else "- FACT: "
+            lines.append(prefix + "；".join(parts))
+
+    for checkpoint in (state.get("checkpoints") or [])[:6]:
+        checkpoint_id = _get_value(checkpoint, "checkpoint_id", "id")
+        title = _get_value(checkpoint, "title", "name")
+        objective = _get_value(checkpoint, "objective", "expected_result")
+        preconditions = _get_value(checkpoint, "preconditions")
+
+        parts = []
+        if title:
+            parts.append(f"标题={title}")
+        if objective:
+            parts.append(f"验证目标={objective}")
+        if preconditions:
+            parts.append(f"前置/步骤={preconditions}")
+        if parts:
+            prefix = f"- CHECKPOINT {checkpoint_id}: " if checkpoint_id else "- CHECKPOINT: "
+            lines.append(prefix + "；".join(parts))
+
+    return lines
+
+
+def _get_value(item: Any, *keys: str) -> str:
+    """同时兼容 dict / Pydantic model 的取值辅助函数。"""
+    for key in keys:
+        value = item.get(key) if isinstance(item, dict) else getattr(item, key, "")
+        if isinstance(value, list):
+            joined = " / ".join(str(v).strip() for v in value if str(v).strip())
+            if joined:
+                return joined
+        elif value not in (None, ""):
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _format_fact_summary(fact: ResearchFact) -> str:
+    """将单个 ResearchFact 格式化为 prompt 段落。"""
+    lines = [
+        f"- Fact ID: {fact.fact_id or 'FACT-UNKNOWN'}",
+        f"- 场景/动作: {fact.description}",
+    ]
+    if fact.requirement:
+        lines.append(f"- 预期/约束: {fact.requirement}")
+    if fact.branch_hint:
+        lines.append(f"- 分支提示: {fact.branch_hint}")
+    if fact.code_actual_implementation:
+        lines.append(f"- 当前代码实现: {fact.code_actual_implementation}")
+    if fact.code_todo:
+        lines.append(f"- TODO: {fact.code_todo}")
+    return "\n".join(lines)
+
+
+def _get_research_output(state: dict[str, Any]) -> ResearchOutput | None:
+    """从 state 中读取 ResearchOutput。"""
+    research = state.get("research_output")
+    if isinstance(research, ResearchOutput):
+        return research
+    if isinstance(research, dict):
+        return ResearchOutput.model_validate(research)
+    return None
+
+
+def _apply_fact_revision(
+    fact: ResearchFact,
+    revision: Any,
+) -> ResearchFact:
+    """将 per-fact Coco 校验结果回写到 ResearchFact。"""
+    update_fields: dict[str, Any] = {
+        "code_todo": getattr(revision, "todo", "") or "",
+        "code_actual_implementation": getattr(revision, "actual_implementation", "") or "",
+        "code_consistency_status": getattr(revision, "status", "") or "",
+        "code_consistency_confidence": getattr(revision, "confidence", 0.0) or 0.0,
+    }
+
+    revised_description = getattr(revision, "revised_description", "") or ""
+    revised_requirement = getattr(revision, "revised_requirement", "") or ""
+    revised_branch_hint = getattr(revision, "revised_branch_hint", "") or ""
+    if revised_description:
+        update_fields["description"] = revised_description
+    if revised_requirement:
+        update_fields["requirement"] = revised_requirement
+    if revised_branch_hint:
+        update_fields["branch_hint"] = revised_branch_hint
+
+    return fact.model_copy(update=update_fields)
+
+
+def _dedupe_text_items(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _dedupe_related_snippets(snippets: list[RelatedCodeSnippet]) -> list[RelatedCodeSnippet]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[RelatedCodeSnippet] = []
+    for snippet in snippets:
+        key = (
+            snippet.file_path.strip(),
+            snippet.relation_type.strip(),
+            snippet.code_content.strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(snippet)
+    return deduped
+
+
 def _analyze_single_side(
     side: str,
     mr_config: MRSourceConfig,
@@ -398,43 +652,136 @@ async def _analyze_via_coco(
         return MRAnalysisResult(mr_summary=f"Coco 配置缺失，跳过{side}端分析")
 
     client = CocoClient(coco_settings, llm_client=llm_client)
-
-    # 构造 PRD 摘要
-    prd_summary = _build_prd_summary(state)
-    diff_files = getattr(state.get("mr_input"), "diff_files", []) or []
-    prompt = _build_coco_task1_prompt(
+    git_url, branch = _normalize_codebase_context(
         mr_url=mr_config.mr_url,
         git_url=mr_config.codebase.git_url,
         branch=mr_config.codebase.branch,
-        prd_summary=prd_summary[:3000],
-        changed_files_summary=_build_diff_summary(diff_files)[:2000],
     )
+    diff_files = getattr(state.get("mr_input"), "diff_files", []) or []
+    changed_files_summary = _build_candidate_module_summary(state, diff_files)[:2000]
+    research_output = _get_research_output(state)
+    research_facts = list(research_output.facts) if research_output else []
     coco_dir = _get_coco_dir(state)
-    if coco_dir is not None:
-        prompt_path = write_text(coco_dir / f"task1_{side}_prompt.txt", prompt)
-        _record_coco_artifact(state, f"task1_{side}_prompt", prompt_path)
-
     start_time = time.monotonic()
     try:
-        task_id = await client.send_task(
-            prompt=prompt,
-            mr_url=mr_config.mr_url,
-            git_url=mr_config.codebase.git_url,
-        )
-        task = await client.poll_task(task_id)
-        result = await client.extract_result(task)
+        mr_context = {
+            "mr_url": mr_config.mr_url,
+            "git_url": git_url,
+            "branch": branch,
+        }
+        artifacts_to_record: dict[str, Path] = {}
+
+        if research_facts:
+            async def _run_single_fact(fact: ResearchFact) -> tuple[ResearchFact, MRAnalysisResult, Any, dict[str, Any]]:
+                result, revision, artifacts = await client.run_mr_fact_task(
+                    fact=fact,
+                    mr_context=mr_context,
+                    changed_files_summary=changed_files_summary,
+                )
+                return fact, result, revision, artifacts
+
+            fact_results = await asyncio.gather(
+                *[_run_single_fact(fact) for fact in research_facts]
+            )
+
+            updated_facts: list[ResearchFact] = []
+            summaries: list[str] = []
+            changed_modules: list[str] = []
+            code_facts: list[MRCodeFact] = []
+            consistency_issues: list[ConsistencyIssue] = []
+            related_snippets: list[RelatedCodeSnippet] = []
+            task_ids: list[str] = []
+
+            for fact, partial_result, revision, artifacts in fact_results:
+                updated_facts.append(_apply_fact_revision(fact, revision))
+                if partial_result.mr_summary:
+                    summaries.append(partial_result.mr_summary)
+                changed_modules.extend(partial_result.changed_modules)
+
+                for code_fact in partial_result.code_facts:
+                    if not code_fact.related_prd_fact_ids:
+                        code_fact.related_prd_fact_ids = [fact.fact_id]
+                    code_facts.append(code_fact)
+
+                consistency_issues.extend(partial_result.consistency_issues)
+                related_snippets.extend(partial_result.related_code_snippets)
+
+                if coco_dir is not None:
+                    fact_key = fact.fact_id or f"fact_{len(updated_facts):03d}"
+                    prompt_path = write_text(
+                        coco_dir / f"task1_{side}_{fact_key}_prompt.txt",
+                        artifacts.get("prompt", ""),
+                    )
+                    result_path = write_json(
+                        coco_dir / f"task1_{side}_{fact_key}_result.json",
+                        partial_result,
+                    )
+                    revision_path = write_json(
+                        coco_dir / f"task1_{side}_{fact_key}_fact_revision.json",
+                        revision,
+                    )
+                    task_path = write_json(
+                        coco_dir / f"task1_{side}_{fact_key}_task.json",
+                        artifacts.get("task", {}),
+                    )
+                    artifacts_to_record[f"task1_{side}_{fact_key}_prompt"] = prompt_path
+                    artifacts_to_record[f"task1_{side}_{fact_key}_result"] = result_path
+                    artifacts_to_record[f"task1_{side}_{fact_key}_fact_revision"] = revision_path
+                    artifacts_to_record[f"task1_{side}_{fact_key}_task"] = task_path
+                task_id = artifacts.get("task_id", "")
+                if task_id:
+                    task_ids.append(task_id)
+
+            if research_output is not None:
+                updated_research_output = research_output.model_copy(update={"facts": updated_facts})
+                state["research_output"] = updated_research_output
+
+            result = MRAnalysisResult(
+                mr_summary="\n".join(_dedupe_text_items(summaries)),
+                changed_modules=_dedupe_text_items(changed_modules),
+                code_facts=code_facts,
+                consistency_issues=consistency_issues,
+                related_code_snippets=_dedupe_related_snippets(related_snippets),
+                search_trace=["via_coco_agent", f"per_fact_tasks={len(fact_results)}"],
+            )
+            if coco_dir is not None:
+                aggregate_path = write_json(coco_dir / f"task1_{side}_result.json", result)
+                artifacts_to_record[f"task1_{side}_result"] = aggregate_path
+        else:
+            prd_summary = _build_prd_summary(state)
+            prompt = _build_coco_task1_prompt(
+                mr_url=mr_config.mr_url,
+                git_url=git_url,
+                branch=branch,
+                prd_summary=prd_summary[:3000],
+                changed_files_summary=changed_files_summary,
+            )
+            if coco_dir is not None:
+                prompt_path = write_text(coco_dir / f"task1_{side}_prompt.txt", prompt)
+                artifacts_to_record[f"task1_{side}_prompt"] = prompt_path
+
+            task_id = await client.send_task(
+                prompt=prompt,
+                mr_url=mr_config.mr_url,
+                git_url=git_url,
+            )
+            task = await client.poll_task(task_id)
+            result = await client.extract_result(task)
+            task_ids = [task_id]
+            if coco_dir is not None:
+                task_path = write_json(coco_dir / f"task1_{side}_task.json", task)
+                result_path = write_json(coco_dir / f"task1_{side}_result.json", result)
+                artifacts_to_record[f"task1_{side}_task"] = task_path
+                artifacts_to_record[f"task1_{side}_result"] = result_path
+
         elapsed = time.monotonic() - start_time
         if coco_dir is not None:
-            task_path = write_json(coco_dir / f"task1_{side}_task.json", task)
-            result_path = write_json(coco_dir / f"task1_{side}_result.json", result)
-            _record_coco_artifact(state, f"task1_{side}_task", task_path)
-            _record_coco_artifact(state, f"task1_{side}_result", result_path)
+            for artifact_key, artifact_path in artifacts_to_record.items():
+                _record_coco_artifact(state, artifact_key, artifact_path)
 
-        # 添加前缀
         result = _apply_prefix(result, prefix)
-
         result.coco_task_status = CocoTaskStatus(
-            task_id=task_id,
+            task_id=",".join(task_ids[:20]),
             status="completed",
             elapsed_seconds=elapsed,
         )
@@ -745,7 +1092,31 @@ def _build_prd_summary(state: dict[str, Any]) -> str:
                 if isinstance(f, str):
                     parts.append(f"- {f}")
                 elif isinstance(f, dict):
-                    parts.append(f"- {f.get('description', f.get('content', ''))}")
+                    fact_id = f.get("fact_id", f.get("id", ""))
+                    description = f.get("description", f.get("content", ""))
+                    requirement = f.get("requirement", "")
+                    branch_hint = f.get("branch_hint", "")
+                    line = f"- [{fact_id}] {description}" if fact_id else f"- {description}"
+                    if requirement:
+                        line += f"；预期/约束={requirement}"
+                    if branch_hint:
+                        line += f"；分支提示={branch_hint}"
+                    parts.append(line)
+        else:
+            facts = getattr(research, "facts", [])
+            for fact in facts[:15]:
+                fact_id = getattr(fact, "fact_id", "")
+                description = getattr(fact, "description", "")
+                requirement = getattr(fact, "requirement", "")
+                branch_hint = getattr(fact, "branch_hint", "")
+                if not description:
+                    continue
+                line = f"- [{fact_id}] {description}" if fact_id else f"- {description}"
+                if requirement:
+                    line += f"；预期/约束={requirement}"
+                if branch_hint:
+                    line += f"；分支提示={branch_hint}"
+                parts.append(line)
 
     return "\n".join(parts) if parts else "（无 PRD 信息）"
 

@@ -91,6 +91,10 @@ class ResearchFact(BaseModel):
     category: str = "requirement"
     requirement: str = ""
     branch_hint: str = ""
+    code_todo: str = ""
+    code_actual_implementation: str = ""
+    code_consistency_status: str = ""
+    code_consistency_confidence: float = 0.0
 
     @model_validator(mode="before")
     @classmethod

@@ -10,7 +10,10 @@ from app.domain.checkpoint_models import (
 )
 from app.domain.research_models import EvidenceRef, ResearchFact, ResearchOutput
 from app.nodes.checkpoint_evaluator import checkpoint_evaluator_node
-from app.nodes.checkpoint_generator import _synthesize_facts_from_legacy
+from app.nodes.checkpoint_generator import (
+    _build_checkpoint_prompt,
+    _synthesize_facts_from_legacy,
+)
 
 
 def test_generate_checkpoint_id_is_stable() -> None:
@@ -123,6 +126,23 @@ def test_research_fact_model() -> None:
     )
     assert fact.fact_id == "FACT-001"
     assert len(fact.evidence_refs) == 1
+
+
+def test_checkpoint_prompt_includes_fact_level_code_todo() -> None:
+    fact = ResearchFact(
+        fact_id="FACT-001",
+        description="Pulse Custom Lineups 的默认 frequency cap 调整为 4 impressions per day",
+        requirement="默认 frequency cap 必须展示并提交为 4 impressions per 1 day",
+        branch_hint="默认与自定义切换分支",
+        code_todo="代码当前仍保留 3 impressions per 7 days，生成 checklist 时需要覆盖该偏差",
+        code_actual_implementation="当前默认值来自 default，展示为 3 impressions per 7 days",
+    )
+
+    prompt = _build_checkpoint_prompt([fact], "zh-CN")
+
+    assert "Code TODO" in prompt
+    assert "3 impressions per 7 days" in prompt
+    assert "默认与自定义切换分支" in prompt
 
 
 def test_research_output_backward_compatible() -> None:
