@@ -209,8 +209,8 @@ def build_mr_analyzer_node(
         当 state 中无 MR 数据时直接 pass-through，不影响现有流程。
         支持前后端 MR 串行分析，以及 Coco 委托路径。
         """
-        frontend_mr_config: MRSourceConfig | None = state.get("frontend_mr_config")
-        backend_mr_config: MRSourceConfig | None = state.get("backend_mr_config")
+        frontend_mr_config = _coerce_mr_source_config(state.get("frontend_mr_config"))
+        backend_mr_config = _coerce_mr_source_config(state.get("backend_mr_config"))
 
         # 同时检查旧版 mr_input 字段做兼容
         mr_input = state.get("mr_input")
@@ -302,6 +302,17 @@ def build_mr_analyzer_node(
 def _run_async(coro):
     """在同步节点中执行异步分支。"""
     return asyncio.run(coro)
+
+
+def _coerce_mr_source_config(value: Any) -> MRSourceConfig | None:
+    """将 dict / MRSourceConfig / None 统一转换为 MRSourceConfig。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, MRSourceConfig):
+        return value
+    if isinstance(value, dict):
+        return MRSourceConfig.model_validate(value)
+    return value
 
 
 def _get_coco_dir(state: dict[str, Any]) -> Path | None:

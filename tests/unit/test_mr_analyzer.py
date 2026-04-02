@@ -70,24 +70,28 @@ def test_mr_analyzer_returns_empty_dict_without_mr_input() -> None:
 
 
 @pytest.mark.parametrize(
-    ("config_key", "result_key", "summary_prefix"),
+    ("config_key", "result_key", "summary_prefix", "as_dict"),
     [
-        ("frontend_mr_config", "frontend_mr_result", "[前端]"),
-        ("backend_mr_config", "backend_mr_result", "[后端]"),
+        ("frontend_mr_config", "frontend_mr_result", "[前端]", False),
+        ("frontend_mr_config", "frontend_mr_result", "[前端]", True),
+        ("backend_mr_config", "backend_mr_result", "[后端]", False),
+        ("backend_mr_config", "backend_mr_result", "[后端]", True),
     ],
 )
 def test_mr_analyzer_runs_local_analysis_synchronously(
     config_key: str,
     result_key: str,
     summary_prefix: str,
+    as_dict: bool,
 ) -> None:
     node = build_mr_analyzer_node(llm_client=_LocalAnalysisLLM())
+    config = MRSourceConfig(
+        mr_url="https://example.com/mr/123",
+        codebase=CodebaseSource(local_path=""),
+        use_coco=False,
+    )
     state = {
-        config_key: MRSourceConfig(
-            mr_url="https://example.com/mr/123",
-            codebase=CodebaseSource(local_path=""),
-            use_coco=False,
-        ),
+        config_key: config.model_dump(mode="json") if as_dict else config,
         "mr_input": MRInput(
             mr_title="登录逻辑修复",
             mr_description="修复 token 缺失时的异常路径",
