@@ -184,7 +184,9 @@ _COCO_TASK1_PROMPT = """\
 """
 
 _COCO_TASK1_FACT_PROMPT = """\
-你是一名资深 QA 工程师，请只围绕下面这一条 FACT 分析当前 MR/分支中的代码实现，并输出可直接用于 checklist 设计的结论。
+你是一名资深 QA 工程师，请只围绕下面这一条 FACT 分析当前 MR/分支中的代码实现。
+
+核心任务只有一个：校验这个预期是否被正确实现；如果不是，就指出当前代码里的实际实现结果，并给出一个可透传到 checklist 的 TODO。
 
 [代码仓库]
 - MR URL: {mr_url}
@@ -194,19 +196,19 @@ _COCO_TASK1_FACT_PROMPT = """\
 [当前 FACT]
 {fact_summary}
 
-[候选变更模块 / 验证锚点]
+[当前 FACT 相关模块 / 锚点]
 {changed_files_summary}
 
 请严格按以下顺序执行：
 1. 先定位与该 FACT 最相关的模块、入口函数、调用链和配置定义。
 2. 只结合当前 FACT 判断代码是否符合预期；不要混入其他 FACT 的结论。
-3. 输出代码级 fact 时优先覆盖分支、边界、错误处理、状态变化、副作用。
+3. 只返回支撑结论所必需的信息；如果没有直接证据，不要臆测。
 4. 若当前实现与 FACT 不一致，请直接给出面向后续 checklist 生成的修订说明和 TODO。
 
 请严格按以下 JSON 格式输出：
 {{
-  "mr_summary": "围绕当前 FACT 的 MR 变更摘要",
-  "changed_modules": ["模块1", "模块2"],
+  "mr_summary": "一句话说明当前 FACT 是否已实现",
+  "changed_modules": ["只保留直接相关的模块，通常 0-2 个"],
   "code_facts": [{{"fact_id": "...", "description": "...", "source_file": "...", "code_snippet": "...", "fact_type": "...", "related_prd_fact_ids": ["{fact_id}"]}}],
   "consistency_issues": [{{"issue_id": "...", "severity": "...", "prd_expectation": "...", "mr_implementation": "...", "discrepancy": "...", "confidence": 0.0}}],
   "related_code_snippets": [{{"file_path": "...", "code_content": "...", "relation_type": "..."}}],
@@ -458,6 +460,27 @@ def _build_candidate_module_summary(
     return "\n\n".join(sections) if sections else "（无显式变更文件摘要）"
 
 
+def _build_candidate_module_summary_for_fact(
+    state: dict[str, Any],
+    diff_files: list[Any],
+    fact: ResearchFact,
+) -> str:
+    """构建单 fact 场景下的候选模块/验证锚点摘要。"""
+    sections: list[str] = []
+
+    diff_summary = _build_diff_summary(diff_files)
+    if diff_summary:
+        sections.append("[显式代码变更]\n" + diff_summary)
+
+    checkpoint_lines = _build_related_checkpoint_lines(state, fact)
+    if checkpoint_lines:
+        sections.append(
+            "[当前 FACT 关联检查点]\n" + "\n".join(checkpoint_lines)
+        )
+
+    return "\n\n".join(sections) if sections else "（仅基于当前 FACT 进行代码定位）"
+
+
 def _build_validation_target_lines(state: dict[str, Any]) -> list[str]:
     """将 research facts / checkpoints 转为可读的验证锚点。"""
     lines: list[str] = []
@@ -484,6 +507,44 @@ def _build_validation_target_lines(state: dict[str, Any]) -> list[str]:
             lines.append(prefix + "；".join(parts))
 
     for checkpoint in (state.get("checkpoints") or [])[:6]:
+        checkpoint_id = _get_value(checkpoint, "checkpoint_id", "id")
+        title = _get_value(checkpoint, "title", "name")
+        objective = _get_value(checkpoint, "objective", "expected_result")
+        preconditions = _get_value(checkpoint, "preconditions")
+
+        parts = []
+        if title:
+            parts.append(f"标题={title}")
+        if objective:
+            parts.append(f"验证目标={objective}")
+        if preconditions:
+            parts.append(f"前置/步骤={preconditions}")
+        if parts:
+            prefix = f"- CHECKPOINT {checkpoint_id}: " if checkpoint_id else "- CHECKPOINT: "
+            lines.append(prefix + "；".join(parts))
+
+    return lines
+
+
+def _build_related_checkpoint_lines(
+    state: dict[str, Any],
+    fact: ResearchFact,
+) -> list[str]:
+    """筛选与当前 fact 直接关联的 checkpoint。"""
+    lines: list[str] = []
+    target_fact_id = (fact.fact_id or "").strip()
+    if not target_fact_id:
+        return lines
+
+    for checkpoint in (state.get("checkpoints") or [])[:20]:
+        checkpoint_fact_ids = (
+            checkpoint.get("fact_ids", [])
+            if isinstance(checkpoint, dict)
+            else getattr(checkpoint, "fact_ids", [])
+        ) or []
+        if target_fact_id not in checkpoint_fact_ids:
+            continue
+
         checkpoint_id = _get_value(checkpoint, "checkpoint_id", "id")
         title = _get_value(checkpoint, "title", "name")
         objective = _get_value(checkpoint, "objective", "expected_result")
@@ -676,7 +737,11 @@ async def _analyze_via_coco(
                 result, revision, artifacts = await client.run_mr_fact_task(
                     fact=fact,
                     mr_context=mr_context,
-                    changed_files_summary=changed_files_summary,
+                    changed_files_summary=_build_candidate_module_summary_for_fact(
+                        state,
+                        diff_files,
+                        fact,
+                    )[:2000],
                 )
                 return fact, result, revision, artifacts
 

@@ -11,6 +11,7 @@ from app.nodes import coco_consistency_validator as validator_module
 from app.nodes.coco_consistency_validator import build_coco_consistency_validator_node
 from app.nodes.mr_analyzer import (
     _build_candidate_module_summary,
+    _build_candidate_module_summary_for_fact,
     _build_coco_task1_prompt,
     _build_coco_task1_prompt_for_fact,
     _build_prd_summary,
@@ -45,7 +46,7 @@ def test_task1_fact_prompt_focuses_single_fact_and_requests_revision() -> None:
             requirement="最短 campaign length 必须从 14 天下调为 7 天",
             branch_hint="边界值校验分支（<7, =7, >7）",
         ),
-        changed_files_summary="apps/rf-creation/src/constants/schedule-budget.ts",
+        changed_files_summary="[显式代码变更]\napps/rf-creation/src/constants/schedule-budget.ts",
     )
 
     assert "FACT-001" in prompt
@@ -53,6 +54,56 @@ def test_task1_fact_prompt_focuses_single_fact_and_requests_revision() -> None:
     assert "fact_revision" in prompt
     assert '"todo"' in prompt
     assert "Branch: feat/pulse-setup" in prompt
+    assert "核心任务只有一个" in prompt
+    assert "只返回支撑结论所必需的信息" in prompt
+    assert "不要混入其他 FACT" in prompt
+
+
+def test_fact_candidate_summary_only_keeps_current_fact_related_context() -> None:
+    state = {
+        "research_output": ResearchOutput(
+            facts=[
+                ResearchFact(
+                    fact_id="FACT-001",
+                    description="用户可在 Pulse 页面创建 lineup",
+                    requirement="点击 Create lineup 后保存成功并展示在列表中",
+                ),
+                ResearchFact(
+                    fact_id="FACT-011",
+                    description="选择 tentpoleEventDefault 时 custom 默认值会自动更新为 4 和 1",
+                    requirement="选择默认频控后自动回填 4/1，沿用现有逻辑",
+                    branch_hint="选项切换自动回填分支",
+                ),
+            ]
+        ),
+        "checkpoints": [
+            Checkpoint(
+                checkpoint_id="CP-001",
+                title="校验创建 lineup 成功",
+                objective="新建成功后列表展示新建 lineup",
+                fact_ids=["FACT-001"],
+            ),
+            Checkpoint(
+                checkpoint_id="CP-011",
+                title="校验 tentpoleEventDefault 切换后 custom 自动回填",
+                objective="切换后 custom 自动显示 4 和 1",
+                fact_ids=["FACT-011"],
+                preconditions=["已进入 Pulse Custom Lineup 设置区域"],
+            ),
+        ],
+    }
+
+    summary = _build_candidate_module_summary_for_fact(
+        state,
+        diff_files=[],
+        fact=state["research_output"].facts[1],
+    )
+
+    assert "FACT-011" not in summary
+    assert "FACT-001" not in summary
+    assert "tentpoleEventDefault" in summary
+    assert "CP-011" in summary
+    assert "校验创建 lineup 成功" not in summary
 
 
 def test_normalize_codebase_context_derives_branch_from_bits_tree_url() -> None:
