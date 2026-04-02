@@ -200,7 +200,7 @@
 mandatory_skeleton = loader.build_mandatory_skeleton(template)
 result = {"project_template": template, "template_leaf_targets": leaf_targets}
 if mandatory_skeleton is not None:
-result["mandatory_skeleton"] = mandatory_skeleton
+    result["mandatory_skeleton"] = mandatory_skeleton
 return result
 ```
 **设计说明：**
@@ -224,10 +224,10 @@ PRD文本 → ParsedDocument → ResearchFact[] → Checkpoint[] → CanonicalOu
 Checklist 整合涉及 4 个节点的协作链：
 ```
 checkpoint_outline_planner → evidence_mapper → draft_writer → structure_assembler
-↓ ↓ ↓
-CanonicalOutlineNode树 路径上下文注入(prompt) 挂载expected_results
-↓ ↓ ↓
-optimized_tree TestCase生成 最终ChecklistNode树
+         ↓                         ↓                  ↓
+CanonicalOutlineNode树       路径上下文注入(prompt)   挂载expected_results
+         ↓                         ↓                  ↓
+   optimized_tree            TestCase生成         最终ChecklistNode树
 ```
 ### §5.2 checklist_optimizer 被架空的影响分析
 `build_checklist_optimizer_node()` 虽然代码完整但未接入子图，这意味着：
@@ -272,14 +272,15 @@ optimized_tree TestCase生成 最终ChecklistNode树
 ### §5.6 端到端质量损失链
 ```
 checkpoint_outline_planner → evidence_mapper → draft_writer → structure_assembler
-[中风险 ↓] [中风险] [中风险] [低风险]
-· 层级不合理 · 证据错配 · 路径注入失效 · 挂载遗漏
-· 同义节点重复 · 遗漏映射 · 前置条件不一致 · 顺序混乱
-· 单子链过深 · 生成质量波动
-PR #23 缓解: PR #23 缓解:
-· 强制骨架 prompt 注入 · 最终防线修复
-· 后处理修复 · source 标注
-· ↓ 风险从高降为中 · 溢出告警
+  [中风险 ↓]                    [中风险]         [中风险]        [低风险]
+  · 层级不合理                  · 证据错配       · 路径注入失效   · 挂载遗漏
+  · 同义节点重复                · 遗漏映射       · 前置条件不一致 · 顺序混乱
+  · 单子链过深                                   · 生成质量波动
+                                                               PR #23 缓解:
+  PR #23 缓解:                                                 · 最终防线修复
+  · 强制骨架 prompt 注入                                        · source 标注
+  · 后处理修复                                                  · 溢出告警
+  · ↓ 风险从高降为中
 ```
 ### §5.7 改进建议
 > **PR #23 进展**: 短期改进中的"建议 1: PRD 章节锚定"已通过强制模版骨架方式实现（变体）。详见 [services §5.6](../services/_ANALYSIS.md)。
@@ -347,3 +348,165 @@ if knowledge_context:
   1. 条件注入：知识上下文为空时无任何 prompt 变更，不影响 LLM 推理质量
   2. 标签明确：`[Domain Knowledge Reference]` 标签让 LLM 清楚区分知识上下文与 PRD 正文
   3. 注入位置合理：context_research 是检索阶段入口，知识上下文在此注入可影响后续所有场景规划
+
+
+## §7 PR #36 变更 — MR 代码分析节点
+
+> 同步自 PR #36 `feat/mr-code-analysis-integration`
+
+PR #36 新增 3 个工作流节点文件，修改 4 个现有节点，为 MR 代码分析引入完整的节点层实现。
+
+### §7.1 新增文件：mr_analyzer.py
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-核心算法 + C-LLM集成 |
+| **行数** | ~763 |
+| **工厂函数** | `build_mr_analyzer_node(llm_client, settings, codebase_tools)` |
+| **职责** | MR 代码分析核心节点——解析 MR diff、提取代码事实、执行 agentic search 补充上下文 |
+
+**核心执行流程：**
+
+```
+MR URL/配置 → 获取 MR diff → 结构化解析 → LLM 代码事实提取 → Agentic Search 补充 → MRAnalysisResult
+```
+
+1. **diff 获取与解析**：从 MR URL 获取变更文件列表和 diff 内容，结构化为 `MRFileDiff[]`
+2. **LLM 代码事实提取**：按文件分批调用 LLM，使用 `generate_structured()` + `MRCodeFact` schema 提取行为变更、API 变更等五类事实
+3. **Agentic Search 循环**：对每个代码事实，通过 `codebase_tools` 执行多轮搜索（最多 3 轮），补充关联上下文（调用方、依赖链、配置影响）
+4. **结果聚合**：合并所有代码事实和搜索补充，构建 `MRAnalysisResult`
+
+**Agentic Search 机制：**
+
+```
+for code_fact in extracted_facts:
+    search_context = ""
+    for round in range(max_search_rounds=3):
+        query = LLM.generate_search_query(code_fact, search_context)
+        if query.should_stop:
+            break
+        results = codebase_tools.search(query)
+        search_context += format_results(results)
+    code_fact.evidence += search_context
+```
+
+- 每轮搜索由 LLM 自主决定查询内容和是否继续
+- 搜索工具包括：`grep_codebase`、`find_references`、`read_file_range`、`search_symbol`、`list_directory`
+- LLM 输出 `MRSearchQuery` 模型，包含 `should_stop: bool` 终止信号
+- 最多 3 轮搜索，防止无限循环
+
+**依赖关系：**
+- 输入：`state["mr_analysis_result"]`（初始 MR 配置）或 `state` 中的 MR 配置字段
+- 输出：`{"mr_analysis_result": MRAnalysisResult, "mr_code_facts": list[MRCodeFact]}`
+- 外部依赖：`codebase_tools`（代码库搜索工具集）、`llm_client`、`settings`
+
+**设计模式：**
+- **Agentic Tool Use**：LLM 不仅提取事实，还自主规划搜索策略，体现了 agent 式的工具调用范式
+- **渐进式上下文积累**：每轮搜索结果累积到 `search_context`，LLM 基于已有上下文决定下一步搜索方向
+- **降级安全**：搜索失败时记录日志但不中断，保留已提取的事实
+
+### §7.2 新增文件：mr_checkpoint_injector.py
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-核心算法 + C-LLM集成 |
+| **行数** | ~308 |
+| **工厂函数** | `build_mr_checkpoint_injector_node(llm_client)` |
+| **职责** | 将 MR 代码事实转换为 Checkpoint，注入现有 checkpoint 流水线 |
+
+**核心执行流程：**
+
+1. **事实分组**：按 `fact_type` 对 `MRCodeFact[]` 分组（behavior_change、api_change 等）
+2. **LLM 转换**：每组事实调用 LLM 生成对应的 Checkpoint（使用 `generate_structured()` + Checkpoint schema）
+3. **去重合并**：与现有 `state["checkpoints"]` 基于 SHA-256 ID 去重，MR 来源的 checkpoint 追加 `source_fact_ids` 中的 MRCodeFact ID
+4. **标签注入**：MR 来源的 checkpoint 在 metadata 中标记 `{"source": "mr_analysis"}`
+
+**输出：** `{"checkpoints": list[Checkpoint]}` — 合并后的完整 checkpoint 列表
+
+**依赖关系：**
+- 输入：`state["mr_code_facts"]`、`state["checkpoints"]`（已有的 PRD 来源 checkpoints）
+- 输出：合并后的 `checkpoints`
+- 复用：`Checkpoint` 的 SHA-256 ID 生成策略，确保相同内容的 checkpoint 自动去重
+
+**设计模式：**
+- **增量注入**：不替换现有 checkpoint，而是追加合并，保持 PRD 来源的 checkpoint 不变
+- **fact_type 分组处理**：不同类型的代码事实使用不同的 prompt 策略（行为变更侧重功能测试，API 变更侧重接口契约测试）
+
+### §7.3 新增文件：coco_consistency_validator.py
+
+| 属性 | 值 |
+|---|---|
+| **类型** | A-核心算法 + C-外部服务集成 |
+| **行数** | ~393 |
+| **工厂函数** | `build_coco_consistency_validator_node(coco_client, llm_client)` |
+| **职责** | Coco Task 2 代码一致性验证——将 checkpoint 与实际代码变更交叉验证 |
+
+**核心执行流程：**
+
+```
+Checkpoint[] + MRCodeFact[] → Coco API 验证 → CodeConsistencyCheck[] → 回写到 Checkpoint/TestCase
+```
+
+1. **匹配对构建**：将每个 checkpoint 与其 `source_fact_ids` 关联的 `MRCodeFact` 配对
+2. **Coco API 调用**：调用 `coco_client.validate_consistency()` 执行代码一致性校验
+3. **三层验证**：Coco 响应经过 `coco_response_validator` 三层校验（schema 验证 → 业务规则验证 → 阈值验证）
+4. **结果回写**：`CodeConsistencyCheck` 写入 `state["code_consistency_checks"]`
+
+**输出：** `{"code_consistency_checks": list[CodeConsistencyCheck]}`
+
+**依赖关系：**
+- 输入：`state["checkpoints"]`、`state["mr_code_facts"]`
+- 外部服务：`coco_client`（Coco API 客户端）
+- 验证层：`coco_response_validator`（三层验证服务）
+
+**设计模式：**
+- **外部服务隔离**：Coco API 调用通过 `coco_client` 抽象，支持 mock 测试
+- **三层验证防御**：schema → 业务规则 → 阈值，层层过滤，确保只有高置信度的一致性结果进入下游
+
+### §7.4 修改文件：structure_assembler.py
+
+**变更：** 新增 `# TODO: MR source annotation` 标记，预留 MR 来源节点的 source 标注扩展点。
+
+**设计说明：**
+- 当前 `_annotate_source()` 仅处理 `"template"` / `"generated"` / `"overflow"` 三种来源
+- TODO 标记预示未来将增加 `"mr_derived"` 来源类型，标记由 MR 代码事实产生的检查清单节点
+
+### §7.5 修改文件：scenario_planner.py
+
+**变更：** 增强 MR 上下文注入——当 `state.get("mr_analysis_result")` 存在时，将 MR 摘要（受影响模块、风险评估）注入场景规划的上下文。
+
+**设计说明：**
+- 条件注入模式与 PR #24 的知识上下文注入一致
+- MR 上下文帮助场景规划器理解代码变更范围，生成更有针对性的测试场景
+
+### §7.6 修改文件：checkpoint_generator.py
+
+**变更：** 当存在 `state["mr_code_facts"]` 时，将代码事实作为额外输入注入 LLM prompt，引导 checkpoint 生成覆盖代码变更相关的测试点。
+
+**设计说明：**
+- 与 `mr_checkpoint_injector` 形成互补：`checkpoint_generator` 在生成阶段感知 MR 上下文，`mr_checkpoint_injector` 在后处理阶段补充 MR 专属 checkpoint
+- 双路径策略确保 MR 相关测试点既能通过 PRD+MR 联合推理产生，也能从纯代码事实独立推理产生
+
+### §7.7 修改文件：draft_writer.py
+
+**变更：** XMind 适配增强——当检测到 MR 来源的 checkpoint 时，在 `_resolve_path_context()` 中追加代码变更上下文，帮助 LLM 生成包含代码验证步骤的测试用例。
+
+**设计说明：**
+- 影响测试步骤的生成质量：MR 来源的 checkpoint 通常需要代码级验证步骤（如"验证 API 响应字段变更"），路径上下文中的代码变更信息帮助 LLM 生成更精确的步骤描述
+
+### §7.8 节点流水线更新
+
+**子图流水线（case_generation）新增 3 个节点：**
+
+```
+scenario_planner → checkpoint_generator → checkpoint_evaluator →
+  [mr_analyzer] → [mr_checkpoint_injector] →
+  checkpoint_outline_planner → evidence_mapper → draft_writer →
+  structure_assembler → [coco_consistency_validator]
+```
+
+- `mr_analyzer`：在 checkpoint 生成后、outline 规划前执行 MR 分析
+- `mr_checkpoint_injector`：紧随 mr_analyzer，将代码事实转换为 checkpoint 并合并
+- `coco_consistency_validator`：在 structure_assembler 后执行一致性验证
+
+**条件执行：** 三个新节点均为条件节点——仅当请求中包含 MR 配置时才执行，无 MR 配置时自动跳过，保持向后兼容。
