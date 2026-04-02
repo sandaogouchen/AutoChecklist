@@ -195,7 +195,7 @@ def build_mr_analyzer_node(
         ``mr_analyzer_node(state: CaseGenState) -> dict`` 节点函数。
     """
 
-    async def mr_analyzer_node(state: dict[str, Any]) -> dict[str, Any]:
+    def mr_analyzer_node(state: dict[str, Any]) -> dict[str, Any]:
         """MR 分析节点主逻辑。
 
         当 state 中无 MR 数据时直接 pass-through，不影响现有流程。
@@ -226,7 +226,7 @@ def build_mr_analyzer_node(
         # ---- 前端 MR 分析 ----
         if frontend_mr_config and frontend_mr_config.mr_url:
             logger.info("mr_analyzer: 开始分析前端 MR — %s", frontend_mr_config.mr_url)
-            frontend_result = await _analyze_single_side(
+            frontend_result = _analyze_single_side(
                 side="frontend",
                 mr_config=frontend_mr_config,
                 state=state,
@@ -244,7 +244,7 @@ def build_mr_analyzer_node(
         # ---- 后端 MR 分析 ----
         if backend_mr_config and backend_mr_config.mr_url:
             logger.info("mr_analyzer: 开始分析后端 MR — %s", backend_mr_config.mr_url)
-            backend_result = await _analyze_single_side(
+            backend_result = _analyze_single_side(
                 side="backend",
                 mr_config=backend_mr_config,
                 state=state,
@@ -290,7 +290,12 @@ def build_mr_analyzer_node(
 # ---------------------------------------------------------------------------
 
 
-async def _analyze_single_side(
+def _run_async(coro):
+    """在同步节点中执行异步分支。"""
+    return asyncio.run(coro)
+
+
+def _analyze_single_side(
     side: str,
     mr_config: MRSourceConfig,
     state: dict[str, Any],
@@ -304,16 +309,16 @@ async def _analyze_single_side(
     根据 ``use_coco`` 标志选择 Coco 委托路径或本地分析路径。
     """
     if mr_config.use_coco:
-        return await _analyze_via_coco(
+        return _run_async(_analyze_via_coco(
             mr_config=mr_config,
             state=state,
             llm_client=llm_client,
             coco_settings=coco_settings,
             prefix=prefix,
             side=side,
-        )
+        ))
 
-    return await _analyze_locally(
+    return _analyze_locally(
         mr_config=mr_config,
         state=state,
         llm_client=llm_client,
@@ -417,7 +422,7 @@ async def _analyze_via_coco(
 # ---------------------------------------------------------------------------
 
 
-async def _analyze_locally(
+def _analyze_locally(
     mr_config: MRSourceConfig,
     state: dict[str, Any],
     llm_client: Any,
@@ -441,7 +446,10 @@ async def _analyze_locally(
     )
 
     try:
-        summary_resp = await llm_client.chat(summary_prompt)
+        summary_resp = llm_client.chat(
+            "你是一名资深 QA 工程师。请严格返回 JSON。",
+            summary_prompt,
+        )
         summary_json = _safe_parse_json(summary_resp)
         mr_summary = summary_json.get("mr_summary", "")
         changed_modules = summary_json.get("changed_modules", [])
@@ -456,7 +464,7 @@ async def _analyze_locally(
 
     if codebase_root:
         key_symbols = _extract_key_symbols(diff_files)
-        related_snippets, search_trace = await _run_agentic_search(
+        related_snippets, search_trace = _run_agentic_search(
             llm_client=llm_client,
             codebase_root=codebase_root,
             key_symbols=key_symbols,
@@ -487,7 +495,10 @@ async def _analyze_locally(
     consistency_issues: list[ConsistencyIssue] = []
 
     try:
-        extract_resp = await llm_client.chat(extract_prompt)
+        extract_resp = llm_client.chat(
+            "你是一名资深 QA 工程师。请严格返回 JSON。",
+            extract_prompt,
+        )
         extract_json = _safe_parse_json(extract_resp)
 
         for i, f in enumerate(extract_json.get("code_facts", [])):
@@ -539,7 +550,7 @@ async def _analyze_locally(
 # ---------------------------------------------------------------------------
 
 
-async def _run_agentic_search(
+def _run_agentic_search(
     llm_client: Any,
     codebase_root: str,
     key_symbols: list[str],
@@ -588,9 +599,12 @@ async def _run_agentic_search(
             break
 
         try:
-            resp = await llm_client.chat(
-                messages[-1]["content"] if len(messages) <= 2 else json.dumps(messages, ensure_ascii=False)[:8000],
+            user_prompt = (
+                messages[-1]["content"]
+                if len(messages) <= 2
+                else json.dumps(messages, ensure_ascii=False)[:8000]
             )
+            resp = llm_client.chat(system_msg, user_prompt)
         except Exception as exc:
             trace.append(f"round {round_idx}: llm error — {exc}")
             logger.warning("Agentic search LLM 调用失败 (round %d): %s", round_idx, exc)
