@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.clients.llm import LLMClient, LLMClientConfig, OpenAICompatibleLLMClient
-from app.config.settings import Settings
+from app.config.settings import CocoSettings, Settings, get_coco_settings
 from app.domain.api_models import (
     CaseGenerationRequest,
     CaseGenerationRun,
@@ -77,6 +77,7 @@ class WorkflowService:
         enable_xmind: bool = True,
         project_context_service: ProjectContextService | None = None,
         graphrag_engine=None,
+        coco_settings: CocoSettings | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository or FileRunRepository(settings.output_dir)
@@ -89,6 +90,7 @@ class WorkflowService:
         self._workflow = None
         self._run_registry: dict[str, CaseGenerationRun] = {}
         self._graphrag_engine = graphrag_engine
+        self._coco_settings = coco_settings or get_coco_settings()
 
         if platform_dispatcher is not None:
             self.platform_dispatcher = platform_dispatcher
@@ -200,21 +202,11 @@ class WorkflowService:
                 timer, run_state.iteration_index,
             )
 
-            workflow_input = {
-                "run_id": run_id,
-                "file_path": request.file_path,
-                "language": request.language,
-                "request": request,
-                "model_config": request.llm_config,
-                "iteration_index": run_state.iteration_index,
-                "project_id": getattr(request, 'project_id', None) or "",
-                "reference_xmind_path": request.reference_xmind_path,
-            }
-
-            # ---- 传递模版文件路径 ----
-            template_file_path = getattr(request, 'template_file_path', None)
-            if template_file_path:
-                workflow_input["template_file_path"] = template_file_path
+            workflow_input = self._build_workflow_input(
+                run_id=run_id,
+                request=request,
+                iteration_index=run_state.iteration_index,
+            )
 
             if run_state.iteration_index > 0 and result:
                 workflow_input = self._prepare_retry_input(
@@ -337,6 +329,7 @@ class WorkflowService:
             xmind_reference_loader_node=xmind_reference_loader_node,
             timer=timer,
             iteration_index=iteration_index,
+            coco_settings=self._coco_settings,
         )
 
     def _prepare_retry_input(
@@ -430,8 +423,73 @@ class WorkflowService:
                 project_context_loader=project_loader,
                 knowledge_retrieval_node=knowledge_node,
                 xmind_reference_loader_node=xmind_reference_loader_node,
+                coco_settings=self._coco_settings,
             )
         return self._workflow
+
+    def _build_workflow_input(
+        self,
+        run_id: str,
+        request: CaseGenerationRequest,
+        iteration_index: int,
+    ) -> dict:
+        """构建工作流输入，包含 MR/Coco 配置与运行目录。"""
+        workflow_input = {
+            "run_id": run_id,
+            "run_output_dir": str(self.repository._run_dir(run_id)),
+            "file_path": request.file_path,
+            "language": request.language,
+            "request": request,
+            "model_config": request.llm_config,
+            "iteration_index": iteration_index,
+            "project_id": getattr(request, "project_id", None) or "",
+            "reference_xmind_path": request.reference_xmind_path,
+        }
+
+        template_file_path = getattr(request, "template_file_path", None)
+        if template_file_path:
+            workflow_input["template_file_path"] = template_file_path
+
+        frontend_mr = self._build_mr_source_config(getattr(request, "frontend_mr", None))
+        if frontend_mr is not None:
+            workflow_input["frontend_mr_config"] = frontend_mr
+
+        backend_mr = self._build_mr_source_config(getattr(request, "backend_mr", None))
+        if backend_mr is not None:
+            workflow_input["backend_mr_config"] = backend_mr
+
+        if any(config and config.get("use_coco") for config in (frontend_mr, backend_mr)):
+            if not getattr(self._coco_settings, "coco_jwt_token", ""):
+                raise RuntimeError("Coco 已启用，但 COCO_JWT_TOKEN 未配置")
+
+        return workflow_input
+
+    @staticmethod
+    def _build_mr_source_config(mr_request) -> dict | None:
+        """将 API 层 MRRequestConfig 映射为子图可消费的 MRSourceConfig 字典。"""
+        if mr_request is None:
+            return None
+
+        mr_url = getattr(mr_request, "mr_url", "")
+        git_url = getattr(mr_request, "git_url", "")
+        local_path = getattr(mr_request, "local_path", "")
+        branch = getattr(mr_request, "branch", "")
+        commit_sha = getattr(mr_request, "commit_sha", "")
+        use_coco = bool(getattr(mr_request, "use_coco", False))
+
+        if not any((mr_url, git_url, local_path)):
+            return None
+
+        return {
+            "mr_url": mr_url,
+            "use_coco": use_coco,
+            "codebase": {
+                "git_url": git_url,
+                "local_path": local_path,
+                "branch": branch,
+                "commit_sha": commit_sha,
+            },
+        }
 
     def _get_llm_client(self) -> LLMClient:
         if self._llm_client is None:
@@ -490,6 +548,12 @@ class WorkflowService:
                 artifacts["timing_report"] = str(timing_path)
         except Exception:
             pass
+
+        coco_dir = Path(self.repository._run_dir(run_id)) / "coco"
+        if coco_dir.exists():
+            for path in sorted(coco_dir.rglob("*")):
+                if path.is_file():
+                    artifacts[f"coco::{path.relative_to(coco_dir).as_posix()}"] = str(path)
 
         run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
         run_result_path = self.repository.save(

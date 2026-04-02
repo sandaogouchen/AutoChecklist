@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from app.domain.mr_models import (
@@ -25,6 +26,7 @@ from app.domain.mr_models import (
     RelatedCodeSnippet,
 )
 from app.services.codebase_tools import CODEBASE_TOOLS, execute_tool
+from app.utils.filesystem import ensure_directory, write_json, write_text
 
 logger = logging.getLogger(__name__)
 
@@ -149,18 +151,24 @@ _PHASE3_EXTRACT_PROMPT = """\
 """
 
 _COCO_TASK1_PROMPT = """\
-你是一名资深 QA 工程师，请分析以下 MR 的代码变更：
+你是一名资深 QA 工程师，请分析以下仓库分支上的 MR 代码变更并给出可用于测试设计的结论。
 
-MR URL: {mr_url}
+[代码仓库]
+- MR URL: {mr_url}
+- Git URL: {git_url}
+- Branch: {branch}
 
-请完成以下任务：
-1. 阅读 MR 的 diff 内容，提取所有变更的函数/类/模块
-2. 在 codebase 中搜索与这些变更相关的上下文代码（caller、callee、类型定义等）
-3. 从代码逻辑中提取可测试的事实（逻辑分支、边界条件、错误处理、状态变更）
-4. 对比以下 PRD 预期逻辑与代码实现，识别不一致之处：
+[候选变更模块]
+{changed_files_summary}
 
-[PRD 预期逻辑]
+[PRD / 场景摘要]
 {prd_summary}
+
+请严格按以下顺序执行：
+1. 先定位与场景相关的模块、入口函数、调用链和配置定义。
+2. 再结合代码逻辑判断是否符合预期；判断当前实现是否符合场景预期时，不要只复述 MR 标题。
+3. 对每个结论给出明确的代码依据；若无法确认，说明缺失的代码上下文。
+4. 输出代码级 fact 时优先覆盖分支、边界、错误处理、状态变化、副作用。
 
 请严格按以下 JSON 格式输出：
 {{
@@ -265,6 +273,7 @@ def build_mr_analyzer_node(
             "mr_code_facts": all_code_facts,
             "mr_consistency_issues": all_consistency_issues,
             "mr_combined_summary": combined_summary,
+            "coco_artifacts": state.get("coco_artifacts", {}),
         }
 
         if frontend_result:
@@ -293,6 +302,35 @@ def build_mr_analyzer_node(
 def _run_async(coro):
     """在同步节点中执行异步分支。"""
     return asyncio.run(coro)
+
+
+def _get_coco_dir(state: dict[str, Any]) -> Path | None:
+    run_output_dir = state.get("run_output_dir")
+    if not run_output_dir:
+        return None
+    return ensure_directory(Path(run_output_dir) / "coco")
+
+
+def _record_coco_artifact(state: dict[str, Any], key: str, path: Path) -> None:
+    artifacts = state.setdefault("coco_artifacts", {})
+    artifacts[key] = str(path)
+
+
+def _build_coco_task1_prompt(
+    mr_url: str,
+    git_url: str,
+    branch: str,
+    prd_summary: str,
+    changed_files_summary: str,
+) -> str:
+    """构建 Coco Task 1 提示词。"""
+    return _COCO_TASK1_PROMPT.format(
+        mr_url=mr_url,
+        git_url=git_url or "unknown",
+        branch=branch or "unknown",
+        prd_summary=prd_summary,
+        changed_files_summary=changed_files_summary or "（无显式变更文件摘要）",
+    )
 
 
 def _analyze_single_side(
@@ -352,11 +390,18 @@ async def _analyze_via_coco(
 
     # 构造 PRD 摘要
     prd_summary = _build_prd_summary(state)
-
-    prompt = _COCO_TASK1_PROMPT.format(
+    diff_files = getattr(state.get("mr_input"), "diff_files", []) or []
+    prompt = _build_coco_task1_prompt(
         mr_url=mr_config.mr_url,
+        git_url=mr_config.codebase.git_url,
+        branch=mr_config.codebase.branch,
         prd_summary=prd_summary[:3000],
+        changed_files_summary=_build_diff_summary(diff_files)[:2000],
     )
+    coco_dir = _get_coco_dir(state)
+    if coco_dir is not None:
+        prompt_path = write_text(coco_dir / f"task1_{side}_prompt.txt", prompt)
+        _record_coco_artifact(state, f"task1_{side}_prompt", prompt_path)
 
     start_time = time.monotonic()
     try:
@@ -368,6 +413,11 @@ async def _analyze_via_coco(
         task = await client.poll_task(task_id)
         result = await client.extract_result(task)
         elapsed = time.monotonic() - start_time
+        if coco_dir is not None:
+            task_path = write_json(coco_dir / f"task1_{side}_task.json", task)
+            result_path = write_json(coco_dir / f"task1_{side}_result.json", result)
+            _record_coco_artifact(state, f"task1_{side}_task", task_path)
+            _record_coco_artifact(state, f"task1_{side}_result", result_path)
 
         # 添加前缀
         result = _apply_prefix(result, prefix)
@@ -387,34 +437,44 @@ async def _analyze_via_coco(
     except CocoTaskError as exc:
         elapsed = time.monotonic() - start_time
         logger.error("Coco Task 1 [%s] 失败: %s", side, exc)
-        return MRAnalysisResult(
-            mr_summary=f"Coco 分析失败: {exc}",
-            search_trace=[f"coco_error: {exc}"],
-            coco_task_status=CocoTaskStatus(
-                task_id=getattr(exc, "task_id", ""),
-                status="failed",
-                elapsed_seconds=elapsed,
-                error_message=str(exc),
-            ),
-        )
+        if coco_dir is not None:
+            error_path = write_json(
+                coco_dir / f"task1_{side}_error.json",
+                {
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                    "elapsed_seconds": elapsed,
+                    "task_id": getattr(exc, "task_id", ""),
+                },
+            )
+            _record_coco_artifact(state, f"task1_{side}_error", error_path)
+        raise RuntimeError(f"Coco Task 1 [{side}] 失败: {exc}") from exc
     except TimeoutError as exc:
         elapsed = time.monotonic() - start_time
         logger.error("Coco Task 1 [%s] 超时: %s", side, exc)
-        return MRAnalysisResult(
-            mr_summary=f"Coco 分析超时",
-            search_trace=["coco_timeout"],
-            coco_task_status=CocoTaskStatus(
-                status="timeout",
-                elapsed_seconds=elapsed,
-                error_message=str(exc),
-            ),
-        )
+        if coco_dir is not None:
+            timeout_path = write_json(
+                coco_dir / f"task1_{side}_timeout.json",
+                {
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                    "elapsed_seconds": elapsed,
+                },
+            )
+            _record_coco_artifact(state, f"task1_{side}_timeout", timeout_path)
+        raise RuntimeError(f"Coco Task 1 [{side}] 超时: {exc}") from exc
     except Exception as exc:
         logger.error("Coco Task 1 [%s] 未知异常: %s", side, exc, exc_info=True)
-        return MRAnalysisResult(
-            mr_summary=f"Coco 分析异常: {exc}",
-            search_trace=[f"coco_exception: {exc}"],
-        )
+        if coco_dir is not None:
+            exception_path = write_json(
+                coco_dir / f"task1_{side}_exception.json",
+                {
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                },
+            )
+            _record_coco_artifact(state, f"task1_{side}_exception", exception_path)
+        raise RuntimeError(f"Coco Task 1 [{side}] 异常: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

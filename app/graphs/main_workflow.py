@@ -143,6 +143,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
 
     def case_generation_node(state: GlobalState) -> GlobalState:
         subgraph_input = {
+            "run_id": state.get("run_id"),
+            "run_output_dir": state.get("run_output_dir"),
             "language": state.get("language", "zh-CN"),
             "parsed_document": state["parsed_document"],
             "research_output": state["research_output"],
@@ -200,6 +202,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "mr_combined_summary": subgraph_result.get("mr_combined_summary", ""),
             "frontend_mr_result": subgraph_result.get("frontend_mr_result"),
             "backend_mr_result": subgraph_result.get("backend_mr_result"),
+            "coco_validation_summary": subgraph_result.get("coco_validation_summary", {}),
+            "coco_artifacts": subgraph_result.get("coco_artifacts", {}),
         }
 
     return case_generation_node

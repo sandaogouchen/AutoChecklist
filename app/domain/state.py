@@ -86,6 +86,7 @@ class GlobalState(TypedDict, total=False):
     run_state: RunState
     evaluation_report: EvaluationReport
     iteration_index: int
+    run_output_dir: str
 
     # ---- 项目上下文字段 ----
     project_id: str
@@ -121,6 +122,8 @@ class GlobalState(TypedDict, total=False):
     mr_code_facts: list
     mr_consistency_issues: list
     mr_combined_summary: str
+    coco_validation_summary: dict
+    coco_artifacts: dict[str, str]
 
 
 class CaseGenState(TypedDict, total=False):
@@ -154,6 +157,8 @@ class CaseGenState(TypedDict, total=False):
     test_cases: list[TestCase]
     optimized_tree: list[ChecklistNode]
     project_context_summary: str
+    run_id: str
+    run_output_dir: str
 
     # ---- 模版相关字段 ----
     template_leaf_targets: list[TemplateLeafTarget]
@@ -182,3 +187,5 @@ class CaseGenState(TypedDict, total=False):
     mr_code_facts: list
     mr_consistency_issues: list
     mr_combined_summary: str
+    coco_validation_summary: dict
+    coco_artifacts: dict[str, str]

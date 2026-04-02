@@ -30,6 +30,49 @@ from app.domain.mr_models import (
 logger = logging.getLogger(__name__)
 
 
+def build_task2_prompt(
+    checkpoint: Any,
+    mr_context: dict[str, str],
+) -> str:
+    """构建 Task 2 提示词，强调仓库/分支/场景/预期与代码验证顺序。"""
+    cp_name = getattr(checkpoint, "name", getattr(checkpoint, "title", ""))
+    cp_desc = getattr(checkpoint, "description", "")
+    cp_expected = getattr(
+        checkpoint,
+        "expected_result",
+        getattr(checkpoint, "objective", ""),
+    )
+    cp_steps = getattr(checkpoint, "test_steps", "")
+    if not cp_steps:
+        cp_steps = "\n".join(getattr(checkpoint, "preconditions", [])[:5])
+
+    return (
+        "你是一名资深 QA 工程师，请在指定仓库和分支中核对下面这个测试场景是否符合当前代码实现。\n\n"
+        f"[代码仓库]\n"
+        f"- MR URL: {mr_context.get('mr_url', '')}\n"
+        f"- Git URL: {mr_context.get('git_url', '')}\n"
+        f"- Branch: {mr_context.get('branch', 'unknown')}\n\n"
+        f"[测试场景]\n"
+        f"- 名称: {cp_name}\n"
+        f"- 场景描述: {cp_desc}\n"
+        f"- 预期效果: {cp_expected}\n"
+        f"- 关键步骤/前置条件: {cp_steps}\n\n"
+        "请严格按以下顺序执行：\n"
+        "1. 先在对应仓库分支中定位与该场景最相关的模块、入口函数、配置和调用链。\n"
+        "2. 再基于代码逻辑判断实现是否符合上述预期，不要只复述 MR 描述。\n"
+        "3. 若不符合，请指出实际实现、偏差原因和相关代码位置；若证据不足，请明确说明。\n\n"
+        "请严格按以下 JSON 格式输出：\n"
+        '{\n'
+        '  "is_consistent": true/false,\n'
+        '  "confidence": 0.0-1.0,\n'
+        '  "actual_implementation": "实际实现描述",\n'
+        '  "inconsistency_reason": "不一致原因（一致时为空）",\n'
+        '  "related_code_file": "相关代码文件路径",\n'
+        '  "related_code_snippet": "关键代码片段"\n'
+        '}'
+    )
+
+
 # ---------------------------------------------------------------------------
 # 异常定义
 # ---------------------------------------------------------------------------
@@ -403,43 +446,9 @@ class CocoClient:
         Returns:
             CodeConsistencyResult。
         """
-        cp_name = getattr(checkpoint, "name", getattr(checkpoint, "title", ""))
-        cp_desc = getattr(checkpoint, "description", "")
-        cp_expected = getattr(checkpoint, "expected_result", "")
-        cp_steps = getattr(checkpoint, "test_steps", "")
-
-        prompt = (
-            "你是一名资深 QA 工程师，请校验以下测试校验点的预期是否与代码实现一致。\n\n"
-            f"[校验点信息]\n"
-            f"名称：{cp_name}\n"
-            f"描述：{cp_desc}\n"
-            f"预期结果：{cp_expected}\n"
-            f"操作步骤：{cp_steps}\n\n"
-            f"[MR 信息]\n"
-            f"MR URL: {mr_context.get('mr_url', '')}\n"
-            f"Codebase: {mr_context.get('git_url', '')}\n\n"
-            "请在代码中查找与此校验点相关的实现逻辑，并判断：\n"
-            "1. 代码实现是否与预期一致？\n"
-            "2. 如果不一致，实际实现是什么？偏差原因是什么？\n\n"
-            "请严格按以下 JSON 格式输出：\n"
-            '{\n'
-            '  "is_consistent": true/false,\n'
-            '  "confidence": 0.0-1.0,\n'
-            '  "actual_implementation": "实际实现描述",\n'
-            '  "inconsistency_reason": "不一致原因（一致时为空）",\n'
-            '  "related_code_file": "相关代码文件路径",\n'
-            '  "related_code_snippet": "关键代码片段"\n'
-            '}'
-        )
-
         try:
-            task_id = await self.send_task(
-                prompt=prompt,
-                mr_url=mr_context.get("mr_url", ""),
-                git_url=mr_context.get("git_url", ""),
-            )
-            task = await self.poll_task(task_id, timeout=120)
-            raw_text = self._get_assistant_text(task)
+            result, _artifacts = await self.run_validation_task(checkpoint, mr_context)
+            return result
         except (CocoTaskError, TimeoutError, Exception) as exc:
             logger.warning("Task2 校验失败 [%s]: %s", cp_name, exc)
             return CodeConsistencyResult(
@@ -447,10 +456,40 @@ class CocoClient:
                 verified_by="",
             )
 
+    async def run_validation_task(
+        self,
+        checkpoint: Any,
+        mr_context: dict[str, str],
+    ) -> tuple[CodeConsistencyResult, dict[str, Any]]:
+        """执行 Task 2 并返回结果及可落盘的原始工件。"""
+        prompt = build_task2_prompt(checkpoint, mr_context)
+        task_id = await self.send_task(
+            prompt=prompt,
+            mr_url=mr_context.get("mr_url", ""),
+            git_url=mr_context.get("git_url", ""),
+        )
+        task = await self.poll_task(task_id, timeout=120)
+        raw_text = self._get_assistant_text(task)
+        result = await self._parse_validation_result(checkpoint, raw_text)
+        return result, {
+            "prompt": prompt,
+            "task_id": task_id,
+            "task": task,
+            "result": result,
+        }
+
+    async def _parse_validation_result(
+        self,
+        checkpoint: Any,
+        raw_text: str,
+    ) -> CodeConsistencyResult:
+        """解析 Task 2 原始文本为结构化结果。"""
+        cp_name = getattr(checkpoint, "name", getattr(checkpoint, "title", ""))
+        cp_desc = getattr(checkpoint, "description", "")
+
         if not raw_text:
             return CodeConsistencyResult(status="unverified", verified_by="")
 
-        # 三层容错解析
         from app.services.coco_response_validator import CocoResponseValidator
 
         validator = CocoResponseValidator(self._llm_client)

@@ -64,6 +64,8 @@ class MRRequestConfig(BaseModel):
     mr_url: str = ""
     git_url: str = ""
     local_path: str = ""
+    branch: str = ""
+    commit_sha: str = ""
     use_coco: bool = False
 
 

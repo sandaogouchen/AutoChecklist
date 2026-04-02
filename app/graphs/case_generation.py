@@ -122,7 +122,10 @@ def build_case_generation_subgraph(
     builder.add_node("draft_writer", maybe_wrap("draft_writer", DraftWriterNode(llm_client), timer, iteration_index))
 
     # ---- Coco 一致性验证节点（可选） ----
-    coco_validator_node = build_coco_consistency_validator_node(coco_settings=coco_settings)
+    coco_validator_node = build_coco_consistency_validator_node(
+        llm_client=llm_client,
+        coco_settings=coco_settings,
+    )
     builder.add_node("coco_consistency_validator", maybe_wrap("coco_consistency_validator", coco_validator_node, timer, iteration_index))
 
     builder.add_node("structure_assembler", maybe_wrap("structure_assembler", structure_assembler_node, timer, iteration_index))

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from app.domain.mr_models import (
@@ -25,6 +26,8 @@ from app.domain.mr_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+from app.utils.filesystem import ensure_directory, write_json
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +95,9 @@ def build_coco_consistency_validator_node(
             logger.info("coco_consistency_validator: 无 Coco 端配置，pass-through")
             return {}
 
+        if not coco_settings or not getattr(coco_settings, "coco_jwt_token", ""):
+            raise RuntimeError("Coco 校验已启用，但 coco_settings / COCO_JWT_TOKEN 未配置")
+
         logger.info(
             "coco_consistency_validator: 开始校验 %d 个 checkpoint (Coco 端: %s)",
             len(checkpoints),
@@ -104,6 +110,8 @@ def build_coco_consistency_validator_node(
         # ---- 多线程并行校验 ----
         semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
         start_time = time.monotonic()
+
+        task2_records: list[dict[str, Any]] = []
 
         async def _validate_single(cp: Any, index: int) -> tuple[int, CodeConsistencyResult]:
             """校验单个 checkpoint，带信号量和超时控制。"""
@@ -118,15 +126,20 @@ def build_coco_consistency_validator_node(
                     return index, CodeConsistencyResult(status="unverified", verified_by="")
 
                 try:
-                    result = await asyncio.wait_for(
+                    result, artifact_record = await asyncio.wait_for(
                         _validate_checkpoint_via_coco(
                             checkpoint=cp,
                             mr_context=mr_context,
                             coco_settings=coco_settings,
                             llm_client=llm_client,
+                            artifact_context={
+                                "run_output_dir": state.get("run_output_dir"),
+                                "checkpoint_index": index,
+                            },
                         ),
                         timeout=_PER_CASE_TIMEOUT_S,
                     )
+                    task2_records.append(artifact_record)
                     return index, result
                 except asyncio.TimeoutError:
                     cp_name = _get_cp_name(cp)
@@ -183,6 +196,12 @@ def build_coco_consistency_validator_node(
         summary = _build_validation_summary(results_map, len(checkpoints))
 
         total_elapsed = time.monotonic() - start_time
+        coco_artifacts = _persist_task2_artifacts(
+            state=state,
+            mr_context=mr_context,
+            summary=summary,
+            records=task2_records,
+        )
         logger.info(
             "coco_consistency_validator 完成: "
             "total=%d, confirmed=%d, mismatch=%d, unverified=%d, elapsed=%.1fs",
@@ -193,9 +212,18 @@ def build_coco_consistency_validator_node(
             total_elapsed,
         )
 
+        if summary["unverified"] > 0:
+            raise RuntimeError(
+                f"Coco 校验未完成: total={summary['total']}, unverified={summary['unverified']}"
+            )
+
         return {
             "checkpoints": annotated,
             "coco_validation_summary": summary,
+            "coco_artifacts": {
+                **state.get("coco_artifacts", {}),
+                **coco_artifacts,
+            },
         }
 
     def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -215,7 +243,8 @@ async def _validate_checkpoint_via_coco(
     mr_context: dict[str, str],
     coco_settings: Any | None,
     llm_client: Any | None,
-) -> CodeConsistencyResult:
+    artifact_context: dict[str, Any] | None = None,
+) -> tuple[CodeConsistencyResult, dict[str, Any]]:
     """向 Coco 发送单个 checkpoint 的一致性校验请求。
 
     Args:
@@ -235,15 +264,37 @@ async def _validate_checkpoint_via_coco(
     client = CocoClient(coco_settings, llm_client=llm_client)
 
     try:
-        result = await client.send_validation_task(
+        result, artifacts = await client.run_validation_task(
             checkpoint=checkpoint,
             mr_context=mr_context,
         )
-        return result
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": _get_cp_name(checkpoint),
+            "mr_context": mr_context,
+            **artifacts,
+        }
+        run_output_dir = (artifact_context or {}).get("run_output_dir")
+        checkpoint_index = (artifact_context or {}).get("checkpoint_index", 0)
+        if run_output_dir:
+            coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+            detail_path = write_json(
+                coco_dir / f"task2_checkpoint_{checkpoint_index:03d}.json",
+                record,
+            )
+            record["artifact_file"] = str(detail_path)
+        return result, record
     except Exception as exc:
         cp_name = _get_cp_name(checkpoint)
         logger.warning("Coco Task 2 校验失败 [%s]: %s", cp_name, exc)
-        return CodeConsistencyResult(status="unverified", verified_by="")
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": cp_name,
+            "mr_context": mr_context,
+            "error_type": exc.__class__.__name__,
+            "error_message": str(exc),
+        }
+        return CodeConsistencyResult(status="unverified", verified_by=""), record
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +371,40 @@ def _build_mr_context(
     """
     mr_url = ""
     git_url = ""
+    branch = ""
     for side, config in coco_configs:
         if config.mr_url:
             mr_url = mr_url or config.mr_url
         if config.codebase.git_url:
             git_url = git_url or config.codebase.git_url
-    return {"mr_url": mr_url, "git_url": git_url}
+        if config.codebase.branch:
+            branch = branch or config.codebase.branch
+    return {"mr_url": mr_url, "git_url": git_url, "branch": branch}
+
+
+def _persist_task2_artifacts(
+    state: dict[str, Any],
+    mr_context: dict[str, str],
+    summary: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """持久化 Task 2 汇总与原始返回。"""
+    run_output_dir = state.get("run_output_dir")
+    if not run_output_dir:
+        return {}
+
+    coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+    summary_payload = {
+        "mr_context": mr_context,
+        "summary": summary,
+        "record_count": len(records),
+    }
+    summary_path = write_json(coco_dir / "task2_summary.json", summary_payload)
+    results_path = write_json(coco_dir / "task2_results.json", records)
+    return {
+        "task2_summary": str(summary_path),
+        "task2_results": str(results_path),
+    }
 
 
 def _build_validation_summary(

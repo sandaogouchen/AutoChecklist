@@ -28,13 +28,20 @@ def test_coco_consistency_validator_runs_synchronously_with_coco(monkeypatch) ->
         mr_context,
         coco_settings,
         llm_client,
+        artifact_context=None,
     ):
-        del checkpoint, mr_context, coco_settings, llm_client
-        return validator_module.CodeConsistencyResult(
-            status="confirmed",
-            confidence=0.95,
-            actual_implementation="代码与预期一致",
-            verified_by="coco",
+        del mr_context, coco_settings, llm_client, artifact_context
+        return (
+            validator_module.CodeConsistencyResult(
+                status="confirmed",
+                confidence=0.95,
+                actual_implementation="代码与预期一致",
+                verified_by="coco",
+            ),
+            {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "checkpoint_title": checkpoint.title,
+            },
         )
 
     monkeypatch.setattr(
