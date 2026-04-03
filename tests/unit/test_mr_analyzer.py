@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -230,3 +231,68 @@ def test_mr_analyzer_runs_single_coco_task_and_keeps_research_output_unchanged(m
     assert result["research_output"] is state["research_output"]
     assert result["research_output"].facts[0].code_todo == ""
     assert result["research_output"].facts[1].code_consistency_status == ""
+
+
+def test_mr_analyzer_reuses_cached_coco_task1_result(monkeypatch, tmp_path: Path) -> None:
+    from app.services import coco_client as coco_client_module
+
+    async def _fail_run_mr_analysis_task(self, *, mr_context, prd_summary, changed_files_summary):
+        del self, mr_context, prd_summary, changed_files_summary
+        raise AssertionError("should not call Coco when cache is available")
+
+    monkeypatch.setattr(
+        coco_client_module.CocoClient,
+        "run_mr_analysis_task",
+        _fail_run_mr_analysis_task,
+    )
+
+    cache_dir = tmp_path / "cached-run" / "coco"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "task1_frontend_result.json").write_text(
+        json.dumps(
+            {
+                "mr_summary": "缓存的前端 MR 摘要",
+                "changed_modules": ["auth"],
+                "related_code_snippets": [],
+                "code_facts": [
+                    {
+                        "fact_id": "MR-FACT-001",
+                        "description": "缓存的代码事实",
+                        "source_file": "app/auth.py",
+                        "code_snippet": "if not token: return fallback",
+                        "fact_type": "error_handling",
+                        "related_prd_fact_ids": ["FACT-001"],
+                    }
+                ],
+                "consistency_issues": [],
+                "search_trace": ["via_coco_cache"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    node = build_mr_analyzer_node(
+        llm_client=object(),
+        coco_settings=type("CocoSettings", (), {"coco_jwt_token": ""})(),
+    )
+    result = node(
+        {
+            "frontend_mr_config": MRSourceConfig(
+                mr_url="https://example.com/mr/123",
+                codebase=CodebaseSource(
+                    git_url="https://example.com/repo.git",
+                    branch="feat/pulse-setup",
+                ),
+                use_coco=True,
+            ),
+            "coco_cache_dir": str(cache_dir),
+            "research_output": ResearchOutput(
+                facts=[ResearchFact(fact_id="FACT-001", description="登录失败时应明确提示用户原因")]
+            ),
+        }
+    )
+
+    assert result["mr_code_facts"][0].fact_id == "FE-MR-FACT-001"
+    assert result["mr_code_facts"][0].description == "缓存的代码事实"

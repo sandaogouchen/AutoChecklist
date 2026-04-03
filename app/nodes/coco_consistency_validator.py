@@ -28,6 +28,7 @@ from app.domain.mr_models import (
 logger = logging.getLogger(__name__)
 
 from app.utils.filesystem import ensure_directory, write_json
+from app.utils.filesystem import read_json
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,14 @@ def build_coco_consistency_validator_node(
         if not coco_configs:
             logger.info("coco_consistency_validator: 无 Coco 端配置，pass-through")
             return {}
+
+        cached = _load_cached_task2_results(state, checkpoints)
+        if cached is not None:
+            logger.info(
+                "coco_consistency_validator: 命中缓存 run=%s",
+                state.get("coco_cache_run_id", ""),
+            )
+            return cached
 
         if not coco_settings or not getattr(coco_settings, "coco_jwt_token", ""):
             raise RuntimeError("Coco 校验已启用，但 coco_settings / COCO_JWT_TOKEN 未配置")
@@ -261,6 +270,60 @@ def build_coco_consistency_validator_node(
         return asyncio.run(_run_validation(state))
 
     return coco_consistency_validator_node
+
+
+def _load_cached_task2_results(
+    state: dict[str, Any],
+    checkpoints: list[Any],
+) -> dict[str, Any] | None:
+    """从历史 Coco 工件中恢复 Task2 校验结果。"""
+    cache_dir = state.get("coco_cache_dir")
+    if not cache_dir:
+        return None
+
+    results_path = Path(cache_dir) / "task2_results.json"
+    summary_path = Path(cache_dir) / "task2_summary.json"
+    if not results_path.exists():
+        return None
+
+    payload = read_json(results_path)
+    result_by_checkpoint_id: dict[str, CodeConsistencyResult] = {}
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        checkpoint_id = str(item.get("checkpoint_id", "")).strip()
+        result_payload = item.get("result")
+        if not checkpoint_id or not isinstance(result_payload, dict):
+            continue
+        result_by_checkpoint_id[checkpoint_id] = CodeConsistencyResult.model_validate(
+            result_payload
+        )
+
+    results_map: dict[int, CodeConsistencyResult] = {}
+    for idx, checkpoint in enumerate(checkpoints):
+        checkpoint_id = _get_attr_safe(checkpoint, "checkpoint_id", "")
+        cached_result = result_by_checkpoint_id.get(checkpoint_id)
+        if cached_result is not None:
+            results_map[idx] = cached_result
+
+    annotated = _annotate_checkpoints(checkpoints, results_map)
+    summary = _build_validation_summary(results_map, len(checkpoints))
+
+    artifacts = {}
+    if summary_path.exists():
+        artifacts["task2_summary"] = str(summary_path)
+    artifacts["task2_results"] = str(results_path)
+
+    return {
+        "checkpoints": annotated,
+        "coco_validation_summary": summary,
+        "coco_artifacts": {
+            **state.get("coco_artifacts", {}),
+            **artifacts,
+        },
+        "coco_cache_dir": state.get("coco_cache_dir", ""),
+        "coco_cache_run_id": state.get("coco_cache_run_id", ""),
+    }
 
 
 # ---------------------------------------------------------------------------

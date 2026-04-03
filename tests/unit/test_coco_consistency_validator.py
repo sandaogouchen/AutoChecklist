@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from app.config.settings import CocoSettings
 from app.domain.checkpoint_models import Checkpoint
@@ -166,3 +167,70 @@ def test_coco_consistency_validator_keeps_partial_results_and_does_not_raise_on_
     }
     assert result["checkpoints"][0].code_consistency["status"] == "confirmed"
     assert result["checkpoints"][1].code_consistency["status"] == "unverified"
+
+
+def test_coco_consistency_validator_reuses_cached_task2_results(monkeypatch, tmp_path) -> None:
+    async def _fail_validate_checkpoint_via_coco(
+        checkpoint,
+        mr_context,
+        coco_settings,
+        llm_client,
+        artifact_context=None,
+    ):
+        del checkpoint, mr_context, coco_settings, llm_client, artifact_context
+        raise AssertionError("should not call Coco when task2 cache is available")
+
+    monkeypatch.setattr(
+        validator_module,
+        "_validate_checkpoint_via_coco",
+        _fail_validate_checkpoint_via_coco,
+    )
+
+    cache_dir = tmp_path / "cached-run" / "coco"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "task2_results.json").write_text(
+        json.dumps(
+            [
+                {
+                    "checkpoint_id": "CP-1",
+                    "checkpoint_title": "检查点 1",
+                    "result": {
+                        "status": "confirmed",
+                        "confidence": 0.95,
+                        "actual_implementation": "缓存命中",
+                        "inconsistency_reason": "",
+                        "related_code_file": "app/example.py",
+                        "related_code_snippet": "return ok",
+                        "verified_by": "coco-cache",
+                    },
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    node = build_coco_consistency_validator_node(
+        coco_settings=CocoSettings(coco_jwt_token=""),
+    )
+
+    result = node(
+        {
+            "checkpoints": [Checkpoint(checkpoint_id="CP-1", title="检查点 1")],
+            "coco_cache_dir": str(cache_dir),
+            "frontend_mr_config": {
+                "mr_url": "https://example.com/mr/123",
+                "use_coco": True,
+                "codebase": {"git_url": "https://example.com/repo.git"},
+            },
+        }
+    )
+
+    assert result["coco_validation_summary"] == {
+        "total": 1,
+        "confirmed": 1,
+        "mismatch": 0,
+        "unverified": 0,
+    }
+    assert result["checkpoints"][0].code_consistency["verified_by"] == "coco-cache"

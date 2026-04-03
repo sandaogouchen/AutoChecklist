@@ -18,7 +18,9 @@ import re
 import unicodedata
 from typing import Any, Callable
 
+from app.domain.checkpoint_models import Checkpoint
 from app.domain.mr_models import MRCodeFact
+from app.domain.template_models import TemplateLeafTarget
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,9 @@ def _text_similarity(a: str, b: str) -> float:
 _DEDUP_THRESHOLD = 0.75
 """去重相似度阈值：title 相似度超过此值视为重复。"""
 
+_TEMPLATE_FALLBACK_THRESHOLD = 0.3
+"""MR 注入 checkpoint 的模版文本兜底阈值。"""
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint 生成
@@ -148,6 +153,135 @@ def _fact_to_checkpoint(
         "related_prd_fact_ids": fact.related_prd_fact_ids,
         "tags": ["mr_code_checkpoint"],
     }
+
+
+def _payload_to_checkpoint(payload: dict[str, Any]) -> Checkpoint:
+    """将注入 payload 归一化为 Checkpoint 模型。"""
+    return Checkpoint.model_validate(
+        {
+            "checkpoint_id": payload.get("checkpoint_id", ""),
+            "title": payload.get("title", ""),
+            "objective": payload.get("description", ""),
+            "category": payload.get("category", _DEFAULT_CATEGORY),
+            "fact_ids": payload.get("fact_ids", []),
+            "template_leaf_id": payload.get("template_leaf_id", ""),
+            "template_path_ids": payload.get("template_path_ids", []),
+            "template_path_titles": payload.get("template_path_titles", []),
+            "template_match_confidence": payload.get("template_match_confidence", 0.0),
+            "template_match_reason": payload.get("template_match_reason", ""),
+            "template_match_low_confidence": payload.get(
+                "template_match_low_confidence", False
+            ),
+        }
+    )
+
+
+def _bind_template_for_checkpoint(
+    payload: dict[str, Any],
+    *,
+    existing_checkpoints: list[Any],
+    template_leaf_targets: list[TemplateLeafTarget],
+) -> dict[str, Any]:
+    """为 MR 注入 checkpoint 绑定模版叶子。
+
+    优先级：
+    1. 复用关联 PRD checkpoint 的已有绑定
+    2. 使用标题/描述与模版路径做文本相似度兜底
+    """
+    if not template_leaf_targets:
+        return payload
+
+    leaf_lookup = {item.leaf_id: item for item in template_leaf_targets}
+    related_prd_fact_ids = set(payload.get("related_prd_fact_ids", []) or [])
+
+    if related_prd_fact_ids:
+        best_match = _find_related_checkpoint_template_binding(
+            existing_checkpoints,
+            related_prd_fact_ids,
+        )
+        if best_match is not None:
+            leaf_id, confidence, reason = best_match
+            leaf_target = leaf_lookup.get(leaf_id)
+            if leaf_target is not None:
+                payload["template_leaf_id"] = leaf_target.leaf_id
+                payload["template_path_ids"] = list(leaf_target.path_ids)
+                payload["template_path_titles"] = list(leaf_target.path_titles)
+                payload["template_match_confidence"] = confidence
+                payload["template_match_reason"] = reason
+                payload["template_match_low_confidence"] = False
+                return payload
+
+    best_leaf: TemplateLeafTarget | None = None
+    best_score = 0.0
+    title = str(payload.get("title", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    for leaf_target in template_leaf_targets:
+        score = max(
+            _text_similarity(title, leaf_target.leaf_title),
+            _text_similarity(title, leaf_target.path_text),
+            _text_similarity(description, leaf_target.leaf_title),
+            _text_similarity(description, leaf_target.path_text),
+        )
+        if score > best_score:
+            best_score = score
+            best_leaf = leaf_target
+
+    if best_leaf is None or best_score < _TEMPLATE_FALLBACK_THRESHOLD:
+        return payload
+
+    payload["template_leaf_id"] = best_leaf.leaf_id
+    payload["template_path_ids"] = list(best_leaf.path_ids)
+    payload["template_path_titles"] = list(best_leaf.path_titles)
+    payload["template_match_confidence"] = best_score
+    payload["template_match_reason"] = "基于 MR checkpoint 文本与模版路径的相似度兜底匹配"
+    payload["template_match_low_confidence"] = True
+    return payload
+
+
+def _find_related_checkpoint_template_binding(
+    checkpoints: list[Any],
+    related_prd_fact_ids: set[str],
+) -> tuple[str, float, str] | None:
+    """从已存在的 PRD checkpoint 中复用模版绑定。"""
+    best_leaf_id = ""
+    best_score = 0.0
+    best_reason = ""
+
+    for checkpoint in checkpoints:
+        fact_ids = (
+            checkpoint.get("fact_ids", [])
+            if isinstance(checkpoint, dict)
+            else getattr(checkpoint, "fact_ids", [])
+        ) or []
+        if not related_prd_fact_ids.intersection(fact_ids):
+            continue
+
+        leaf_id = (
+            checkpoint.get("template_leaf_id", "")
+            if isinstance(checkpoint, dict)
+            else getattr(checkpoint, "template_leaf_id", "")
+        )
+        if not leaf_id:
+            continue
+
+        confidence = (
+            checkpoint.get("template_match_confidence", 0.0)
+            if isinstance(checkpoint, dict)
+            else getattr(checkpoint, "template_match_confidence", 0.0)
+        )
+        overlap_count = len(related_prd_fact_ids.intersection(set(fact_ids)))
+        score = max(float(confidence), 0.8) + overlap_count * 0.01
+        if score <= best_score:
+            continue
+
+        best_leaf_id = leaf_id
+        best_score = score
+        best_reason = "继承关联 PRD checkpoint 的模版归类"
+
+    if not best_leaf_id:
+        return None
+
+    return best_leaf_id, min(best_score, 0.99), best_reason
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +366,9 @@ def build_mr_checkpoint_injector_node() -> Callable[..., dict[str, Any]]:
             return {}
 
         existing_checkpoints = state.get("checkpoints", [])
+        template_leaf_targets: list[TemplateLeafTarget] = state.get(
+            "template_leaf_targets", []
+        )
 
         # ---- Step 1: 将每个 MRCodeFact 转换为 Checkpoint ----
         new_checkpoints: list[dict[str, Any]] = []
@@ -245,6 +382,11 @@ def build_mr_checkpoint_injector_node() -> Callable[..., dict[str, Any]]:
 
             cp_id = _generate_checkpoint_id(prefix, idx + 1)
             cp_dict = _fact_to_checkpoint(fact, cp_id)
+            cp_dict = _bind_template_for_checkpoint(
+                cp_dict,
+                existing_checkpoints=existing_checkpoints,
+                template_leaf_targets=template_leaf_targets,
+            )
             new_checkpoints.append(cp_dict)
 
         logger.info(
@@ -256,7 +398,10 @@ def build_mr_checkpoint_injector_node() -> Callable[..., dict[str, Any]]:
         deduplicated = _deduplicate_checkpoints(new_checkpoints, existing_checkpoints)
 
         # ---- Step 3: 合并到现有列表 ----
-        merged = list(existing_checkpoints) + deduplicated
+        normalized_new_checkpoints = [
+            _payload_to_checkpoint(cp) for cp in deduplicated
+        ]
+        merged = list(existing_checkpoints) + normalized_new_checkpoints
         injected_ids = [cp["checkpoint_id"] for cp in deduplicated]
 
         # ---- Step 4: 关联一致性问题 ----

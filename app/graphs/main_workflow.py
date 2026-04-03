@@ -164,6 +164,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "mr_consistency_issues": state.get("mr_consistency_issues", []),
             "mr_combined_summary": state.get("mr_combined_summary", ""),
             "mr_analysis_result": state.get("mr_analysis_result"),
+            "coco_cache_dir": state.get("coco_cache_dir", ""),
+            "coco_cache_run_id": state.get("coco_cache_run_id", ""),
         }
 
         # 清理 None 值
@@ -205,6 +207,8 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "backend_mr_result": subgraph_result.get("backend_mr_result"),
             "coco_validation_summary": subgraph_result.get("coco_validation_summary", {}),
             "coco_artifacts": subgraph_result.get("coco_artifacts", {}),
+            "coco_cache_dir": subgraph_result.get("coco_cache_dir", state.get("coco_cache_dir", "")),
+            "coco_cache_run_id": subgraph_result.get("coco_cache_run_id", state.get("coco_cache_run_id", "")),
         }
 
     return case_generation_node

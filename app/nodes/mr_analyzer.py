@@ -30,6 +30,7 @@ from app.domain.mr_models import (
 from app.domain.research_models import ResearchFact, ResearchOutput
 from app.services.codebase_tools import CODEBASE_TOOLS, execute_tool
 from app.utils.filesystem import ensure_directory, write_json, write_text
+from app.utils.filesystem import read_json
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +335,40 @@ def _record_coco_artifact(state: dict[str, Any], key: str, path: Path) -> None:
     artifacts[key] = str(path)
 
 
+def _load_cached_task1_result(
+    state: dict[str, Any],
+    *,
+    side: str,
+    prefix: str,
+) -> MRAnalysisResult | None:
+    """从历史 Coco 工件中加载 Task1 结果。"""
+    cache_dir = state.get("coco_cache_dir")
+    if not cache_dir:
+        return None
+
+    result_path = Path(cache_dir) / f"task1_{side}_result.json"
+    if not result_path.exists():
+        return None
+
+    payload = read_json(result_path)
+    result = MRAnalysisResult.model_validate(payload)
+    result = _apply_prefix(result, prefix)
+    if "via_coco_cache" not in result.search_trace:
+        result.search_trace.append("via_coco_cache")
+    result.coco_task_status = CocoTaskStatus(
+        task_id=f"cache:{state.get('coco_cache_run_id', '')}:{side}",
+        status="cached",
+        elapsed_seconds=0.0,
+    )
+
+    for suffix in ("prompt", "task", "result"):
+        candidate = Path(cache_dir) / f"task1_{side}_{suffix}.{'txt' if suffix == 'prompt' else 'json'}"
+        if candidate.exists():
+            _record_coco_artifact(state, f"task1_{side}_{suffix}", candidate)
+
+    return result
+
+
 def _build_coco_task1_prompt(
     mr_url: str,
     git_url: str,
@@ -607,6 +642,19 @@ async def _analyze_via_coco(
 ) -> MRAnalysisResult:
     """通过 Coco Agent 进行代码分析（Task 1）。"""
     from app.services.coco_client import CocoClient, CocoTaskError
+
+    cached_result = _load_cached_task1_result(
+        state,
+        side=side,
+        prefix=prefix,
+    )
+    if cached_result is not None:
+        logger.info(
+            "Coco Task 1 [%s] 命中缓存: cache_run=%s",
+            side,
+            state.get("coco_cache_run_id", ""),
+        )
+        return cached_result
 
     if not coco_settings:
         logger.warning("Coco 委托路径: coco_settings 未配置，跳过 %s 端", side)

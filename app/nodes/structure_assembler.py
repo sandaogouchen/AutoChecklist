@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from app.domain.case_models import TestCase
@@ -23,6 +25,16 @@ from app.services.checkpoint_outline_planner import attach_expected_results_to_o
 from app.services.text_normalizer import normalize_test_case
 
 logger = logging.getLogger(__name__)
+
+_CODE_LOGIC_BRANCH_TITLE = "代码实现逻辑"
+
+
+@dataclass
+class _MismatchDetailRecord:
+    case_id: str
+    checkpoint_id: str
+    pointer: str
+    actual_implementation: str
 
 
 def structure_assembler_node(state: CaseGenState) -> CaseGenState:
@@ -71,9 +83,20 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         assembled = case.model_copy(update=update_fields)
         assembled = normalize_test_case(assembled)
         assembled_cases.append(assembled)
+        logger.info(
+            "Checklist pre-integration item: case_id=%s checkpoint_id=%s "
+            "template_leaf_id=%s expected_results=%d",
+            assembled.id or f"draft-{index}",
+            assembled.checkpoint_id or "-",
+            assembled.template_leaf_id or "-",
+            len(assembled.expected_results or []),
+        )
 
     # ---- 应用代码一致性 TODO 标注 ----
-    assembled_cases = _apply_consistency_todos(assembled_cases, checkpoints)
+    assembled_cases, mismatch_details = _apply_consistency_todos(
+        assembled_cases,
+        checkpoints,
+    )
 
     logger.info(
         "Checklist integration starting: draft_cases=%d optimized_tree_roots=%d "
@@ -100,6 +123,13 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         )
         _annotate_source(optimized_tree, mandatory_skeleton)
 
+    optimized_tree = _attach_code_mismatch_details(
+        optimized_tree,
+        mismatch_details,
+        state.get("checkpoint_paths", []),
+        state.get("canonical_outline_nodes", []),
+    )
+
     logger.info(
         "Checklist integration completed: test_cases=%d optimized_tree_roots=%d",
         len(assembled_cases),
@@ -115,7 +145,7 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
 def _apply_consistency_todos(
     cases: list[TestCase],
     checkpoints: list[Checkpoint],
-) -> list[TestCase]:
+) -> tuple[list[TestCase], list[_MismatchDetailRecord]]:
     """将代码一致性验证结果应用为 TODO 标注。
 
     遍历每个 test case，查找其关联 checkpoint 上的 code_consistency
@@ -127,16 +157,18 @@ def _apply_consistency_todos(
         checkpoints: checkpoint 列表，可能携带 code_consistency 信息。
 
     Returns:
-        更新后的测试用例列表（原地修改后返回）。
+        ``(更新后的测试用例列表, mismatch 详情记录列表)``。
     """
     if not checkpoints:
-        return cases
+        return cases, []
 
     cp_lookup: dict[str, Checkpoint] = {
         cp.checkpoint_id: cp for cp in checkpoints if cp.checkpoint_id
     }
 
     todo_count = 0
+    mismatch_index = 0
+    mismatch_records: list[_MismatchDetailRecord] = []
     for case in cases:
         if not case.checkpoint_id:
             continue
@@ -161,9 +193,32 @@ def _apply_consistency_todos(
         snippet = consistency.get("code_snippet", "")
 
         if status == "mismatch":
-            todo_text = f"[TODO-CODE-MISMATCH] 代码实现与 PRD 不一致: {detail}"
-            if snippet:
-                todo_text += f" | 代码片段: {snippet[:200]}"
+            mismatch_index += 1
+            pointer = f"{_CODE_LOGIC_BRANCH_TITLE}-{mismatch_index}"
+            todo_text = (
+                f"[TODO-CODE-MISMATCH] {pointer}: 代码实现与 PRD 不一致"
+            )
+            actual_implementation = str(
+                consistency.get("actual_implementation", "")
+            ).strip()
+            if actual_implementation:
+                mismatch_records.append(
+                    _MismatchDetailRecord(
+                        case_id=case.id or "",
+                        checkpoint_id=case.checkpoint_id,
+                        pointer=pointer,
+                        actual_implementation=actual_implementation,
+                    )
+                )
+            elif detail:
+                mismatch_records.append(
+                    _MismatchDetailRecord(
+                        case_id=case.id or "",
+                        checkpoint_id=case.checkpoint_id,
+                        pointer=pointer,
+                        actual_implementation=detail,
+                    )
+                )
         elif status == "unverified":
             todo_text = f"[TODO-CODE-UNVERIFIED] 未能验证代码实现: {detail}"
         else:
@@ -189,7 +244,96 @@ def _apply_consistency_todos(
             todo_count,
         )
 
-    return cases
+    return cases, mismatch_records
+
+
+def _attach_code_mismatch_details(
+    optimized_tree: list[ChecklistNode],
+    mismatch_details: list[_MismatchDetailRecord],
+    checkpoint_paths: list[Any],
+    canonical_outline_nodes: list[Any],
+) -> list[ChecklistNode]:
+    """将 mismatch 的完整现状挂到 `代码实现逻辑` 分支下。"""
+    if not optimized_tree or not mismatch_details:
+        return optimized_tree
+
+    tree = [node.model_copy(deep=True) for node in optimized_tree]
+    root_group = _ensure_root_group(tree, _CODE_LOGIC_BRANCH_TITLE)
+
+    for item in mismatch_details:
+        pointer_group = _ensure_child_group(
+            root_group,
+            title=item.pointer,
+            stable_key=f"{_CODE_LOGIC_BRANCH_TITLE}||{item.pointer}",
+        )
+
+        existing_leaf_titles = {child.title for child in pointer_group.children}
+        for line in _split_actual_implementation_lines(item.actual_implementation):
+            if line in existing_leaf_titles:
+                continue
+            pointer_group.children.append(
+                ChecklistNode(
+                    node_id=_stable_tree_id(
+                        "CODE-LOGIC",
+                        f"{_CODE_LOGIC_BRANCH_TITLE}||{item.pointer}||{line}",
+                    ),
+                    title=line,
+                    node_type="expected_result",
+                    source_test_case_refs=[item.case_id] if item.case_id else [],
+                )
+            )
+
+    return tree
+
+
+def _ensure_child_group(
+    parent: ChecklistNode,
+    *,
+    title: str,
+    stable_key: str,
+) -> ChecklistNode:
+    for child in parent.children:
+        if child.node_type == "group" and child.title == title:
+            return child
+
+    node = ChecklistNode(
+        node_id=_stable_tree_id("GROUP", stable_key),
+        title=title,
+        node_type="group",
+        children=[],
+    )
+    parent.children.append(node)
+    return node
+
+
+def _ensure_root_group(
+    tree: list[ChecklistNode],
+    title: str,
+) -> ChecklistNode:
+    for node in tree:
+        if node.node_type == "group" and node.title == title:
+            return node
+
+    root = ChecklistNode(
+        node_id=_stable_tree_id("GROUP", title),
+        title=title,
+        node_type="group",
+        children=[],
+    )
+    tree.append(root)
+    return root
+
+
+def _split_actual_implementation_lines(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines or [text.strip()]
+
+
+def _stable_tree_id(prefix: str, raw: str) -> str:
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+
 
 
 def _enforce_mandatory_constraints(
