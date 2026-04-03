@@ -188,9 +188,10 @@ def _apply_consistency_todos(
                 case.code_consistency = consistency
             continue
 
-        # mismatch 或 unverified —— 追加 TODO
+        # mismatch 才追加 TODO；unverified 仅保留状态和标签
         detail = consistency.get("detail", "")
         snippet = consistency.get("code_snippet", "")
+        todo_text = ""
 
         if status == "mismatch":
             mismatch_index += 1
@@ -219,13 +220,11 @@ def _apply_consistency_todos(
                         actual_implementation=detail,
                     )
                 )
-        elif status == "unverified":
-            todo_text = f"[TODO-CODE-UNVERIFIED] 未能验证代码实现: {detail}"
         else:
-            todo_text = f"[TODO-CODE-{status.upper()}] {detail}"
+            todo_text = ""
 
         # 追加到 expected_results
-        if todo_text not in case.expected_results:
+        if todo_text and todo_text not in case.expected_results:
             case.expected_results.append(todo_text)
             todo_count += 1
 
