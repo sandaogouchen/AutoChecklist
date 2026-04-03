@@ -68,8 +68,8 @@ def build_case_generation_subgraph(
 
     子图结构（线性流水线）：
     ```
-    START → mr_analyzer → mr_checkpoint_injector → scenario_planner
-    → checkpoint_generator → checkpoint_evaluator
+    START → mr_analyzer → scenario_planner
+    → checkpoint_generator → checkpoint_evaluator → mr_checkpoint_injector
     → coverage_detector → checkpoint_outline_planner → evidence_mapper
     → draft_writer → coco_consistency_validator → structure_assembler → END
     ```
@@ -132,11 +132,11 @@ def build_case_generation_subgraph(
 
     # ---- 边连接 ----
     builder.add_edge(START, "mr_analyzer")
-    builder.add_edge("mr_analyzer", "mr_checkpoint_injector")
-    builder.add_edge("mr_checkpoint_injector", "scenario_planner")
+    builder.add_edge("mr_analyzer", "scenario_planner")
     builder.add_edge("scenario_planner", "checkpoint_generator")
     builder.add_edge("checkpoint_generator", "checkpoint_evaluator")
-    builder.add_edge("checkpoint_evaluator", "coverage_detector")
+    builder.add_edge("checkpoint_evaluator", "mr_checkpoint_injector")
+    builder.add_edge("mr_checkpoint_injector", "coverage_detector")
     builder.add_edge("coverage_detector", "checkpoint_outline_planner")
     builder.add_edge("checkpoint_outline_planner", "evidence_mapper")
     builder.add_edge("evidence_mapper", "draft_writer")

@@ -78,7 +78,7 @@ def test_coco_consistency_validator_runs_synchronously_with_coco(monkeypatch) ->
         "mismatch": 0,
         "unverified": 0,
     }
-    assert result["checkpoints"][0].code_consistency.status == "confirmed"
+    assert result["checkpoints"][0].code_consistency["status"] == "confirmed"
 
 
 def test_resolve_total_timeout_scales_with_checkpoint_count(monkeypatch) -> None:
@@ -164,5 +164,5 @@ def test_coco_consistency_validator_keeps_partial_results_and_does_not_raise_on_
         "mismatch": 0,
         "unverified": 1,
     }
-    assert result["checkpoints"][0].code_consistency.status == "confirmed"
-    assert result["checkpoints"][1].code_consistency.status == "unverified"
+    assert result["checkpoints"][0].code_consistency["status"] == "confirmed"
+    assert result["checkpoints"][1].code_consistency["status"] == "unverified"

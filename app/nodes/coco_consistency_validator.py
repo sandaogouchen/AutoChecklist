@@ -37,7 +37,7 @@ from app.utils.filesystem import ensure_directory, write_json
 _MAX_CONCURRENCY = 5
 """最大并发校验数。"""
 
-_PER_CASE_TIMEOUT_S = 120
+_PER_CASE_TIMEOUT_S = 2000
 """单个 checkpoint 校验的最大等待时间（秒）。"""
 
 _TOTAL_TIMEOUT_S = 6000
@@ -297,6 +297,7 @@ async def _validate_checkpoint_via_coco(
         result, artifacts = await client.run_validation_task(
             checkpoint=checkpoint,
             mr_context=mr_context,
+            timeout_s=int(_PER_CASE_TIMEOUT_S),
         )
         record = {
             "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
@@ -347,9 +348,10 @@ def _annotate_checkpoints(
         result = results_map.get(idx)
         if result is None:
             result = CodeConsistencyResult(status="unverified", verified_by="")
+        result_payload = result.model_dump(mode="json")
 
         # ---- 设置 code_consistency ----
-        _set_attr_safe(cp, "code_consistency", result)
+        _set_attr_safe(cp, "code_consistency", result_payload)
 
         # ---- 设置 tags ----
         existing_tags = _get_tags(cp)

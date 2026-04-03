@@ -729,6 +729,7 @@ class CocoClient:
         self,
         checkpoint: Any,
         mr_context: dict[str, str],
+        timeout_s: int = 120,
     ) -> tuple[CodeConsistencyResult, dict[str, Any]]:
         """执行 Task 2 并返回结果及可落盘的原始工件。"""
         prompt = build_task2_prompt(checkpoint, mr_context)
@@ -737,7 +738,7 @@ class CocoClient:
             mr_url=mr_context.get("mr_url", ""),
             git_url=mr_context.get("git_url", ""),
         )
-        task = await self.poll_task(task_id, timeout=120)
+        task = await self.poll_task(task_id, timeout=timeout_s)
         raw_text = self._get_assistant_text(task)
         result = await self._parse_validation_result(checkpoint, raw_text)
         return result, {
