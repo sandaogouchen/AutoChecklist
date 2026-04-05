@@ -266,7 +266,7 @@ class PreconditionGrouper:
         buckets = self._bucket_by_keyword(test_cases)
 
         # LLM 语义合并（可选增强）
-        if self._llm_client is not None and len(buckets) > 1:
+        if self._llm_client is not None:
             try:
                 buckets = self._llm_merge_buckets(buckets)
             except Exception as e:

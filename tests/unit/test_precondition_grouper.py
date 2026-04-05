@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections import OrderedDict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -340,6 +339,9 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
+        # Verify LLM was actually called before the fallback
+        mock_client.generate_structured.assert_called_once()
+
         # 回退到关键词分桶：两个中文用例都进"其他"
         assert len(result) == 1
         assert result[0].title == "其他"
@@ -468,21 +470,25 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
+        # Verify LLM was actually called
+        mock_client.generate_structured.assert_called_once()
+
         # 空 groups → 原始桶不变 → 两个中文用例在"其他"
         assert len(result) == 1
         assert result[0].title == "其他"
         assert len(result[0].children) == 2
 
-    def test_llm_single_bucket_skips_merge(self) -> None:
-        """只有 1 个桶时跳过 LLM 调用。"""
+    def test_llm_single_unique_text_skips_merge(self) -> None:
+        """All cases share the same precondition text → LLM is called but
+        _llm_merge_buckets returns early because unique entries ≤ 1."""
         cases = [
             _tc("TC-001", preconditions=["已登录账号"]),
-            _tc("TC-002", preconditions=["已注册账号"]),
+            _tc("TC-002", preconditions=["已登录账号"]),
         ]
 
         mock_client = MagicMock()
         grouper = PreconditionGrouper(llm_client=mock_client)
         grouper.group(cases)
 
-        # 两个中文用例 → 一个"其他"桶 → 只有 1 个桶 → 不调用 LLM
+        # All cases have the same text → 1 unique entry → early return → no LLM call
         mock_client.generate_structured.assert_not_called()
