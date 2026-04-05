@@ -7,10 +7,12 @@
 - 对文本字段进行中英文混排规范化
 - 从 checkpoint 继承模版绑定字段（兜底补全）
 - 执行强制约束后置校验和 source 标注
+- 应用代码一致性 TODO 标注（来自 MR 分析）
 """
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import ChecklistNode
@@ -70,6 +72,9 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         assembled = normalize_test_case(assembled)
         assembled_cases.append(assembled)
 
+    # ---- 应用代码一致性 TODO 标注 ----
+    assembled_cases = _apply_consistency_todos(assembled_cases, checkpoints)
+
     logger.info(
         "Checklist integration starting: draft_cases=%d optimized_tree_roots=%d "
         "checkpoint_paths=%d canonical_outline_nodes=%d template_bound_cases=%d",
@@ -105,6 +110,86 @@ def structure_assembler_node(state: CaseGenState) -> CaseGenState:
         "test_cases": assembled_cases,
         "optimized_tree": optimized_tree,
     }
+
+
+def _apply_consistency_todos(
+    cases: list[TestCase],
+    checkpoints: list[Checkpoint],
+) -> list[TestCase]:
+    """将代码一致性验证结果应用为 TODO 标注。
+
+    遍历每个 test case，查找其关联 checkpoint 上的 code_consistency
+    信息。对于 mismatch 或 unverified 状态的条目，在 test case 的
+    expected_results 中追加 TODO 提示，帮助 QA 人员关注潜在风险。
+
+    Args:
+        cases: 已组装的测试用例列表。
+        checkpoints: checkpoint 列表，可能携带 code_consistency 信息。
+
+    Returns:
+        更新后的测试用例列表（原地修改后返回）。
+    """
+    if not checkpoints:
+        return cases
+
+    cp_lookup: dict[str, Checkpoint] = {
+        cp.checkpoint_id: cp for cp in checkpoints if cp.checkpoint_id
+    }
+
+    todo_count = 0
+    for case in cases:
+        if not case.checkpoint_id:
+            continue
+
+        cp = cp_lookup.get(case.checkpoint_id)
+        if cp is None:
+            continue
+
+        consistency: dict[str, Any] | None = getattr(cp, "code_consistency", None)
+        if not consistency:
+            continue
+
+        status = consistency.get("status", "")
+        if status == "confirmed":
+            # 代码与 PRD 一致，无需额外标注
+            if not case.code_consistency:
+                case.code_consistency = consistency
+            continue
+
+        # mismatch 或 unverified —— 追加 TODO
+        detail = consistency.get("detail", "")
+        snippet = consistency.get("code_snippet", "")
+
+        if status == "mismatch":
+            todo_text = f"[TODO-CODE-MISMATCH] 代码实现与 PRD 不一致: {detail}"
+            if snippet:
+                todo_text += f" | 代码片段: {snippet[:200]}"
+        elif status == "unverified":
+            todo_text = f"[TODO-CODE-UNVERIFIED] 未能验证代码实现: {detail}"
+        else:
+            todo_text = f"[TODO-CODE-{status.upper()}] {detail}"
+
+        # 追加到 expected_results
+        if todo_text not in case.expected_results:
+            case.expected_results.append(todo_text)
+            todo_count += 1
+
+        # 同步 code_consistency 到 case
+        if not case.code_consistency:
+            case.code_consistency = consistency
+
+        # 追加 tags
+        tag = f"code-{status}"
+        if hasattr(case, "tags") and tag not in case.tags:
+            case.tags.append(tag)
+
+    if todo_count > 0:
+        logger.info(
+            "Applied %d code consistency TODO annotations to test cases",
+            todo_count,
+        )
+
+    return cases
 
 
 def _enforce_mandatory_constraints(

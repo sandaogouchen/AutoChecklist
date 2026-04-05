@@ -9,6 +9,7 @@
 新增项目级 Checklist 模版文件路径字段。
 新增 template_name 字段，支持按名称加载模版。
 新增 reference_xmind_path 字段，支持 XMind 参考文件路径。
+新增 frontend_mr / backend_mr 字段，支持 MR 代码分析。
 """
 
 from __future__ import annotations
@@ -54,6 +55,18 @@ class IterationSummary(BaseModel):
     retry_reasons: list[str] = Field(default_factory=list)
 
 
+class MRRequestConfig(BaseModel):
+    """MR 请求配置（API 层）。
+
+    用于在 CaseGenerationRequest 中传入前端/后端 MR 信息。
+    """
+
+    mr_url: str = ""
+    git_url: str = ""
+    local_path: str = ""
+    use_coco: bool = False
+
+
 class CaseGenerationRequest(BaseModel):
     """用例生成请求。
 
@@ -63,6 +76,8 @@ class CaseGenerationRequest(BaseModel):
       与 template_file_path 二选一使用，template_name 优先。
     - reference_xmind_path: 可选的参考 XMind checklist 文件路径，
       系统将解析其结构并用于引导 checklist 生成。
+    - frontend_mr: 可选的前端 MR 配置。
+    - backend_mr: 可选的后端 MR 配置。
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -79,6 +94,10 @@ class CaseGenerationRequest(BaseModel):
     template_file_path: str | None = None
     template_name: str | None = None
     reference_xmind_path: str | None = None
+
+    # ---- MR 分析字段 ----
+    frontend_mr: MRRequestConfig | None = None
+    backend_mr: MRRequestConfig | None = None
 
 
 class CaseGenerationRun(BaseModel):
