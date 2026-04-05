@@ -5,6 +5,7 @@
 新增模版相关配置项。
 新增 knowledge_* 系列配置项，支持 GraphRAG 知识检索功能。
 新增 CocoSettings，支持 Coco Agent 代码搜索配置。
+新增 checkpoint_batch_* 配置项，支持 Checkpoint 分批规划。
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
 
     # ---- Checklist 优化配置 ----
     enable_checklist_optimization: bool = True
+
+    # ---- Checkpoint 分批规划配置 ----
+    checkpoint_batch_threshold: int = 20
+    checkpoint_batch_size: int = 20
 
     # ---- 模版配置 ----
     template_dir: str = "templates"

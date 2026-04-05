@@ -18,6 +18,12 @@
 - Stage 1: 覆盖度过滤，确定增量 checkpoint
 - Stage 2: LLM 只对增量 checkpoint 做 Stage A/B
 - Stage 3: 合并 reference_tree + llm_tree
+
+新增分批规划支持（v2）：
+- 当 active_checkpoints 超过 batch_threshold 时自动分批
+- 按 PRD section（source_section）分组，保证同一段落的 checkpoint 一起处理
+- 串行执行各 batch 的 Stage A/B，注入先前 batch 的 outline 摘要保证命名一致
+- 确定性跨 batch 去重合并，无额外 LLM 调用
 """
 
 from __future__ import annotations
@@ -25,11 +31,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 from app.clients.llm import LLMClient
+from app.config.settings import get_settings
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import (
     CanonicalOutlineNode,
@@ -39,7 +47,7 @@ from app.domain.checklist_models import (
     CheckpointPathMapping,
 )
 from app.domain.checkpoint_models import Checkpoint
-from app.domain.research_models import ResearchOutput
+from app.domain.research_models import ResearchFact, ResearchOutput
 from app.domain.state import CaseGenState
 from app.domain.template_models import MandatorySkeletonNode
 from app.domain.xmind_reference_models import XMindReferenceSummary
@@ -223,11 +231,310 @@ class _OutlineTrieNode:
     children: dict[str, _OutlineTrieNode] = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# 分批规划辅助数据结构
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _BatchGroup:
+    """一个分批组，包含同一 PRD section 的 checkpoint。"""
+    section_name: str
+    checkpoints: list[Checkpoint]
+
+
 class CheckpointOutlinePlanner:
     """将 checkpoint 规划为稳定的共享大纲树。"""
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        batch_threshold: int | None = None,
+        batch_size: int | None = None,
+    ) -> None:
         self.llm_client = llm_client
+        settings = get_settings()
+        self.batch_threshold = (
+            batch_threshold
+            if batch_threshold is not None
+            else settings.checkpoint_batch_threshold
+        )
+        self.batch_size = (
+            batch_size
+            if batch_size is not None
+            else settings.checkpoint_batch_size
+        )
+
+    # ------------------------------------------------------------------
+    # 分批规划：分组
+    # ------------------------------------------------------------------
+
+    def _group_checkpoints_by_section(
+        self,
+        checkpoints: list[Checkpoint],
+        research_output: ResearchOutput,
+    ) -> list[_BatchGroup]:
+        """按 PRD source_section 将 checkpoint 分组。
+
+        分组策略：
+        1. 建立 fact_id → source_section 索引
+        2. 每个 checkpoint 取其 fact_ids 对应的 source_section 的多数票
+        3. 同一 section 的 checkpoint 归入一组
+        4. 如果某组超过 batch_size，拆分为多个子组
+        5. 如果 section 信息缺失，使用等分 fallback
+        """
+        # 建立 fact_id → source_section 索引
+        fact_section_map: dict[str, str] = {}
+        for fact in research_output.facts:
+            section = getattr(fact, "source_section", "") or ""
+            if section:
+                fact_section_map[fact.fact_id] = section
+
+        # 如果没有任何 section 信息，直接使用等分 fallback
+        if not fact_section_map:
+            logger.info("无 source_section 信息，使用等分 fallback 分组")
+            return self._equal_split_groups(checkpoints)
+
+        # 按 section 分组
+        section_groups: dict[str, list[Checkpoint]] = defaultdict(list)
+        unassigned: list[Checkpoint] = []
+
+        for cp in checkpoints:
+            # 取该 checkpoint 所有 fact 的 section，多数票决定归属
+            section_votes: dict[str, int] = defaultdict(int)
+            for fid in cp.fact_ids:
+                sec = fact_section_map.get(fid, "")
+                if sec:
+                    section_votes[sec] += 1
+
+            if section_votes:
+                winning_section = max(section_votes, key=section_votes.get)
+                section_groups[winning_section].append(cp)
+            else:
+                unassigned.append(cp)
+
+        # 将未分配的 checkpoint 放入最后一个组或单独成组
+        if unassigned:
+            section_groups["__unassigned__"] = unassigned
+
+        # 构建 BatchGroup 列表，超过 batch_size 的组拆分
+        groups: list[_BatchGroup] = []
+        for section_name, cps in section_groups.items():
+            if len(cps) <= self.batch_size:
+                groups.append(_BatchGroup(section_name=section_name, checkpoints=cps))
+            else:
+                # 拆分为多个子组
+                for i in range(0, len(cps), self.batch_size):
+                    chunk = cps[i : i + self.batch_size]
+                    suffix = f" (part {i // self.batch_size + 1})"
+                    groups.append(
+                        _BatchGroup(
+                            section_name=section_name + suffix,
+                            checkpoints=chunk,
+                        )
+                    )
+
+        logger.info(
+            "Checkpoint 分组完成: %d 个 checkpoint → %d 个 batch (sections: %s)",
+            len(checkpoints),
+            len(groups),
+            ", ".join(g.section_name for g in groups),
+        )
+        return groups
+
+    def _equal_split_groups(
+        self,
+        checkpoints: list[Checkpoint],
+    ) -> list[_BatchGroup]:
+        """等分 fallback：当 source_section 缺失时按 batch_size 等分。"""
+        groups: list[_BatchGroup] = []
+        num_batches = math.ceil(len(checkpoints) / self.batch_size)
+        for i in range(num_batches):
+            chunk = checkpoints[i * self.batch_size : (i + 1) * self.batch_size]
+            groups.append(
+                _BatchGroup(
+                    section_name=f"batch_{i + 1}",
+                    checkpoints=chunk,
+                )
+            )
+        return groups
+
+    # ------------------------------------------------------------------
+    # 分批规划：串行执行 Stage A/B
+    # ------------------------------------------------------------------
+
+    def _execute_batched_stage2(
+        self,
+        groups: list[_BatchGroup],
+        facts_payload: list[dict],
+        outline_system: str,
+        path_system: str,
+        xmind_section: str,
+        mandatory_skeleton: MandatorySkeletonNode | None,
+    ) -> tuple[list[CanonicalOutlineNode], list[CheckpointPathMapping]]:
+        """串行执行各 batch 的 Stage A + Stage B。
+
+        每个 batch 的 Stage A prompt 注入先前所有 batch 产出的
+        outline 节点摘要，确保跨 batch 命名一致。
+        执行完成后进行跨 batch 去重合并。
+        """
+        all_raw_nodes: list[CanonicalOutlineNode] = []
+        all_raw_paths: list[CheckpointPathMapping] = []
+        prior_node_summaries: list[str] = []
+
+        for batch_idx, group in enumerate(groups):
+            logger.info(
+                "执行 batch %d/%d [%s]: %d checkpoints",
+                batch_idx + 1,
+                len(groups),
+                group.section_name,
+                len(group.checkpoints),
+            )
+
+            # 构建本 batch 的 checkpoint payload
+            batch_checkpoint_payload = [
+                {
+                    "checkpoint_id": cp.checkpoint_id,
+                    "title": cp.title,
+                    "objective": cp.objective,
+                    "category": cp.category,
+                    "risk": cp.risk,
+                    "preconditions": cp.preconditions,
+                    "fact_ids": cp.fact_ids,
+                }
+                for cp in group.checkpoints
+            ]
+
+            # 构建 user prompt，注入先前 batch 摘要
+            batch_user_prompt = (
+                "[Facts]\n"
+                f"{json.dumps(facts_payload, ensure_ascii=False, indent=2)}\n\n"
+                "[Checkpoints]\n"
+                f"{json.dumps(batch_checkpoint_payload, ensure_ascii=False, indent=2)}"
+            )
+
+            if prior_node_summaries:
+                prior_context = "\n".join(prior_node_summaries)
+                batch_user_prompt += (
+                    "\n\n## Prior Batch Outline Nodes (for naming consistency)\n"
+                    "The following outline nodes were produced by earlier batches. "
+                    "Reuse the same node IDs and display_text when the semantic "
+                    "meaning overlaps. Do NOT duplicate them \u2014 only reference them "
+                    "in your path mappings if applicable.\n\n"
+                    f"{prior_context}"
+                )
+
+            if xmind_section:
+                batch_user_prompt += xmind_section
+
+            # Stage A: 生成 outline 节点
+            canonical_response = self.llm_client.generate_structured(
+                system_prompt=outline_system,
+                user_prompt=batch_user_prompt,
+                response_model=CanonicalOutlineNodeCollection,
+            )
+
+            # Stage B: 映射路径
+            path_response = self.llm_client.generate_structured(
+                system_prompt=path_system,
+                user_prompt=self._build_path_prompt(
+                    group.checkpoints,
+                    canonical_response.canonical_nodes,
+                ),
+                response_model=CheckpointPathCollection,
+            )
+
+            all_raw_nodes.extend(canonical_response.canonical_nodes)
+            all_raw_paths.extend(path_response.checkpoint_paths)
+
+            # 构建先前节点摘要供下一个 batch 参考
+            summary_lines = []
+            for node in canonical_response.canonical_nodes:
+                summary_lines.append(
+                    f"- {node.node_id}: {node.display_text} "
+                    f"(kind={node.kind}, visibility={node.visibility})"
+                )
+            if summary_lines:
+                prior_node_summaries.append(
+                    f"### Batch {batch_idx + 1} \u2014 {group.section_name}\n"
+                    + "\n".join(summary_lines)
+                )
+
+        # 跨 batch 去重合并
+        deduped_nodes, id_remap = self._deduplicate_outline_nodes(all_raw_nodes)
+        remapped_paths = self._remap_paths(all_raw_paths, id_remap)
+
+        logger.info(
+            "跨 batch 去重完成: %d raw nodes → %d deduped nodes, %d remaps",
+            len(all_raw_nodes),
+            len(deduped_nodes),
+            len(id_remap),
+        )
+
+        return deduped_nodes, remapped_paths
+
+    # ------------------------------------------------------------------
+    # 跨 batch 去重
+    # ------------------------------------------------------------------
+
+    def _deduplicate_outline_nodes(
+        self,
+        nodes: list[CanonicalOutlineNode],
+    ) -> tuple[list[CanonicalOutlineNode], dict[str, str]]:
+        """基于 normalized_label 去重 outline 节点。
+
+        返回 (去重后的节点列表, old_id → canonical_id 的重映射字典)。
+        重映射字典只包含被替换掉的节点映射，保留节点不在其中。
+        """
+        id_remap: dict[str, str] = {}  # old_id → canonical_id
+        seen: dict[str, CanonicalOutlineNode] = {}  # normalized_label → first node
+
+        for node in nodes:
+            label = _normalize_text(node.display_text)
+            if not label:
+                # 空标签直接保留
+                seen[node.node_id] = node
+                continue
+
+            if label in seen:
+                # 重复节点：映射到先前的 canonical
+                canonical = seen[label]
+                if node.node_id != canonical.node_id:
+                    id_remap[node.node_id] = canonical.node_id
+                    # 合并 aliases
+                    existing_aliases = set(canonical.aliases or [])
+                    new_aliases = set(node.aliases or [])
+                    merged = existing_aliases | new_aliases | {node.display_text}
+                    canonical.aliases = sorted(merged - {canonical.display_text})
+            else:
+                seen[label] = node
+
+        deduped = list(seen.values())
+        return deduped, id_remap
+
+    def _remap_paths(
+        self,
+        paths: list[CheckpointPathMapping],
+        id_remap: dict[str, str],
+    ) -> list[CheckpointPathMapping]:
+        """应用 id_remap 将路径中的旧 node_id 替换为 canonical node_id。"""
+        if not id_remap:
+            return paths
+
+        remapped: list[CheckpointPathMapping] = []
+        for path in paths:
+            new_ids = [id_remap.get(nid, nid) for nid in path.path_node_ids]
+            remapped.append(
+                CheckpointPathMapping(
+                    checkpoint_id=path.checkpoint_id,
+                    path_node_ids=new_ids,
+                )
+            )
+        return remapped
+
+    # ------------------------------------------------------------------
+    # plan() 主入口
+    # ------------------------------------------------------------------
 
     def plan(
         self,
@@ -314,39 +621,80 @@ class CheckpointOutlinePlanner:
                 len(active_checkpoints), len(checkpoints),
             )
 
-        # ---- Stage 2: LLM 只对增量 checkpoint 做 Stage A/B ----
+        # ---- Stage 2: LLM Stage A/B（支持分批） ----
         if active_checkpoints:
-            canonical_response = self.llm_client.generate_structured(
-                system_prompt=outline_system,
-                user_prompt=outline_user_prompt,
-                response_model=CanonicalOutlineNodeCollection,
-            )
+            use_batch = len(active_checkpoints) > self.batch_threshold
 
-            path_system = _PATH_SYSTEM_PROMPT
-            if mandatory_skeleton:
-                constraint = self._build_mandatory_constraint_prompt(mandatory_skeleton)
-                path_system = path_system + "\n\n" + constraint
+            if use_batch:
+                # ---- 分批路径 ----
+                logger.info(
+                    "启用分批规划: %d checkpoints > threshold %d",
+                    len(active_checkpoints),
+                    self.batch_threshold,
+                )
+                groups = self._group_checkpoints_by_section(
+                    active_checkpoints, research_output,
+                )
 
-            path_response = self.llm_client.generate_structured(
-                system_prompt=path_system,
-                user_prompt=self._build_path_prompt(
+                path_system = _PATH_SYSTEM_PROMPT
+                if mandatory_skeleton:
+                    constraint = self._build_mandatory_constraint_prompt(
+                        mandatory_skeleton,
+                    )
+                    path_system = path_system + "\n\n" + constraint
+
+                canonical_nodes, checkpoint_paths = self._execute_batched_stage2(
+                    groups=groups,
+                    facts_payload=facts_payload,
+                    outline_system=outline_system,
+                    path_system=path_system,
+                    xmind_section=xmind_section,
+                    mandatory_skeleton=mandatory_skeleton,
+                )
+
+                resolved_paths = self._resolve_checkpoint_paths(
                     active_checkpoints,
-                    canonical_response.canonical_nodes,
-                ),
-                response_model=CheckpointPathCollection,
-            )
+                    checkpoint_paths,
+                    canonical_nodes,
+                )
+            else:
+                # ---- 单批路径（原逻辑不变） ----
+                canonical_response = self.llm_client.generate_structured(
+                    system_prompt=outline_system,
+                    user_prompt=outline_user_prompt,
+                    response_model=CanonicalOutlineNodeCollection,
+                )
 
-            resolved_paths = self._resolve_checkpoint_paths(
-                active_checkpoints,
-                path_response.checkpoint_paths,
-                canonical_response.canonical_nodes,
-            )
+                path_system = _PATH_SYSTEM_PROMPT
+                if mandatory_skeleton:
+                    constraint = self._build_mandatory_constraint_prompt(
+                        mandatory_skeleton,
+                    )
+                    path_system = path_system + "\n\n" + constraint
+
+                path_response = self.llm_client.generate_structured(
+                    system_prompt=path_system,
+                    user_prompt=self._build_path_prompt(
+                        active_checkpoints,
+                        canonical_response.canonical_nodes,
+                    ),
+                    response_model=CheckpointPathCollection,
+                )
+
+                canonical_nodes = canonical_response.canonical_nodes
+                checkpoint_paths = path_response.checkpoint_paths
+
+                resolved_paths = self._resolve_checkpoint_paths(
+                    active_checkpoints,
+                    checkpoint_paths,
+                    canonical_nodes,
+                )
 
             llm_tree = self._build_outline_tree(resolved_paths)
         else:
             llm_tree = []
-            canonical_response = CanonicalOutlineNodeCollection(canonical_nodes=[])
-            path_response = CheckpointPathCollection(checkpoint_paths=[])
+            canonical_nodes = []
+            checkpoint_paths = []
 
         # ---- Stage 3: 合并 reference_tree + llm_tree ----
         optimized_tree = self._merge_reference_and_llm_trees(
@@ -361,8 +709,8 @@ class CheckpointOutlinePlanner:
             )
 
         return CheckpointOutlinePlan(
-            canonical_outline_nodes=canonical_response.canonical_nodes,
-            checkpoint_paths=path_response.checkpoint_paths,
+            canonical_outline_nodes=canonical_nodes,
+            checkpoint_paths=checkpoint_paths,
             optimized_tree=optimized_tree,
         )
 
