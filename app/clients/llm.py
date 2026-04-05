@@ -4,20 +4,49 @@
 - ``LLMClientConfig``：客户端配置数据类
 - ``LLMClient``：基础 LLM 客户端，支持 chat / JSON 解析 / 结构化生成
 - ``OpenAICompatibleLLMClient``：从配置对象构造的便捷子类
+
+变更：
+- 新增重试与指数退避机制（可配置 max_retries / base_delay / max_delay）
+- 新增模型降级支持（可配置 fallback_model / fallback_base_url / fallback_api_key）
+- 新增结构化重试/降级日志
 """
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Type, TypeVar, get_origin
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# 可重试的 HTTP 状态码集合
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503})
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """判断异常是否属于可重试的瞬时故障。
+
+    可重试条件：
+    - ``APIConnectionError``：网络连接故障
+    - ``APITimeoutError``：请求超时
+    - ``APIStatusError`` 且 HTTP 状态码为 429 / 500 / 502 / 503
+
+    不可重试条件：
+    - 400（请求格式错误）、401（认证失败）、403（权限不足）等
+    - ``ValidationError``（Pydantic 校验失败）等非 API 层异常
+    """
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError) and exc.status_code in _RETRYABLE_STATUS_CODES:
+        return True
+    return False
 
 
 def _build_schema_hint(response_model: Type[BaseModel]) -> str:
@@ -61,12 +90,26 @@ class LLMClientConfig:
     timeout_seconds: float = 120.0
     extra_params: dict[str, Any] = field(default_factory=dict)
 
+    # ---- 重试配置 ----
+    max_retries: int = 3
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 60.0
+
+    # ---- 降级配置 ----
+    fallback_model: str = ""
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
+
 
 class LLMClient:
     """OpenAI 兼容 API 的轻量封装。
 
     提供 ``chat()``、``parse_json_response()`` 和
     ``generate_structured()`` 三个核心方法。
+
+    内置重试与降级机制：
+    - 可重试错误（429/5xx/连接/超时）自动指数退避重试
+    - 主模型重试耗尽后可自动降级到 fallback 模型
     """
 
     def __init__(
@@ -77,16 +120,153 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 4096,
         timeout_seconds: float = 120.0,
+        *,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 60.0,
+        fallback_model: str = "",
+        fallback_base_url: str = "",
+        fallback_api_key: str = "",
     ) -> None:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
 
+        # 重试参数
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay
+        self._retry_max_delay = retry_max_delay
+
+        # 主客户端（禁用 SDK 内置重试，由本层控制）
         self._client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout_seconds,
+            max_retries=0,
         )
+
+        # ---- 降级客户端（按需延迟构造）----
+        self._fallback_model = fallback_model
+        self._fallback_client: Optional[OpenAI] = None
+        if fallback_model:
+            fb_base_url = fallback_base_url or base_url
+            fb_api_key = fallback_api_key or api_key
+            self._fallback_client = OpenAI(
+                api_key=fb_api_key,
+                base_url=fb_base_url,
+                timeout=timeout_seconds,
+                max_retries=0,
+            )
+
+    # ------------------------------------------------------------------
+    # 内部重试方法
+    # ------------------------------------------------------------------
+
+    def _call_chat_api(
+        self,
+        client: OpenAI,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """执行单次 chat completion API 调用。
+
+        Args:
+            client: OpenAI 客户端实例。
+            model: 模型名称。
+            messages: 消息列表。
+            temperature: 采样温度。
+            max_tokens: 最大 token 数。
+
+        Returns:
+            助手回复的文本内容。
+        """
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        return response.choices[0].message.content or ""
+
+    def _chat_with_retry(
+        self,
+        client: OpenAI,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+    ) -> Optional[str]:
+        """带重试的 chat 调用。
+
+        使用指数退避 + full jitter 策略重试可恢复错误。
+        重试耗尽时返回 ``None``，并将最后一次异常存储到 ``self._last_error``。
+
+        Args:
+            client: OpenAI 客户端实例。
+            model: 模型名称。
+            messages: 消息列表。
+            temperature: 采样温度。
+            max_tokens: 最大 token 数。
+
+        Returns:
+            成功时返回助手回复文本；重试耗尽时返回 ``None``。
+        """
+        last_exc: Optional[Exception] = None
+        total_attempts = 1 + self._max_retries
+        start_time = time.monotonic()
+
+        for attempt in range(total_attempts):
+            try:
+                content = self._call_chat_api(
+                    client, model, messages, temperature, max_tokens,
+                )
+                elapsed = time.monotonic() - start_time
+                if attempt == 0:
+                    logger.debug(
+                        "LLM 调用成功: model=%s, 耗时=%.2fs",
+                        model, elapsed,
+                    )
+                else:
+                    logger.info(
+                        "LLM 重试成功: model=%s, attempt=%d/%d, 总耗时=%.2fs",
+                        model, attempt + 1, total_attempts, elapsed,
+                    )
+                return content
+            except Exception as exc:
+                last_exc = exc
+
+                # 不可重试的错误立即终止
+                if not _is_retryable(exc):
+                    logger.error(
+                        "LLM 不可重试错误: model=%s, type=%s, message=%s",
+                        model, type(exc).__name__, str(exc),
+                    )
+                    raise
+
+                # 最后一次尝试也失败，不再 sleep
+                if attempt >= self._max_retries:
+                    break
+
+                # 计算指数退避 + full jitter
+                delay = min(
+                    self._retry_base_delay * (2 ** attempt),
+                    self._retry_max_delay,
+                )
+                jittered_delay = random.uniform(0, delay)
+                logger.warning(
+                    "LLM 可重试错误: model=%s, attempt=%d/%d, "
+                    "type=%s, message=%s, 将在 %.1fs 后重试",
+                    model, attempt + 1, total_attempts,
+                    type(exc).__name__, str(exc), jittered_delay,
+                )
+                time.sleep(jittered_delay)
+
+        # 重试耗尽
+        self._last_error = last_exc
+        return None
 
     # ------------------------------------------------------------------
     # 核心聊天方法
@@ -102,6 +282,12 @@ class LLMClient:
     ) -> str:
         """发送聊天补全请求，返回助手消息文本。
 
+        内置重试与降级机制：
+        1. 使用主模型发起调用，可重试错误自动指数退避重试
+        2. 主模型重试耗尽且配置了 fallback 模型时，自动降级到 fallback
+        3. fallback 同样享受重试策略保护
+        4. 所有重试/降级事件均有结构化日志
+
         Args:
             system_prompt: 系统指令。
             user_prompt: 用户消息。
@@ -110,27 +296,68 @@ class LLMClient:
 
         Returns:
             助手回复的文本内容。
+
+        Raises:
+            APIStatusError: 不可重试的 API 错误。
+            APIConnectionError: 重试耗尽后的连接错误。
+            APITimeoutError: 重试耗尽后的超时错误。
         """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+        effective_temperature = temperature if temperature is not None else self.temperature
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature if temperature is not None else self.temperature,
-                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-                response_format={"type": "json_object"},
+        # ---- 主模型调用（带重试）----
+        result = self._chat_with_retry(
+            self._client,
+            self.model,
+            messages,
+            effective_temperature,
+            effective_max_tokens,
+        )
+        if result is not None:
+            return result
+
+        # ---- 降级到 fallback 模型 ----
+        if self._fallback_client is not None and self._fallback_model:
+            primary_error = self._last_error
+            logger.warning(
+                "主模型重试耗尽，触发降级: primary_model=%s, "
+                "fallback_model=%s, primary_error=%s: %s",
+                self.model, self._fallback_model,
+                type(primary_error).__name__, str(primary_error),
             )
-        except Exception:
-            logger.exception("LLM 调用失败")
-            raise
+            result = self._chat_with_retry(
+                self._fallback_client,
+                self._fallback_model,
+                messages,
+                effective_temperature,
+                effective_max_tokens,
+            )
+            if result is not None:
+                logger.info(
+                    "降级成功: fallback_model=%s", self._fallback_model,
+                )
+                return result
 
-        content: str = response.choices[0].message.content or ""
-        logger.debug("LLM 响应长度: %d 字符", len(content))
-        return content
+            # fallback 也失败
+            fallback_error = self._last_error
+            logger.error(
+                "降级也失败: primary_model=%s, fallback_model=%s, "
+                "primary_error=%s, fallback_error=%s",
+                self.model, self._fallback_model,
+                str(primary_error), str(fallback_error),
+            )
+            raise fallback_error  # type: ignore[misc]
+
+        # 无 fallback 配置，抛出主模型最后的错误
+        logger.error(
+            "LLM 重试耗尽且无 fallback 配置: model=%s, error=%s",
+            self.model, str(self._last_error),
+        )
+        raise self._last_error  # type: ignore[misc]
 
     # ------------------------------------------------------------------
     # JSON 解析辅助
@@ -321,5 +548,11 @@ class OpenAICompatibleLLMClient(LLMClient):
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             timeout_seconds=config.timeout_seconds,
+            max_retries=config.max_retries,
+            retry_base_delay=config.retry_base_delay,
+            retry_max_delay=config.retry_max_delay,
+            fallback_model=config.fallback_model,
+            fallback_base_url=config.fallback_base_url,
+            fallback_api_key=config.fallback_api_key,
         )
         self.config = config
