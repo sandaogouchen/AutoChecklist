@@ -1,25 +1,20 @@
-[project]
-name = "auto-checklist"
+[tool.poetry]
+name = "autochecklist"
 version = "0.1.0"
-description = "Automated test checklist generation from PRD documents"
+description = ""
+authors = ["sandaogouchen <sandaogouchen@example.com>"]
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "fastapi>=0.115.12",
-    "httpx>=0.28.1",
-    "langgraph>=0.3.34",
-    "lightrag-hku>=1.1.0",
-    "openai>=1.68.2",
-    "pydantic>=2.11.1",
-    "pydantic-settings>=2.11.0",
-    "python-dotenv>=1.1.0",
-    "python-multipart>=0.0.20",
-    "pyyaml>=6.0.1",
-    "uvicorn>=0.34.2",
-]
+packages = [{include = "app"}]
 
-[dependency-groups]
-dev = [
-    "pytest>=8.3.5",
-    "pytest-asyncio>=0.26.0",
-]
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.10.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+ruff = "^0.13.1"
+mypy = "^1.18.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
