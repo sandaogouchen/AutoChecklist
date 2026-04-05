@@ -17,6 +17,7 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
 - 新增可选 timer / iteration_index 参数，支持节点级耗时计量
 - 使用 state_bridge.build_bridge 替代手动桥接函数，实现自动字段转发
+- 出向回传采用显式 allowlist，避免子图内部中间态默认泄漏回主图
 """
 from __future__ import annotations
 
@@ -73,7 +74,15 @@ def build_workflow(
         llm_client, timer=timer, iteration_index=iteration_index,
     )
 
-    # 使用自动状态桥接替代手动字段映射
+    # 使用自动状态桥接替代手动字段映射。
+    #
+    # 设计说明：
+    # 1. 入向（主图 -> 子图）默认使用 shared keys 自动转发，降低新增字段时遗漏接线的概率。
+    # 2. 出向（子图 -> 主图）必须显式 include_out allowlist，避免子图内部中间态字段
+    #    因为“恰好同名”被自动暴露到主图，放宽工作流状态边界。
+    # 3. 后续若业务上需要新增某个主图可见输出字段，必须：
+    #    - 在 include_out 中显式登记
+    #    - 同步补充对应测试，说明该字段成为主图契约的一部分是有意设计。
     case_gen_bridge = build_bridge(
         subgraph=case_generation_subgraph,
         parent_type=GlobalState,
@@ -83,8 +92,14 @@ def build_workflow(
             "project_context_summary": "",
             "template_leaf_targets": [],
         },
-        exclude_out={
-            "uncovered_checkpoints",  # 子图内部使用，不回传主图
+        include_out={
+            "planned_scenarios",
+            "checkpoints",
+            "checkpoint_coverage",
+            "draft_cases",
+            "test_cases",
+            "optimized_tree",
+            "coverage_result",
         },
     )
 
@@ -163,9 +178,6 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "checkpoints": subgraph_result.get("checkpoints", []),
             "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),
-            "checkpoint_paths": subgraph_result.get("checkpoint_paths", []),
-            "canonical_outline_nodes": subgraph_result.get("canonical_outline_nodes", []),
-            "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),
             "optimized_tree": subgraph_result.get("optimized_tree", []),
