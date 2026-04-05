@@ -169,6 +169,8 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        *,
+        response_format: Optional[dict[str, str]] = None,
     ) -> str:
         """执行单次 chat completion API 调用。
 
@@ -178,17 +180,21 @@ class LLMClient:
             messages: 消息列表。
             temperature: 采样温度。
             max_tokens: 最大 token 数。
+            response_format: 可选响应格式约束；未提供时保持通用文本 chat。
 
         Returns:
             助手回复的文本内容。
         """
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        request_kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format is not None:
+            request_kwargs["response_format"] = response_format
+
+        response = client.chat.completions.create(**request_kwargs)
         return response.choices[0].message.content or ""
 
     def _chat_with_retry(
@@ -198,6 +204,8 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        *,
+        response_format: Optional[dict[str, str]] = None,
     ) -> Optional[str]:
         """带重试的 chat 调用。
 
@@ -221,7 +229,12 @@ class LLMClient:
         for attempt in range(total_attempts):
             try:
                 content = self._call_chat_api(
-                    client, model, messages, temperature, max_tokens,
+                    client,
+                    model,
+                    messages,
+                    temperature,
+                    max_tokens,
+                    response_format=response_format,
                 )
                 elapsed = time.monotonic() - start_time
                 if attempt == 0:
@@ -364,58 +377,87 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def parse_json_response(text: str) -> dict[str, Any] | list:
-        """从 LLM 响应文本中解析 JSON 对象或数组。
+    def parse_json_response(text: str) -> dict[str, Any] | list[Any]:
+        """从文本中提取并解析首个 JSON 对象/数组。
 
-        兼容 LLM 常见的输出格式：纯 JSON、Markdown 代码围栏包裹的 JSON、
-        以及带有额外文本的 JSON。同时接受顶层为 dict 或 list 的 JSON。
+        该方法容忍 LLM 在 JSON 前后输出额外说明文字，以及使用
+        Markdown fenced code block（如 ```json ... ```）包裹 JSON。
 
         Args:
-            text: LLM 返回的原始文本。
+            text: LLM 原始输出文本。
 
         Returns:
-            解析后的 dict 或 list。
+            解析后的 Python dict 或 list。
 
         Raises:
-            ValueError: 无法从文本中提取有效 JSON。
+            ValueError: 未找到合法 JSON，或 JSON 解析失败。
         """
-        cleaned = text.strip()
+        stripped = text.strip()
 
-        # 去除 Markdown 代码围栏
-        fence_pattern = re.compile(
-            r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL
-        )
-        match = fence_pattern.search(cleaned)
-        if match:
-            cleaned = match.group(1).strip()
-
+        # 1) 如果整体就是合法 JSON，则直接解析
         try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            # 兜底：尝试提取第一个 { ... } 块
-            brace_match = re.search(r"\{.*}", cleaned, re.DOTALL)
-            if brace_match:
-                try:
-                    parsed = json.loads(brace_match.group(0))
-                except json.JSONDecodeError:
-                    raise ValueError(
-                        f"无法从 LLM 响应中解析 JSON: {exc}"
-                    ) from exc
-            else:
-                raise ValueError(
-                    f"无法从 LLM 响应中解析 JSON: {exc}"
-                ) from exc
+            parsed = json.loads(stripped)
+            if isinstance(parsed, (dict, list)):
+                return parsed
+        except json.JSONDecodeError:
+            pass
 
-        # 仅允许 dict 或 list，其余类型（int / str / None 等）视为非法
-        if not isinstance(parsed, (dict, list)):
-            raise ValueError(
-                f"期望 JSON 对象 (dict) 或数组 (list)，"
-                f"实际为 {type(parsed).__name__}"
-            )
-        return parsed
+        # 2) 提取 fenced code block 中的 JSON
+        fenced_match = re.search(
+            r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```",
+            stripped,
+            re.DOTALL,
+        )
+        if fenced_match:
+            candidate = fenced_match.group(1)
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, (dict, list)):
+                    return parsed
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"代码块中的 JSON 解析失败: {exc}") from exc
+
+        # 3) 从文本中定位首个完整的 JSON 对象/数组（简单栈扫描）
+        starts = [
+            i for i, ch in enumerate(stripped)
+            if ch in "[{"
+        ]
+        for start in starts:
+            opening = stripped[start]
+            closing = "]" if opening == "[" else "}"
+            depth = 0
+            in_string = False
+            escape = False
+            for idx in range(start, len(stripped)):
+                ch = stripped[idx]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == opening:
+                        depth += 1
+                    elif ch == closing:
+                        depth -= 1
+                        if depth == 0:
+                            candidate = stripped[start:idx + 1]
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, (dict, list)):
+                                    return parsed
+                            except json.JSONDecodeError:
+                                break
+
+        raise ValueError("未在模型输出中找到合法 JSON")
 
     # ------------------------------------------------------------------
-    # 结构化生成
+    # 结构化输出
     # ------------------------------------------------------------------
 
     def generate_structured(
@@ -455,12 +497,58 @@ class LLMClient:
         schema_hint = _build_schema_hint(response_model)
         enriched_system_prompt = system_prompt + schema_hint
 
-        raw_text = self.chat(
-            enriched_system_prompt,
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        messages = [
+            {"role": "system", "content": enriched_system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        effective_temperature = temperature if temperature is not None else self.temperature
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
+        raw_text = self._chat_with_retry(
+            self._client,
+            self.model,
+            messages,
+            effective_temperature,
+            effective_max_tokens,
+            response_format={"type": "json_object"},
         )
+        if raw_text is None:
+            if self._fallback_client is not None and self._fallback_model:
+                primary_error = self._last_error
+                logger.warning(
+                    "主模型重试耗尽，触发降级: primary_model=%s, fallback_model=%s, primary_error=%s: %s",
+                    self.model,
+                    self._fallback_model,
+                    type(primary_error).__name__,
+                    str(primary_error),
+                )
+                raw_text = self._chat_with_retry(
+                    self._fallback_client,
+                    self._fallback_model,
+                    messages,
+                    effective_temperature,
+                    effective_max_tokens,
+                    response_format={"type": "json_object"},
+                )
+                if raw_text is not None:
+                    logger.info("降级成功: fallback_model=%s", self._fallback_model)
+                else:
+                    fallback_error = self._last_error
+                    logger.error(
+                        "降级也失败: primary_model=%s, fallback_model=%s, primary_error=%s, fallback_error=%s",
+                        self.model,
+                        self._fallback_model,
+                        str(primary_error),
+                        str(fallback_error),
+                    )
+                    raise fallback_error  # type: ignore[misc]
+            else:
+                logger.error(
+                    "LLM 重试耗尽且无 fallback 配置: model=%s, error=%s",
+                    self.model,
+                    str(self._last_error),
+                )
+                raise self._last_error  # type: ignore[misc]
         logger.debug("generate_structured: 原始响应: %.500s", raw_text)
 
         try:
