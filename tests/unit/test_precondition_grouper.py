@@ -1,5 +1,3 @@
-"""Unit tests for PreconditionGrouper."""
-
 from __future__ import annotations
 
 import time
@@ -15,246 +13,193 @@ from app.domain.precondition_models import (
 )
 from app.services.precondition_grouper import (
     PreconditionGrouper,
-    _longest_common_prefix,
-    _normalize_precondition,
-    _normalize_precondition_list,
+    _extract_primary_keyword,
+    _normalize_preconditions,
+    _normalize_text,
 )
 
 
-# ---------------------------------------------------------------------------
-# _normalize_precondition
-# ---------------------------------------------------------------------------
-
-class TestNormalizePrecondition:
-    """Tests for the lightweight normalization function."""
-
-    def test_strips_whitespace(self) -> None:
-        assert _normalize_precondition("  用户已登录  ") == "用户已登录"
-
-    def test_nfkc_normalization(self) -> None:
-        # ＡＢＣ (fullwidth)→ ABC
-        assert _normalize_precondition("\uff21\uff22\uff23") == "ABC"
-
-    def test_chinese_punctuation_mapped(self) -> None:
-        assert _normalize_precondition("条件一，条件二") == "条件一,条件二"
-        assert _normalize_precondition("步骤（一）") == "步骤(一)"
-        assert _normalize_precondition("完成。") == "完成."
-
-    def test_case_preserved(self) -> None:
-        # 不做 casefold
-        assert _normalize_precondition("Hello World") == "Hello World"
-
-    def test_empty_string(self) -> None:
-        assert _normalize_precondition("") == ""
-
-
-# ---------------------------------------------------------------------------
-# _normalize_precondition_list
-# ---------------------------------------------------------------------------
-
-class TestNormalizePreconditionList:
-    """Tests for list normalization → sorted tuple."""
-
-    def test_returns_tuple(self) -> None:
-        result = _normalize_precondition_list(["b", "a"])
-        assert isinstance(result, tuple)
-        assert result == ("a", "b")
-
-    def test_empty_list(self) -> None:
-        assert _normalize_precondition_list([]) == ()
-
-
-# ---------------------------------------------------------------------------
-# _longest_common_prefix
-# ---------------------------------------------------------------------------
-
-class TestLongestCommonPrefix:
-    """Tests for LCP helper."""
-
-    def test_full_match(self) -> None:
-        assert _longest_common_prefix(["abc", "abc"]) == "abc"
-
-    def test_partial_match(self) -> None:
-        assert _longest_common_prefix(["abcde", "abcfg"]) == "abc"
-
-    def test_no_match(self) -> None:
-        assert _longest_common_prefix(["abc", "xyz"]) == ""
-
-    def test_empty_list(self) -> None:
-        assert _longest_common_prefix([]) == ""
-
-    def test_single_string(self) -> None:
-        assert _longest_common_prefix(["hello"]) == "hello"
-
-
-# ---------------------------------------------------------------------------
-# PreconditionGrouper
-# ---------------------------------------------------------------------------
-
 def _tc(
-    tc_id: str,
-    title: str = "test",
+    case_id: str,
+    title: str | None = None,
     preconditions: list[str] | None = None,
-    steps: list[str] | None = None,
-    expected_results: list[str] | None = None,
 ) -> TestCase:
-    """Helper to build a minimal TestCase."""
     return TestCase(
-        id=tc_id,
-        title=title,
+        id=case_id,
+        title=title or case_id,
+        objective="obj",
         preconditions=preconditions or [],
-        steps=steps or ["step1"],
-        expected_results=expected_results or ["expected1"],
+        steps=["step 1"],
+        expected_results=["ok"],
     )
 
 
-class TestPreconditionGrouper:
-    """Tests for the grouping engine."""
+class TestNormalizeHelpers:
+    def test_normalize_text_nfkc_and_whitespace(self) -> None:
+        raw = "  A\u3000B   C  "
+        assert _normalize_text(raw) == "A B C"
 
-    def test_empty_input(self) -> None:
+    def test_normalize_preconditions_filters_empty(self) -> None:
+        values = ["  foo  ", "", "   ", "bar"]
+        assert _normalize_preconditions(values) == ("foo", "bar")
+
+
+class TestExtractPrimaryKeyword:
+    def test_extract_from_backticks(self) -> None:
+        text = "用户可见 `optimize goal` 字段"
+        assert _extract_primary_keyword(text) == "optimize goal"
+
+    def test_extract_longest_ascii_phrase(self) -> None:
+        text = "在 Ad Group creation 页面点击 Save Draft"
+        assert _extract_primary_keyword(text) == "Group creation"
+
+    def test_extract_chinese_primary_keyword(self) -> None:
+        text = "已创建广告计划且预算充足"
+        assert _extract_primary_keyword(text) == "广告计划"
+
+    def test_extract_none_when_only_noise(self) -> None:
+        text = "用户可以成功查看页面信息"
+        assert _extract_primary_keyword(text) is None
+
+
+class TestGroupingBehavior:
+    def test_group_empty_input(self) -> None:
         grouper = PreconditionGrouper()
         assert grouper.group([]) == []
 
-    def test_single_case_no_group(self) -> None:
-        """Single case should NOT create a group (below _MIN_GROUP_SIZE)."""
-        cases = [_tc("TC-001", preconditions=["用户已登录"])]
-        result = PreconditionGrouper().group(cases)
-        assert len(result) == 1
-        assert result[0].node_type == "case"
-
-    def test_shared_preconditions_create_group(self) -> None:
-        """Two cases with identical preconditions → one group."""
+    def test_group_duplicate_preconditions_same_bucket(self) -> None:
         cases = [
-            _tc("TC-001", preconditions=["用户已登录", "网络正常"]),
-            _tc("TC-002", preconditions=["用户已登录", "网络正常"]),
+            _tc("TC-001", preconditions=["用户可见 `optimize goal` 字段"]),
+            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段"]),
         ]
-        result = PreconditionGrouper().group(cases)
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
         assert len(result) == 1
         group = result[0]
         assert group.node_type == "precondition_group"
-        assert len(group.children) == 2
-
-    def test_no_preconditions_no_group(self) -> None:
-        """Cases without keywords should fall back to an '其他' bucket."""
-        cases = [_tc("TC-001"), _tc("TC-002")]
-        result = PreconditionGrouper().group(cases)
-        assert len(result) == 1
-        assert result[0].node_type == "precondition_group"
-        assert result[0].title == "其他"
-
-    def test_mixed_grouped_and_ungrouped(self) -> None:
-        """Shared keyword cases group; unmatched cases go to '其他'."""
-        cases = [
-            _tc("TC-001", preconditions=["用户已进入 `Create Ad Group` 页面", "用户已定位到 `optimize goal` 区域"]),
-            _tc("TC-002", preconditions=["系统已展示 `optimize goal` 字段", "用户可编辑 `optimize goal`"]),
-            _tc("TC-003", preconditions=["系统已部署测试版本", "用户已登录系统"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        titles = [n.title for n in result]
-        assert "optimize goal" in titles
-        assert "其他" in titles
-
-    def test_different_preconditions_separate_groups(self) -> None:
-        """Different primary keywords should create separate groups."""
-        cases = [
-            _tc("TC-001", preconditions=["用户可见 `optimize goal` 字段"]),
-            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段"]),
-            _tc("TC-003", preconditions=["广告主下存在 2 个可用 TTMS account"]),
-            _tc("TC-004", preconditions=["用户必须选择 TTMS account"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        groups = [n for n in result if n.node_type == "precondition_group"]
-        assert len(groups) == 2
-        assert {g.title for g in groups} == {"optimize goal", "TTMS account"}
-
-    def test_punctuation_normalization_groups_together(self) -> None:
-        """Chinese vs English punctuation should be treated as identical."""
-        cases = [
-            _tc("TC-001", preconditions=["条件一，条件二"]),
-            _tc("TC-002", preconditions=["条件一,条件二"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        groups = [n for n in result if n.node_type == "precondition_group"]
-        assert len(groups) == 1
-
-    def test_shared_keyword_groups_different_preconditions_together(self) -> None:
-        """Cases should group by shared keyword even when full lists differ."""
-        cases = [
-            _tc("TC-001", preconditions=["用户已定位到 `secondary goal` 区域", "系统已部署测试版本"]),
-            _tc("TC-002", preconditions=["用户可查看 `secondary goal` 选项", "广告主已启用白名单"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        assert len(result) == 1
-        assert result[0].title == "secondary goal"
-        assert len(result[0].children) == 2
-
-    def test_generic_words_fall_back_to_other_group(self) -> None:
-        """Generic words like 用户/系统/页面 should not become top-level groups."""
-        cases = [
-            _tc("TC-001", preconditions=["用户已登录系统", "用户已进入页面"]),
-            _tc("TC-002", preconditions=["系统已部署测试版本", "用户已具备操作权限"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        assert len(result) == 1
-        assert result[0].title == "其他"
-
-    def test_case_preconditions_preserved_in_keyword_group(self) -> None:
-        """Case node should keep full preconditions in keyword grouping mode."""
-        cases = [
-            _tc("TC-001", preconditions=["用户已定位到 `optimize goal` 区域", "系统已部署测试版本"]),
-            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段", "用户已登录系统"]),
-        ]
-        result = PreconditionGrouper().group(cases)
-        group = result[0]
         assert group.title == "optimize goal"
-        assert group.children[0].preconditions == cases[0].preconditions
-        assert group.children[1].preconditions == cases[1].preconditions
+        assert [c.source_case_id for c in group.children] == ["TC-001", "TC-002"]
 
-    def test_data_preservation(self) -> None:
-        """Case node preserves steps, expected_results, priority, etc."""
-        tc = _tc(
-            "TC-001",
-            title="验证登录",
-            preconditions=["已注册"],
-            steps=["输入密码", "点击登录"],
-            expected_results=["登录成功"],
-        )
-        tc.priority = "P0"
-        tc.category = "functional"
-        tc.checkpoint_id = "CP-abc123"
-
-        result = PreconditionGrouper().group([tc])
-        assert len(result) == 1
-        node = result[0]
-        assert node.title == "验证登录"
-        assert node.steps == ["输入密码", "点击登录"]
-        assert node.expected_results == ["登录成功"]
-        assert node.priority == "P0"
-        assert node.checkpoint_id == "CP-abc123"
-
-    def test_node_id_formats(self) -> None:
-        """Verify node_id naming conventions."""
+    def test_group_mixed_keyword_and_other(self) -> None:
         cases = [
             _tc("TC-001", preconditions=["用户可见 `optimize goal` 字段"]),
-            _tc("TC-002", preconditions=["用户可编辑 `optimize goal` 字段"]),
+            _tc("TC-002", preconditions=["进入白名单配置页"]),
+            _tc("TC-003", preconditions=["系统存在历史数据"]),
         ]
-        result = PreconditionGrouper().group(cases)
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert len(result) == 3
+        assert {node.node_type for node in result} == {"case"}
+        assert {node.title for node in result} == {"TC-001", "TC-002", "TC-003"}
+
+    def test_group_keyword_bucket_with_two_cases_and_other_bucket(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["进入广告组创建页"]),
+            _tc("TC-002", preconditions=["已打开广告组编辑页"]),
+            _tc("TC-003", preconditions=["系统存在历史数据"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert len(result) == 2
+        group = next(node for node in result if node.node_type == "precondition_group")
+        single = next(node for node in result if node.node_type == "case")
+        assert group.title == "广告组"
+        assert [c.source_case_id for c in group.children] == ["TC-001", "TC-002"]
+        assert single.source_case_id == "TC-003"
+
+    def test_group_case_with_multiple_keywords_prefers_more_global_frequency(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["已创建广告计划", "进入广告组编辑页"]),
+            _tc("TC-002", preconditions=["进入广告组创建页"]),
+            _tc("TC-003", preconditions=["进入广告组详情页"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert len(result) == 1
         group = result[0]
-        assert group.node_id.startswith("GRP-")
-        for child in group.children:
-            assert child.node_id.startswith("CASE-")
+        assert group.title == "广告组"
+        assert [c.source_case_id for c in group.children] == ["TC-001", "TC-002", "TC-003"]
+
+    def test_group_case_with_frequency_tie_prefers_first_appeared(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["已创建广告计划", "进入广告组编辑页"]),
+            _tc("TC-002", preconditions=["进入广告计划创建页"]),
+            _tc("TC-003", preconditions=["进入广告组详情页"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert len(result) == 2
+        first = result[0]
+        second = result[1]
+        assert first.title == "广告计划"
+        assert second.title == "广告组"
+        assert [c.source_case_id for c in first.children] == ["TC-001", "TC-002"]
+        assert [c.source_case_id for c in second.children] == ["TC-003"]
+
+    def test_build_tree_never_exceeds_depth_three(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["进入广告计划创建页"]),
+            _tc("TC-002", preconditions=["进入广告计划编辑页"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert len(result) == 1
+        group = result[0]
+        assert group.node_type == "precondition_group"
+        assert all(child.node_type == "case" for child in group.children)
+        assert all(not child.children for child in group.children)
+
+    def test_stable_bucket_order(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["进入广告计划创建页"]),
+            _tc("TC-002", preconditions=["进入白名单配置页"]),
+            _tc("TC-003", preconditions=["进入广告计划编辑页"]),
+            _tc("TC-004", preconditions=["系统存在历史数据"]),
+            _tc("TC-005", preconditions=["进入白名单详情页"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert [n.title for n in result] == ["广告计划", "白名单", "TC-004"]
+
+    def test_output_shape_matches_contract(self) -> None:
+        cases = [
+            _tc("TC-001", preconditions=["进入广告计划创建页"]),
+            _tc("TC-002", preconditions=["进入广告计划编辑页"]),
+        ]
+        grouper = PreconditionGrouper()
+
+        result = grouper.group(cases)
+
+        assert isinstance(result, list)
+        assert all(isinstance(node, ChecklistNode) for node in result)
+        group = result[0]
+        assert group.node_type == "precondition_group"
+        assert group.source_case_id is None
+        assert all(child.source_case_id is not None for child in group.children)
 
     def test_performance_100_cases(self) -> None:
-        """100 cases should complete within 1 second."""
         cases = [
-            _tc(
-                f"TC-{i:03d}",
-                preconditions=[f"前置条件{i % 10}"],
-            )
+            _tc(f"TC-{i:03d}", preconditions=["进入广告计划创建页"])
             for i in range(100)
         ]
+        grouper = PreconditionGrouper()
+
         start = time.time()
-        result = PreconditionGrouper().group(cases)
+        result = grouper.group(cases)
         elapsed = time.time() - start
         assert elapsed < 1.0
         assert len(result) > 0
@@ -283,7 +228,6 @@ class TestLLMSemanticMerge:
             _tc("TC-004", preconditions=["广告主账户有余额"]),
         ]
 
-        # LLM 将 entry 1,2 合并为"已登录"，entry 3,4 合并为"广告主余额充足"
         mock_result = PreconditionGroupingResult(
             groups=[
                 SemanticGroup(representative="已登录", member_indices=[1, 2]),
@@ -299,7 +243,6 @@ class TestLLMSemanticMerge:
         assert "广告主余额充足" in titles
         assert "其他" not in titles
 
-        # 验证每组各有 2 个用例
         for node in result:
             if node.title in ("已登录", "广告主余额充足"):
                 assert len(node.children) == 2
@@ -311,7 +254,6 @@ class TestLLMSemanticMerge:
             _tc("TC-002", preconditions=["已创建广告计划"]),
         ]
 
-        # LLM 输出：每个独立成组
         mock_result = PreconditionGroupingResult(
             groups=[
                 SemanticGroup(representative="已登录账号", member_indices=[1]),
@@ -322,7 +264,6 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
-        # 每组只有 1 个用例，低于 _MIN_GROUP_SIZE=2，变成独立 case 节点
         case_nodes = [n for n in result if n.node_type == "case"]
         assert len(case_nodes) == 2
 
@@ -339,10 +280,7 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
-        # Verify LLM was actually called before the fallback
         mock_client.generate_structured.assert_called_once()
-
-        # 回退到关键词分桶：两个中文用例都进"其他"
         assert len(result) == 1
         assert result[0].title == "其他"
         assert len(result[0].children) == 2
@@ -358,7 +296,7 @@ class TestLLMSemanticMerge:
             groups=[
                 SemanticGroup(
                     representative="已登录",
-                    member_indices=[1, 2, 999],  # 999 越界
+                    member_indices=[1, 2, 999],
                 ),
             ]
         )
@@ -366,7 +304,6 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
-        # 应该正常合并 1,2，忽略 999
         merged = [n for n in result if n.title == "已登录"]
         assert len(merged) == 1
         assert len(merged[0].children) == 2
@@ -379,7 +316,6 @@ class TestLLMSemanticMerge:
             _tc("TC-003", preconditions=["网络环境正常"]),
         ]
 
-        # LLM 只分组了 1,2，遗漏了 3
         mock_result = PreconditionGroupingResult(
             groups=[
                 SemanticGroup(representative="已登录", member_indices=[1, 2]),
@@ -391,7 +327,6 @@ class TestLLMSemanticMerge:
 
         titles = {n.title for n in result}
         assert "已登录" in titles
-        # 第三个用例未被分组，应在"其他"或作为独立 case
         remaining = [n for n in result if n.title != "已登录"]
         assert len(remaining) >= 1
 
@@ -439,13 +374,11 @@ class TestLLMSemanticMerge:
             _tc("TC-003", preconditions=["已打开广告组创建界面"]),
         ]
 
-        # 关键词分桶后：Ad Group 桶有 TC-001,TC-002；其他桶有 TC-003
-        # LLM 判定 "Ad Group" 和 "已打开广告组创建界面" 语义等价
         mock_result = PreconditionGroupingResult(
             groups=[
                 SemanticGroup(
                     representative="广告组页面",
-                    member_indices=[1, 2],  # entry 1 = "Ad Group" bucket key, entry 2 = "已打开广告组创建界面"
+                    member_indices=[1, 2],
                 ),
             ]
         )
@@ -453,7 +386,6 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
-        # 全部 3 个用例应合并到一个组
         merged = [n for n in result if n.title == "广告组页面"]
         assert len(merged) == 1
         assert len(merged[0].children) == 3
@@ -470,17 +402,13 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         result = grouper.group(cases)
 
-        # Verify LLM was actually called
         mock_client.generate_structured.assert_called_once()
-
-        # 空 groups → 原始桶不变 → 两个中文用例在"其他"
         assert len(result) == 1
         assert result[0].title == "其他"
         assert len(result[0].children) == 2
 
     def test_llm_single_unique_text_skips_merge(self) -> None:
-        """All cases share the same precondition text → LLM is called but
-        _llm_merge_buckets returns early because unique entries ≤ 1."""
+        """All cases share the same precondition text -> no LLM call."""
         cases = [
             _tc("TC-001", preconditions=["已登录账号"]),
             _tc("TC-002", preconditions=["已登录账号"]),
@@ -490,5 +418,4 @@ class TestLLMSemanticMerge:
         grouper = PreconditionGrouper(llm_client=mock_client)
         grouper.group(cases)
 
-        # All cases have the same text → 1 unique entry → early return → no LLM call
         mock_client.generate_structured.assert_not_called()
