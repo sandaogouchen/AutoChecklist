@@ -153,6 +153,17 @@ class TestRetryLogic:
         assert result == '{"status":"ok"}'
         assert client._mock_primary.chat.completions.create.call_count == 1
 
+    def test_chat_does_not_force_json_response_format(self) -> None:
+        """普通 chat 默认不应强制要求 json_object。"""
+        client = _build_client()
+        client._mock_primary.chat.completions.create.return_value = _make_chat_response("plain text")
+
+        result = client.chat("system", "user")
+
+        assert result == "plain text"
+        kwargs = client._mock_primary.chat.completions.create.call_args.kwargs
+        assert "response_format" not in kwargs
+
     def test_retry_on_429_then_success(self) -> None:
         """429 限流 → 重试 → 成功。"""
         client = _build_client()
@@ -216,7 +227,7 @@ class TestRetryLogic:
         assert result == '{"status":"ok"}'
         assert client._mock_primary.chat.completions.create.call_count == 2
 
-    def test_retry_on_timeout_error_then_success(self) -> None:
+    def test_retry_on_timeout_then_success(self) -> None:
         """超时错误 → 重试 → 成功。"""
         client = _build_client()
         client._mock_primary.chat.completions.create.side_effect = [
@@ -230,12 +241,12 @@ class TestRetryLogic:
         assert client._mock_primary.chat.completions.create.call_count == 2
 
     def test_multiple_retries_then_success(self) -> None:
-        """多次重试（3次失败 → 第4次成功）。"""
+        """多次重试后最终成功。"""
         client = _build_client(max_retries=3)
         client._mock_primary.chat.completions.create.side_effect = [
-            _make_api_status_error(429, "rate limited"),
-            _make_api_status_error(500, "server error"),
-            _make_api_status_error(502, "bad gateway"),
+            _make_api_status_error(429, "rate limited 1"),
+            _make_api_status_error(500, "server error 2"),
+            _make_api_status_error(503, "server error 3"),
             _make_chat_response(),
         ]
 
@@ -244,19 +255,34 @@ class TestRetryLogic:
         assert result == '{"status":"ok"}'
         assert client._mock_primary.chat.completions.create.call_count == 4
 
-    def test_retries_exhausted_raises(self) -> None:
-        """重试耗尽（无 fallback）→ 抛出最后的异常。"""
+    def test_retry_exhausted_returns_fallback_or_raises(self) -> None:
+        """主模型重试耗尽。"""
         client = _build_client(max_retries=2)
-        error = _make_api_status_error(429, "rate limited")
         client._mock_primary.chat.completions.create.side_effect = [
-            error, error, error,
+            _make_api_status_error(429, "rate limited 1"),
+            _make_api_status_error(500, "server error 2"),
+            _make_api_status_error(503, "server error 3"),
         ]
 
         with pytest.raises(APIStatusError):
             client.chat("system", "user")
 
-        # 1 (初始) + 2 (重试) = 3 次调用
         assert client._mock_primary.chat.completions.create.call_count == 3
+
+    def test_sleep_called_between_retries(self) -> None:
+        """重试期间会调用 sleep（但测试里 delay=0）。"""
+        client = _build_client(max_retries=2, retry_base_delay=1.0, retry_max_delay=2.0)
+        client._mock_primary.chat.completions.create.side_effect = [
+            _make_api_status_error(429),
+            _make_api_status_error(500),
+            _make_chat_response(),
+        ]
+
+        with patch.object(time, "sleep") as mock_sleep:
+            result = client.chat("system", "user")
+
+        assert result == '{"status":"ok"}'
+        assert mock_sleep.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -264,150 +290,143 @@ class TestRetryLogic:
 # ---------------------------------------------------------------------------
 
 class TestNonRetryableErrors:
-    """测试不可重试错误立即抛出、不重试。"""
+    """测试不可重试错误是否立即抛出。"""
 
-    @pytest.mark.parametrize("status_code", [400, 401, 403])
-    def test_non_retryable_status_raises_immediately(self, status_code: int) -> None:
-        client = _build_client()
-        client._mock_primary.chat.completions.create.side_effect = (
-            _make_api_status_error(status_code, f"error {status_code}")
+    @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
+    def test_non_retryable_errors_raise_immediately(self, status_code: int) -> None:
+        client = _build_client(max_retries=3)
+        client._mock_primary.chat.completions.create.side_effect = _make_api_status_error(
+            status_code,
+            f"error {status_code}",
         )
 
         with pytest.raises(APIStatusError) as exc_info:
             client.chat("system", "user")
 
         assert exc_info.value.status_code == status_code
-        # 只调用了一次，没有重试
+        # 不应重试
         assert client._mock_primary.chat.completions.create.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# 降级逻辑测试
+# fallback 降级逻辑测试
 # ---------------------------------------------------------------------------
 
 class TestFallbackLogic:
-    """测试模型降级机制。"""
+    """测试主模型失败后 fallback 模型是否生效。"""
 
-    def test_fallback_on_primary_exhausted(self) -> None:
-        """主模型重试耗尽 → 自动降级到 fallback → 成功。"""
-        client = _build_client(
-            max_retries=1,
-            fallback_model="fallback-model",
-        )
-        # 主模型：2 次失败（1 初始 + 1 重试）
+    def test_fallback_success_after_primary_exhausted(self) -> None:
+        """主模型重试耗尽后，fallback 成功。"""
+        client = _build_client(max_retries=1, fallback_model="fallback-model")
         client._mock_primary.chat.completions.create.side_effect = [
-            _make_api_status_error(500, "server error"),
+            _make_api_status_error(429, "rate limited"),
             _make_api_status_error(500, "server error"),
         ]
-        # fallback：成功
-        client._mock_fallback.chat.completions.create.return_value = (
-            _make_chat_response('{"status":"fallback_ok"}')
+        client._mock_fallback.chat.completions.create.return_value = _make_chat_response(
+            '{"status":"from-fallback"}'
         )
 
         result = client.chat("system", "user")
 
-        assert result == '{"status":"fallback_ok"}'
+        assert result == '{"status":"from-fallback"}'
         assert client._mock_primary.chat.completions.create.call_count == 2
         assert client._mock_fallback.chat.completions.create.call_count == 1
 
     def test_fallback_also_retries(self) -> None:
-        """Fallback 模型也享受重试保护。"""
-        client = _build_client(
-            max_retries=1,
-            fallback_model="fallback-model",
-        )
-        # 主模型：2 次失败
+        """fallback 模型同样享受重试保护。"""
+        client = _build_client(max_retries=1, fallback_model="fallback-model")
         client._mock_primary.chat.completions.create.side_effect = [
-            _make_api_status_error(429, "rate limited"),
-            _make_api_status_error(429, "rate limited"),
+            _make_api_status_error(429),
+            _make_api_status_error(500),
         ]
-        # fallback：先失败再成功
         client._mock_fallback.chat.completions.create.side_effect = [
-            _make_api_status_error(429, "rate limited"),
-            _make_chat_response('{"status":"recovered"}'),
+            _make_api_status_error(503),
+            _make_chat_response('{"status":"fallback-ok"}'),
         ]
 
         result = client.chat("system", "user")
 
-        assert result == '{"status":"recovered"}'
+        assert result == '{"status":"fallback-ok"}'
         assert client._mock_fallback.chat.completions.create.call_count == 2
 
-    def test_fallback_also_exhausted_raises(self) -> None:
-        """主模型 + fallback 均重试耗尽 → 抛出异常。"""
-        client = _build_client(
-            max_retries=0,
-            fallback_model="fallback-model",
-        )
-        # 主模型：1 次失败（max_retries=0 即不重试）
-        client._mock_primary.chat.completions.create.side_effect = (
-            _make_api_status_error(500, "primary down")
-        )
-        # fallback：1 次失败
-        client._mock_fallback.chat.completions.create.side_effect = (
-            _make_api_status_error(500, "fallback down")
-        )
+    def test_primary_and_fallback_both_exhausted_raise_last_error(self) -> None:
+        """主模型与 fallback 都重试耗尽，最终抛出 fallback 的最后错误。"""
+        client = _build_client(max_retries=1, fallback_model="fallback-model")
+        client._mock_primary.chat.completions.create.side_effect = [
+            _make_api_status_error(429, "primary rate limited"),
+            _make_api_status_error(500, "primary server error"),
+        ]
+        client._mock_fallback.chat.completions.create.side_effect = [
+            _make_api_status_error(503, "fallback unavailable"),
+            _make_api_status_error(500, "fallback server error"),
+        ]
 
-        with pytest.raises(APIStatusError):
+        with pytest.raises(APIStatusError) as exc_info:
             client.chat("system", "user")
 
-        assert client._mock_primary.chat.completions.create.call_count == 1
-        assert client._mock_fallback.chat.completions.create.call_count == 1
+        # 最终应抛出 fallback 的最后错误
+        assert exc_info.value.status_code == 500
+        assert "fallback server error" in str(exc_info.value)
 
-    def test_no_fallback_configured(self) -> None:
-        """未配置 fallback → 重试耗尽后直接抛出。"""
-        client = _build_client(max_retries=0, fallback_model="")
-        client._mock_primary.chat.completions.create.side_effect = (
-            _make_api_status_error(500, "server error")
-        )
+    def test_no_fallback_config_raises_primary_last_error(self) -> None:
+        """未配置 fallback 时，主模型耗尽后直接抛错。"""
+        client = _build_client(max_retries=1, fallback_model="")
+        client._mock_primary.chat.completions.create.side_effect = [
+            _make_api_status_error(429, "rate limited"),
+            _make_api_status_error(503, "unavailable"),
+        ]
 
-        with pytest.raises(APIStatusError):
+        with pytest.raises(APIStatusError) as exc_info:
             client.chat("system", "user")
 
-        assert client._mock_primary.chat.completions.create.call_count == 1
+        assert exc_info.value.status_code == 503
+        assert client._mock_fallback.chat.completions.create.call_count == 0
 
 
 # ---------------------------------------------------------------------------
-# 配置关闭测试
+# max_retries = 0 测试
 # ---------------------------------------------------------------------------
 
 class TestRetryDisabled:
-    """测试 max_retries=0 完全关闭重试。"""
+    """测试 max_retries=0 时完全禁用重试。"""
 
-    def test_no_retry_when_disabled(self) -> None:
-        """max_retries=0 → 失败即抛出，不重试。"""
+    def test_no_retry_when_max_retries_zero(self) -> None:
         client = _build_client(max_retries=0)
-        client._mock_primary.chat.completions.create.side_effect = (
-            _make_api_status_error(429, "rate limited")
-        )
+        client._mock_primary.chat.completions.create.side_effect = _make_api_status_error(429)
 
         with pytest.raises(APIStatusError):
             client.chat("system", "user")
 
         assert client._mock_primary.chat.completions.create.call_count == 1
 
-    def test_success_still_works_when_retry_disabled(self) -> None:
-        """max_retries=0 但首次调用成功 → 正常返回。"""
-        client = _build_client(max_retries=0)
-        client._mock_primary.chat.completions.create.return_value = _make_chat_response()
+    def test_no_retry_but_fallback_still_works(self) -> None:
+        """主模型不重试，但失败后仍可切到 fallback。"""
+        client = _build_client(max_retries=0, fallback_model="fallback-model")
+        client._mock_primary.chat.completions.create.side_effect = _make_api_status_error(429)
+        client._mock_fallback.chat.completions.create.return_value = _make_chat_response(
+            '{"status":"fallback-direct"}'
+        )
 
         result = client.chat("system", "user")
 
-        assert result == '{"status":"ok"}'
+        assert result == '{"status":"fallback-direct"}'
+        assert client._mock_primary.chat.completions.create.call_count == 1
+        assert client._mock_fallback.chat.completions.create.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# LLMClientConfig 透传测试
+# 配置透传测试
 # ---------------------------------------------------------------------------
 
 class TestConfigPassthrough:
-    """测试 LLMClientConfig 新字段正确透传到 LLMClient。"""
+    """测试 LLMClientConfig 是否正确透传到客户端。"""
 
     def test_retry_config_passthrough(self) -> None:
-        """LLMClientConfig 的重试字段正确透传。"""
+        """LLMClientConfig 的 retry 字段正确透传。"""
         config = LLMClientConfig(
             api_key="key",
             base_url="https://api.example.com/v1",
-            model="test-model",
+            model="primary",
             max_retries=5,
             retry_base_delay=2.0,
             retry_max_delay=120.0,
@@ -475,3 +494,18 @@ class TestGenerateStructuredWithRetry:
 
         assert result.status == "ok"
         assert client._mock_primary.chat.completions.create.call_count == 2
+
+    def test_generate_structured_requests_json_response_format(self) -> None:
+        """结构化生成仍应显式要求 json_object。"""
+        client = _build_client()
+        client._mock_primary.chat.completions.create.return_value = _make_chat_response('{"status":"ok"}')
+
+        result = client.generate_structured(
+            system_prompt="system",
+            user_prompt="user",
+            response_model=_SimpleModel,
+        )
+
+        assert result.status == "ok"
+        kwargs = client._mock_primary.chat.completions.create.call_args.kwargs
+        assert kwargs["response_format"] == {"type": "json_object"}
