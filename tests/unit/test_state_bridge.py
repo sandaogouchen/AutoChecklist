@@ -2,11 +2,11 @@
 
 覆盖以下场景：
 - compute_shared_keys 交集计算
-- build_bridge 入向映射（正常、缺失、override）
-- build_bridge 出向映射（正常、exclude）
-- None 值过滤行为
-- override_in 中无效 key 的 WARNING 日志
+- build_bridge 入向映射（正常、缺失、override、显式 None）
+- build_bridge 出向映射（显式 allowlist）
+- include_out / override_in 中无效 key 的 WARNING 日志
 - 缓存行为验证
+- 与旧手动桥接关键行为的一致性（仅允许指定字段回传）
 """
 
 from __future__ import annotations
@@ -15,8 +15,6 @@ import logging
 from typing import TypedDict
 from unittest.mock import MagicMock
 
-import pytest
-
 from app.graphs.state_bridge import build_bridge, compute_shared_keys
 
 
@@ -24,14 +22,14 @@ from app.graphs.state_bridge import build_bridge, compute_shared_keys
 
 
 class ParentState(TypedDict, total=False):
-    shared_a: str
+    shared_a: str | None
     shared_b: int
     shared_c: list
     parent_only: str
 
 
 class ChildState(TypedDict, total=False):
-    shared_a: str
+    shared_a: str | None
     shared_b: int
     shared_c: list
     child_only: float
@@ -124,8 +122,8 @@ class TestBridgeInbound:
         call_args = sg.invoke.call_args[0][0]
         assert call_args["shared_a"] == "actual_a"
 
-    def test_none_value_triggers_override(self):
-        """字段在 state 中为 None 时，应使用 override_in。"""
+    def test_none_value_preserved_without_override(self):
+        """字段显式为 None 时，应保留 None，不视为缺失。"""
         sg = self._make_subgraph({})
         bridge = build_bridge(
             sg, ParentState, ChildState,
@@ -135,18 +133,8 @@ class TestBridgeInbound:
         bridge({"shared_a": None})
 
         call_args = sg.invoke.call_args[0][0]
-        assert call_args["shared_a"] == "fallback"
-
-    def test_none_value_skipped_without_override(self):
-        """字段为 None 且无 override 时，不应传递给子图。"""
-        sg = self._make_subgraph({})
-        bridge = build_bridge(sg, ParentState, ChildState)
-
-        bridge({"shared_a": None, "shared_b": 5})
-
-        call_args = sg.invoke.call_args[0][0]
-        assert "shared_a" not in call_args
-        assert call_args["shared_b"] == 5
+        assert "shared_a" in call_args
+        assert call_args["shared_a"] is None
 
     def test_missing_field_skipped(self):
         """state 中完全没有该字段且无 override 时，跳过。"""
@@ -168,41 +156,47 @@ class TestBridgeOutbound:
         sg.invoke.return_value = return_dict
         return sg
 
-    def test_forwards_shared_results(self):
-        """子图返回的共享字段应回传到主图。"""
+    def test_only_include_out_fields_are_returned(self):
+        """只有 include_out 中显式登记的字段才应回传。"""
         sg = self._make_subgraph({
             "shared_a": "out_a",
             "shared_b": 99,
             "child_only": 3.14,
         })
-        bridge = build_bridge(sg, ParentState, ChildState)
-
-        result = bridge({"shared_a": "in"})
-
-        assert result["shared_a"] == "out_a"
-        assert result["shared_b"] == 99
-        assert "child_only" not in result
-
-    def test_exclude_out(self):
-        """exclude_out 中的字段不应回传。"""
-        sg = self._make_subgraph({
-            "shared_a": "out_a",
-            "shared_b": 99,
-        })
         bridge = build_bridge(
-            sg, ParentState, ChildState,
-            exclude_out={"shared_b"},
+            sg,
+            ParentState,
+            ChildState,
+            include_out={"shared_a"},
         )
 
         result = bridge({"shared_a": "in"})
 
-        assert "shared_a" in result
+        assert result == {"shared_a": "out_a"}
         assert "shared_b" not in result
+        assert "child_only" not in result
 
-    def test_missing_subgraph_result_skipped(self):
-        """子图结果中不存在的共享字段应跳过（不回传空值）。"""
-        sg = self._make_subgraph({"shared_a": "out_a"})
+    def test_no_include_out_means_no_child_output_promoted(self):
+        """未配置 include_out 时，不应有任何子图字段回传到主图。"""
+        sg = self._make_subgraph({
+            "shared_a": "out_a",
+            "shared_b": 99,
+        })
         bridge = build_bridge(sg, ParentState, ChildState)
+
+        result = bridge({"shared_a": "in"})
+
+        assert result == {}
+
+    def test_allowed_key_missing_from_subgraph_result_is_skipped(self):
+        """include_out 允许但子图未返回的字段，应跳过。"""
+        sg = self._make_subgraph({"shared_a": "out_a"})
+        bridge = build_bridge(
+            sg,
+            ParentState,
+            ChildState,
+            include_out={"shared_a", "shared_b"},
+        )
 
         result = bridge({"shared_a": "in"})
 
@@ -226,29 +220,27 @@ class TestBridgeSafeguards:
 
         assert any("override_in contains keys not in shared set" in r.message for r in caplog.records)
 
-    def test_exclude_out_non_shared_silently_ignored(self):
-        """exclude_out 中不在交集的字段应安静忽略。"""
+    def test_stale_include_out_warning(self, caplog):
+        """include_out 中不在交集的 key 应触发 WARNING。"""
         sg = MagicMock()
-        sg.invoke.return_value = {"shared_a": "val"}
+        sg.invoke.return_value = {}
 
-        bridge = build_bridge(
-            sg, ParentState, ChildState,
-            exclude_out={"nonexistent_field"},
-        )
+        with caplog.at_level(logging.WARNING):
+            build_bridge(
+                sg, ParentState, ChildState,
+                include_out={"nonexistent_field"},
+            )
 
-        # 不应抛异常
-        result = bridge({"shared_a": "in"})
-        assert result["shared_a"] == "val"
-
-
-# ---- 等价性测试：与旧手动桥接行为对比 ----
+        assert any("include_out contains keys not in shared set" in r.message for r in caplog.records)
 
 
-class TestEquivalenceWithManualBridge:
-    """验证自动桥接与旧手动桥接在相同输入下产出等价结果。"""
+# ---- 关键行为测试：显式回传边界 ----
 
-    def test_full_state_equivalence(self):
-        """提供完整状态时，自动桥接输出应包含所有预期字段。"""
+
+class TestExplicitOutboundBoundary:
+    """验证自动桥接不会因 shared keys 扩大主图可见输出范围。"""
+
+    def test_only_allowlisted_outputs_are_promoted(self):
         subgraph_output = {
             "shared_a": "scenario",
             "shared_b": 100,
@@ -258,7 +250,12 @@ class TestEquivalenceWithManualBridge:
         sg = MagicMock()
         sg.invoke.return_value = subgraph_output
 
-        bridge = build_bridge(sg, ParentState, ChildState)
+        bridge = build_bridge(
+            sg,
+            ParentState,
+            ChildState,
+            include_out={"shared_a", "shared_c"},
+        )
         result = bridge({
             "shared_a": "input_a",
             "shared_b": 50,
@@ -266,9 +263,7 @@ class TestEquivalenceWithManualBridge:
             "parent_only": "ignored",
         })
 
-        # 应包含所有共享字段的子图输出
         assert result == {
             "shared_a": "scenario",
-            "shared_b": 100,
             "shared_c": [1, 2, 3],
         }
