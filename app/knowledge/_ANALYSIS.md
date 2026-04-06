@@ -1,143 +1,314 @@
-# _ANALYSIS.md — app/knowledge/ 知识检索模块分析
-> 分析分支自动生成 · 源分支 `feat/graphrag-knowledge-retrieval` (PR #24)
+# app/knowledge/ Directory Analysis
+
+## §13.1 Directory Overview
+
+The `app/knowledge/` directory implements the **GraphRAG-powered knowledge retrieval system** for AutoChecklist. This subsystem allows the pipeline to enrich test case generation with domain-specific knowledge retrieved from pre-indexed Markdown documents using LightRAG, an open-source Graph RAG (Retrieval-Augmented Generation) library.
+
+The directory contains four modules:
+
+1. **`graphrag_engine.py`** -- The core engine class that wraps LightRAG, managing the full lifecycle: initialization, document indexing, knowledge retrieval, and resource cleanup.
+2. **`ingestion.py`** -- Document scanning, validation, and loading from the filesystem, preparing content for indexing.
+3. **`models.py`** -- Pydantic domain models for knowledge documents, retrieval results, and system status.
+4. **`retriever.py`** -- High-level retrieval interface that constructs queries from parsed PRD documents and formats results for prompt injection.
+
+**Architecture**: The knowledge system is an **optional enhancement** to the main pipeline. When enabled, it injects a `knowledge_retrieval` node into the main workflow graph (§6) between the context loaders and `context_research`. When disabled, the pipeline operates normally without knowledge-augmented context.
+
+**Technology**: LightRAG library, OpenAI-compatible embedding/LLM APIs via httpx, numpy for embedding arrays, Pydantic v2 for data models.
+
 ---
-## §1 目录概述
-| 维度 | 值 |
-|------|-----|
-| 路径 | `app/knowledge/` |
-| 文件数 | 5 |
-| 分析文件 | \_\_init\_\_.py, models.py, ingestion.py, graphrag_engine.py, retriever.py |
-| 目录职责 | 基于 LightRAG 框架的 GraphRAG 知识文档接入与检索，提供文档扫描/校验、图谱索引构建、多模式语义检索能力 |
 
-## §2 文件清单
-| # | 文件 | 类型 | 行数(估) | 概要 |
-|---|------|------|----------|------|
-| 1 | \_\_init\_\_.py | - | ~4 | 模块文档字符串，声明包 |
-| 2 | models.py | M-模型 | ~45 | 知识检索领域模型：KnowledgeDocument, RetrievalResult, KnowledgeStatus |
-| 3 | ingestion.py | S-服务 | ~110 | 知识文档扫描与校验：scan_knowledge_directory, validate_document_path |
-| 4 | graphrag_engine.py | S-服务 | ~290 | LightRAG 引擎封装：初始化、索引、检索、生命周期管理 |
-| 5 | retriever.py | S-服务 | ~110 | 检索接口封装：查询构造、结果格式化、完整检索流程 |
+## §13.2 File Analysis
 
-## §3 逐文件分析
+### §13.2.1 graphrag_engine.py
 
-### §3.1 \_\_init\_\_.py
-- **类型**: 包标识
-- **职责**: 将 `app/knowledge/` 声明为 Python 包，包含模块级文档字符串
-- **说明**: 纯结构性文件，无逻辑
+**Type**: Type A -- Core Infrastructure  
+**Criticality**: **MEDIUM-HIGH**  
+**Lines**: ~320  
+**Primary Export**: `GraphRAGEngine` class
 
-### §3.2 models.py
-- **类型**: M-领域模型
-- **职责**: 定义知识检索子系统的三个核心 Pydantic 数据模型
-- **模型清单**:
+#### LightRAG Integration Architecture
 
-| 模型 | 用途 | 关键字段 |
-|------|------|--------|
-| `KnowledgeDocument` | 已索引文档的元数据 | doc_id, file_name, file_path, file_size_bytes, md5_hash, indexed_at, entity_count |
-| `RetrievalResult` | 知识检索结果 | content, sources (list[str]), mode, success, error_message |
-| `KnowledgeStatus` | 知识库状态信息 | enabled, ready, document_count, last_indexed_at, working_dir |
+The `GraphRAGEngine` class wraps a `LightRAG` instance and provides the full lifecycle:
 
-- **设计特点**:
-  - 所有模型继承 `pydantic.BaseModel`，与项目其余领域模型风格一致
-  - `KnowledgeDocument.doc_id` 由内容 MD5 哈希前 12 位生成，保证幂等性
-  - `RetrievalResult` 内置 `success` + `error_message` 错误信息，支撑降级策略
-
-### §3.3 ingestion.py
-- **类型**: S-服务（文档接入）
-- **职责**: 从本地目录加载 Markdown 知识文档，提取元数据
-- **公开函数**:
-
-| 函数 | 签名 | 职责 |
-|------|------|------|
-| `scan_knowledge_directory` | `(docs_dir, max_doc_size_kb=1024) → list[tuple[KnowledgeDocument, str]]` | 递归扫描目录下所有 .md 文件，过滤空文件/超大文件/非 UTF-8 |
-| `validate_document_path` | `(file_path, max_doc_size_kb=1024) → str` | 校验单个文档路径，返回文件内容，不合法时抛 ValueError |
-
-- **扫描策略**:
-  1. 递归 `rglob("*.md")` 遍历目录
-  2. 三层过滤：空文件 → 超大文件（默认 >1024KB）→ 非 UTF-8 编码
-  3. 基于文件内容计算 MD5 生成 `doc_id`
-  4. 返回 `(元数据, 内容文本)` 元组列表，按路径排序
-- **容错**: 所有异常均 log warning 后跳过，不中断扫描流程
-
-### §3.4 graphrag_engine.py
-- **类型**: S-服务（核心引擎）
-- **职责**: 封装 LightRAG 实例的完整生命周期管理
-- **核心类**: `GraphRAGEngine`
-
-#### 生命周期方法
-| 方法 | 签名 | 说明 |
-|------|------|------|
-| `__init__` | `(settings: Settings)` | 保存配置，初始化内部状态 |
-| `initialize` | `async () → None` | 创建 LightRAG 实例、初始化存储、加载文档注册表 |
-| `finalize` | `async () → None` | 释放 LightRAG 存储资源 |
-| `is_ready` | `() → bool` | 检查引擎是否就绪 |
-
-#### 索引方法
-| 方法 | 签名 | 说明 |
-|------|------|------|
-| `insert_document` | `async (content, metadata) → KnowledgeDocument` | 索引单文档，基于 MD5 哈希跳过未变化文档 |
-| `insert_batch` | `async (docs) → list[KnowledgeDocument]` | 批量索引，逐条调用 insert_document |
-| `delete_document` | `async (doc_id) → bool` | 删除已索引文档 |
-| `reindex_all` | `async (docs_dir) → int` | 全量重建索引：清理 → 重新初始化 → 重新扫描 |
-
-#### 检索方法
-| 方法 | 签名 | 说明 |
-|------|------|------|
-| `query` | `async (query_text, mode="hybrid") → RetrievalResult` | 执行知识检索，支持 naive/local/global/hybrid/mix 五种模式 |
-
-#### LLM/Embedding 适配器
-| 函数 | 说明 |
-|------|------|
-| `_openai_compatible_llm` | 通过 httpx 调用 OpenAI-compatible chat/completions 端点，复用 Settings 中的 LLM 配置 |
-| `_openai_compatible_embedding` | 通过 httpx 调用 /v1/embeddings 端点，模型优先使用 `knowledge_embedding_model` |
-
-- **文档注册表持久化**: 通过 `indexed_documents.json` 文件持久化已索引文档的元数据，避免重复索引
-- **幂等性**: `insert_document` 基于内容 MD5 哈希判断文档是否已索引且未变化
-
-### §3.5 retriever.py
-- **类型**: S-服务（检索接口）
-- **职责**: 提供查询构造和结果格式化，将 GraphRAG 原始结果转换为可注入 LLM prompt 的文本
-- **公开函数**:
-
-| 函数 | 签名 | 职责 |
-|------|------|------|
-| `build_retrieval_query` | `(parsed_document: ParsedDocument) → str` | 从 PRD 提取标题 + 正文前 400 字符，截断到 500 字符 |
-| `format_retrieval_result` | `(result: RetrievalResult) → str` | 将检索结果截断到 2000 字符，失败/空结果返回空字符串 |
-| `retrieve_knowledge` | `async (engine, parsed_document, mode) → (str, list[str], bool)` | 完整检索流程：构造查询 → 调用引擎 → 格式化结果 |
-
-- **返回三元组**: `(knowledge_context, knowledge_sources, success)` — 与 GlobalState 的三个新字段一一对应
-- **降级策略**: 引擎未就绪时返回 `("", [], False)`；查询为空时返回 `("", [], True)`
-
-## §4 模块依赖与设计模式
-
-### 内部依赖
 ```
-models.py ← ingestion.py (KnowledgeDocument)
-models.py ← graphrag_engine.py (KnowledgeDocument, RetrievalResult, KnowledgeStatus)
-models.py ← retriever.py (RetrievalResult)
-graphrag_engine.py ← retriever.py (GraphRAGEngine)
-ingestion.py ← graphrag_engine.py.reindex_all (scan_knowledge_directory)
+initialize() → insert_document() / insert_batch() → query() → finalize()
 ```
 
-### 外部依赖
-| 依赖 | 引入方 | 说明 |
-|------|--------|------|
-| `lightrag` (LightRAG, QueryParam, EmbeddingFunc) | graphrag_engine.py | 核心 GraphRAG 框架 |
-| `numpy` | graphrag_engine.py | Embedding 向量数组 |
-| `httpx` | graphrag_engine.py | OpenAI-compatible API 调用 |
-| `app.config.settings.Settings` | graphrag_engine.py | 读取 LLM/知识检索配置 |
-| `app.domain.document_models.ParsedDocument` | retriever.py | PRD 文档模型 |
+**LightRAG configuration**:
+- Working directory: `settings.knowledge_working_dir` (persistent across restarts)
+- LLM callback: `_openai_compatible_llm()` (async, via httpx)
+- Embedding callback: `_openai_compatible_embedding()` (async, via httpx)
+- Embedding dimension: Hardcoded to 1536 (OpenAI default)
+- Max embedding token size: 8192
 
-### 设计模式
-1. **引擎封装模式**: `GraphRAGEngine` 将第三方 LightRAG 完全封装，对外仅暴露 async 接口
-2. **适配器模式**: `_openai_compatible_llm` / `_openai_compatible_embedding` 将 LightRAG 回调桥接到项目 LLM 配置
-3. **注册表持久化**: 通过 JSON 文件维护文档元数据，支撑幂等索引和文档管理
-4. **优雅降级**: 所有检索失败均返回空结果，不抛异常，不阻塞主工作流
+#### LLM/Embedding Callback Adapters
 
-## §5 补充观察
+Two async callback functions bridge LightRAG to the project's OpenAI-compatible endpoints:
 
-1. **完全解耦**: knowledge 模块与工作流核心无直接依赖——通过 `retriever.py` 返回三元组写入 GlobalState，由节点层桥接
-2. **可配置性强**: 7 个 `knowledge_*` 配置字段覆盖开关、路径、检索模式、top_k、模型、文件大小等维度
-3. **幂等索引**: 基于 MD5 哈希的跳重机制避免重复索引，适合增量场景
-4. **适配器复用项目 LLM**: 不引入额外 LLM 客户端，复用 Settings 中的 API 配置，降低配置复杂度
-5. **硬编码 embedding 维度**: `embedding_dim=1536` 硬编码为 OpenAI 默认值，若切换非 OpenAI 模型需修改
-6. **单线程批量索引**: `insert_batch` 逐条 await 而非并发，大量文档时可能较慢
+**`_openai_compatible_llm()`**:
+- Constructs chat completion messages from `prompt`, `system_prompt`, and `history_messages`
+- Uses `httpx.AsyncClient` to call `{base_url}/chat/completions`
+- Temperature: 0.0 for keyword extraction, otherwise `settings.llm_temperature`
+- Max tokens: `settings.llm_max_tokens`
+- Timeout: `settings.llm_timeout_seconds`
+
+**`_openai_compatible_embedding()`**:
+- Calls `{base_url}/embeddings` with the configured embedding model
+- Falls back to `settings.llm_model` if no embedding model is specified
+- Returns `np.ndarray` of embeddings
+
+**Important design note**: These callbacks create a **new `Settings()` instance** on every invocation rather than using the engine's stored `_settings`. This means they always read the latest environment variables, but it also means configuration changes between calls could cause inconsistencies. Additionally, these callbacks bypass the `LLMClient` (§4) entirely -- they use raw httpx calls without the retry/fallback mechanisms that `LLMClient` provides.
+
+#### Document Indexing
+
+**Single document** (`insert_document()`):
+1. Compute MD5 hash of content
+2. Generate `doc_id` from hash (or use provided one)
+3. Check if already indexed with same hash (skip if unchanged)
+4. Call `self._rag.ainsert(content, ids=[doc_id], file_paths=[...])`
+5. Create `KnowledgeDocument` metadata
+6. Save to in-memory registry and persist to JSON file
+
+**Batch indexing** (`insert_batch()`):
+- Iterates over `(KnowledgeDocument, content)` pairs
+- Calls `insert_document()` for each, catching exceptions per-document
+- Returns list of successfully indexed documents
+
+**Content deduplication**: Uses MD5 hash comparison to skip re-indexing unchanged documents. This is efficient for the common case of restarting the engine with an existing document set.
+
+#### Knowledge Retrieval
+
+The `query()` method:
+1. Validates engine readiness
+2. Creates `QueryParam(mode=mode)` where mode is one of: `naive`, `local`, `global`, `hybrid`, `mix`
+3. Calls `self._rag.aquery(query_text, param=param)`
+4. Returns `RetrievalResult` with content, sources (all document IDs), mode, and success flag
+5. Catches all exceptions and returns error result (never raises)
+
+**Source tracking limitation**: The current implementation returns ALL document IDs as sources, regardless of which documents actually contributed to the query result. This is a known limitation of the LightRAG integration -- granular source attribution would require additional LightRAG API support.
+
+#### Full Reindex
+
+`reindex_all()`:
+1. Finalize current engine (release resources)
+2. Delete entire working directory (`shutil.rmtree`)
+3. Clear in-memory document registry
+4. Re-initialize engine
+5. Scan document directory via `ingestion.scan_knowledge_directory()`
+6. Batch insert all found documents
+
+This is a destructive operation that rebuilds the entire knowledge graph from scratch.
+
+#### Document Registry Persistence
+
+The engine maintains a JSON file (`indexed_documents.json`) in the working directory that stores `KnowledgeDocument` metadata for all indexed documents. This registry:
+- Loads on `initialize()` via `_load_document_registry()`
+- Updates after every insert/delete via `_save_document_registry()`
+- Enables content-hash-based deduplication across engine restarts
+- Uses Pydantic `model_validate()` / `model_dump()` for serialization
+
+---
+
+### §13.2.2 ingestion.py
+
+**Type**: Type B -- Data Loading  
+**Criticality**: **MEDIUM**  
+**Lines**: ~100  
+**Primary Exports**: `scan_knowledge_directory()`, `validate_document_path()`
+
+#### Directory Scanning
+
+`scan_knowledge_directory(docs_dir, max_doc_size_kb=1024)`:
+- Recursively scans for `.md` files using `Path.rglob("*.md")`
+- Filters: non-empty, under size limit, UTF-8 decodable
+- For each valid file: reads content, computes MD5 hash, creates `KnowledgeDocument` metadata
+- Returns list of `(KnowledgeDocument, content_text)` tuples
+- Sorted by path for deterministic ordering
+
+**Skip conditions** (with warning logs):
+- Empty files (0 bytes)
+- Oversized files (exceeds `max_doc_size_kb`)
+- Non-UTF-8 files (`UnicodeDecodeError`)
+- Unreadable files (`OSError`)
+
+#### Single Document Validation
+
+`validate_document_path(file_path, max_doc_size_kb=1024)`:
+- Resolves to absolute path
+- Validates: exists, `.md` extension, non-empty, under size limit, UTF-8 encoding
+- Returns file content as string
+- Raises `ValueError` with descriptive messages for each validation failure
+
+This function is called by the API layer (§3.2.3) during document upload.
+
+---
+
+### §13.2.3 models.py
+
+**Type**: Type C -- Data Model  
+**Criticality**: **LOW**  
+**Lines**: ~40  
+**Primary Exports**: `KnowledgeDocument`, `RetrievalResult`, `KnowledgeStatus`
+
+Three Pydantic BaseModel classes:
+
+**`KnowledgeDocument`**:
+| Field | Type | Purpose |
+|---|---|---|
+| `doc_id` | `str` | Unique identifier (MD5-based) |
+| `file_name` | `str` | Original filename |
+| `file_path` | `str` | Absolute filesystem path |
+| `file_size_bytes` | `int` | File size |
+| `md5_hash` | `str` | Content hash for deduplication |
+| `indexed_at` | `Optional[datetime]` | Indexing timestamp |
+| `entity_count` | `int` | Number of extracted entities (default 0) |
+
+**`RetrievalResult`**:
+| Field | Type | Purpose |
+|---|---|---|
+| `content` | `str` | Retrieved knowledge text |
+| `sources` | `list[str]` | Source document identifiers |
+| `mode` | `str` | Retrieval mode used |
+| `success` | `bool` | Whether retrieval succeeded |
+| `error_message` | `str` | Error details on failure |
+
+**`KnowledgeStatus`**:
+| Field | Type | Purpose |
+|---|---|---|
+| `enabled` | `bool` | Whether knowledge retrieval is configured |
+| `ready` | `bool` | Whether engine is initialized and ready |
+| `document_count` | `int` | Number of indexed documents |
+| `last_indexed_at` | `Optional[datetime]` | Most recent indexing time |
+| `working_dir` | `str` | LightRAG working directory path |
+
+---
+
+### §13.2.4 retriever.py
+
+**Type**: Type B -- Integration Layer  
+**Criticality**: **MEDIUM**  
+**Lines**: ~100  
+**Primary Exports**: `retrieve_knowledge()`, `build_retrieval_query()`, `format_retrieval_result()`
+
+#### Query Construction
+
+`build_retrieval_query(parsed_document)`:
+- Extracts document title from `parsed_document.source.title`
+- Takes the first 400 characters of `parsed_document.raw_text`
+- Concatenates and truncates to 500 characters total
+- Returns the query string
+
+The 500-character limit is a precision-over-recall tradeoff -- shorter queries tend to produce more focused results from graph-based retrieval.
+
+#### Result Formatting
+
+`format_retrieval_result(result)`:
+- Returns empty string for failed or empty results
+- Truncates content to `MAX_KNOWLEDGE_CONTEXT_CHARS` (2000 characters)
+- Appends truncation indicator if content was trimmed
+
+The 2000-character limit prevents knowledge context from dominating the LLM's context window in downstream prompts.
+
+#### Complete Retrieval Flow
+
+`retrieve_knowledge(engine, parsed_document, mode="hybrid")`:
+1. Check engine readiness (skip if not ready)
+2. Build query from parsed document
+3. Validate query is non-empty
+4. Execute `engine.query(query, mode=mode)`
+5. Format result for prompt injection
+6. Return `(knowledge_context, knowledge_sources, success)` triple
+
+This function is the interface used by the workflow's `knowledge_retrieval` node (§6).
+
+---
+
+## §13.3 Knowledge System Architecture
+
+### System Flow
+
+```
+[Filesystem]                    [LightRAG Engine]              [Workflow Pipeline]
+     │                               │                               │
+     ├─ .md files ────────────────►│                               │
+     │   (scan_knowledge_directory)  │                               │
+     │                               ├─ Entity extraction            │
+     │                               ├─ Relationship extraction       │
+     │                               ├─ Graph construction            │
+     │                               ├─ Embedding generation          │
+     │                               │                               │
+     │                               │◄── query (from retriever) ────┤
+     │                               │                               │
+     │                               ├── Graph traversal              │
+     │                               ├── LLM synthesis                │
+     │                               │                               │
+     │                               ├── RetrievalResult ───────────►│
+     │                               │   (formatted context)          │
+     │                               │                       knowledge_retrieval node
+```
+
+### Retrieval Modes
+
+LightRAG supports five retrieval modes, each with different quality/performance tradeoffs:
+
+| Mode | Description | Best For |
+|---|---|---|
+| `naive` | Direct vector similarity search | Simple keyword-like queries |
+| `local` | Entity-centric graph traversal | Specific concept lookups |
+| `global` | Community-level summarization | Broad topic understanding |
+| `hybrid` | Combination of local + global | General-purpose (default) |
+| `mix` | All modes combined | Maximum recall at cost of latency |
+
+### Integration Points
+
+1. **API Layer** (§3.2.3): CRUD operations for documents, manual query endpoint, reindex trigger
+2. **Workflow Graph** (§6.2.1): Optional `knowledge_retrieval` node injected into main pipeline
+3. **Configuration**: `Settings` controls `enable_knowledge_retrieval`, `knowledge_working_dir`, `knowledge_max_doc_size_kb`, `knowledge_embedding_model`, `knowledge_docs_dir`
+
+### Persistence Model
+
+The knowledge system has a **dual persistence** approach:
+- **LightRAG internal storage**: Graph database and vector indices in the working directory (managed by LightRAG)
+- **Document registry**: `indexed_documents.json` in the same directory (managed by `GraphRAGEngine`)
+
+Both are filesystem-based, which means:
+- Data survives process restarts but not container rebuilds (unless volume-mounted)
+- No concurrent write safety beyond what LightRAG provides internally
+- Full reindex is the recovery mechanism for corruption
+
+---
+
+## §13.4 Key Findings
+
+1. **Separate LLM path**: The GraphRAG engine uses raw httpx calls for LLM/embedding interactions, completely bypassing the `LLMClient` (§4) with its retry/fallback mechanisms. This means knowledge retrieval calls have **no retry logic, no exponential backoff, no model fallback**. A transient API error during indexing or retrieval fails immediately.
+
+2. **Settings re-instantiation**: The LLM and embedding callbacks create `Settings()` on every invocation rather than closing over the engine's stored settings. This could lead to inconsistent behavior if environment variables change during runtime.
+
+3. **Hardcoded embedding dimension**: The embedding dimension is hardcoded to 1536 (OpenAI's default). If a non-OpenAI embedding model with a different dimension is used, this would cause silent dimensional mismatch errors.
+
+4. **Coarse source attribution**: `query()` returns ALL document IDs as sources regardless of actual contribution. This makes it impossible for downstream nodes to determine which specific knowledge documents influenced the retrieval result.
+
+5. **Content size limits are reasonable**: The 1024 KB document size limit and 2000-character retrieval context limit are appropriate for preventing oversized inputs from dominating the pipeline's context budget.
+
+6. **No incremental index updates**: Modifying a document requires re-indexing it entirely. There is no diff-based update mechanism, though the MD5 deduplication prevents unnecessary re-indexing of unchanged documents.
+
+7. **Async-only engine**: The `GraphRAGEngine` is fully async, which is appropriate for its FastAPI integration but creates a boundary with the synchronous `LLMClient` and synchronous workflow nodes. The knowledge retrieval node in the workflow likely needs an async-to-sync bridge.
+
+8. **Destructive reindex**: `reindex_all()` deletes the entire working directory and rebuilds from scratch. There is no incremental rebuild or backup mechanism. In production, this could cause brief unavailability of the knowledge feature.
+
+---
+
+## §13.5 Cross-References
+
+| Reference | Target | Relationship |
+|---|---|---|
+| `GraphRAGEngine` used by | `app/api/knowledge_routes.py` (§3.2.3) | API endpoint dependency |
+| `retrieve_knowledge()` used by | Workflow `knowledge_retrieval` node (§6) | Pipeline integration |
+| `ParsedDocument` | `app/domain/document_models.py` | Input to query construction |
+| `Settings` | `app/config/settings.py` | Configuration source |
+| LightRAG | External dependency (`lightrag` package) | Graph RAG library |
+| OpenAI-compatible API | External service | LLM and embedding provider |
+| `LLMClient` (§4) | `app/clients/llm.py` | NOT used (separate httpx path) |
+| `validate_document_path` used by | `app/api/knowledge_routes.py` (§3.2.3) | Upload validation |
+| `KnowledgeStatus` used by | `app/api/knowledge_routes.py` (§3.2.3) | Status endpoint response model |
+| `scan_knowledge_directory` used by | `GraphRAGEngine.reindex_all()` | Bulk document loading |
