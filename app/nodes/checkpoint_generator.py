@@ -9,6 +9,10 @@
 
 变更：新增 XMind 参考注入能力，当 state 中存在 xmind_reference_summary 时，
 将参考 Checklist 的覆盖维度和组织方式注入 prompt，引导 LLM 生成结构和风格一致的检查点。
+
+变更：新增 MR 代码事实注入能力，当 state 中存在 mr_code_facts 时，
+将代码级别的事实一同注入 checkpoint 生成 prompt，使生成的检查点
+同时覆盖 PRD 和代码变更维度。
 """
 
 from __future__ import annotations
@@ -72,7 +76,7 @@ _SYSTEM_PROMPT = (
 
 
 class CheckpointDraft(BaseModel):
-    """LLM 返回的单个 checkpoint 草稿。
+    """​LLM 返回的单个 checkpoint 草稿。
 
     不包含 checkpoint_id，由后处理步骤基于 fact_ids 和 title 稳定生成。
     """
@@ -147,6 +151,60 @@ def _build_xmind_reference_prompt(xmind_reference_summary) -> str:
     )
 
 
+def _build_mr_code_facts_prompt(mr_code_facts: list) -> str:
+    """构建 MR 代码事实的 prompt 片段。
+
+    当 state 中存在 mr_code_facts 时，将代码级别的事实格式化为
+    prompt 文本，注入到 checkpoint 生成流程中，使生成的检查点
+    同时覆盖代码变更维度。
+
+    Args:
+        mr_code_facts: MR 代码事实列表，每个元素可能是 MRCodeFact 对象或 dict。
+
+    Returns:
+        prompt 文本片段，若无事实则返回空字符串。
+    """
+    if not mr_code_facts:
+        return ""
+
+    lines = [
+        "\n\n## MR 代码变更事实",
+        "以下是从 MR 代码变更中提取的事实，请将其纳入检查点生成考量：",
+        "",
+    ]
+
+    for i, fact in enumerate(mr_code_facts, start=1):
+        if hasattr(fact, "description"):
+            desc = fact.description
+            file_path = getattr(fact, "file_path", "")
+            change_type = getattr(fact, "change_type", "")
+            fact_id = getattr(fact, "fact_id", f"MR-FACT-{i:03d}")
+        elif isinstance(fact, dict):
+            desc = fact.get("description", "")
+            file_path = fact.get("file_path", "")
+            change_type = fact.get("change_type", "")
+            fact_id = fact.get("fact_id", f"MR-FACT-{i:03d}")
+        else:
+            continue
+
+        line = f"- [{fact_id}]"
+        if change_type:
+            line += f" ({change_type})"
+        line += f" {desc}"
+        if file_path:
+            line += f"  [文件: {file_path}]"
+        lines.append(line)
+
+    lines.append("")
+    lines.append(
+        "请为上述代码变更事实生成对应的检查点，"
+        "将其与 PRD 事实生成的检查点一起输出。"
+        "代码变更事实的 fact_ids 使用上方标注的 MR-FACT-xxx 格式。"
+    )
+
+    return "\n".join(lines)
+
+
 def build_checkpoint_generator_node(llm_client: LLMClient):
     """构建检查点生成节点的工厂函数。
 
@@ -161,9 +219,10 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
         1. 从 research_output 中提取 facts
         2. 如果 facts 为空，则从 feature_topics / user_scenarios 合成基础 facts
         3. 构造 prompt 发送给 LLM（如有模版叶子，注入绑定指令）
-        4. 为每个返回的 checkpoint 生成稳定 ID
-        5. 关联证据引用
-        6. 后处理：校验模版叶子 ID、回填路径、标记低置信度
+        4. 如果存在 mr_code_facts，注入代码变更事实到 prompt
+        5. 为每个返回的 checkpoint 生成稳定 ID
+        6. 关联证据引用
+        7. 后处理：校验模版叶子 ID、回填路径、标记低置信度
         """
         research_output = state["research_output"]
         facts = research_output.facts
@@ -198,6 +257,17 @@ def build_checkpoint_generator_node(llm_client: LLMClient):
         xmind_ref_section = _build_xmind_reference_prompt(state.get("xmind_reference_summary"))
         if xmind_ref_section:
             prompt += xmind_ref_section
+
+        # ---- MR 代码事实注入 ----
+        mr_code_facts = state.get("mr_code_facts", [])
+        if mr_code_facts:
+            logger.info(
+                "MR code facts available for checkpoint generation: %d facts",
+                len(mr_code_facts),
+            )
+            mr_facts_section = _build_mr_code_facts_prompt(mr_code_facts)
+            if mr_facts_section:
+                prompt += mr_facts_section
 
         response = llm_client.generate_structured(
             system_prompt=_SYSTEM_PROMPT,
