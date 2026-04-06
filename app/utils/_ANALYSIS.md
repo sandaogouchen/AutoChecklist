@@ -1,64 +1,281 @@
-# app/utils/_ANALYSIS.md — 工具函数分析
+# app/utils/ Directory Analysis
 
-> 分析分支自动生成 · 源分支 `main`
+## §12.1 Directory Overview
+
+The `app/utils/` directory provides **shared utility infrastructure** used across multiple layers of the AutoChecklist system. It contains three focused modules:
+
+1. **`filesystem.py`** -- Core file I/O primitives (directory creation, JSON read/write, text write) used by all repository classes and other modules needing filesystem access.
+2. **`run_id.py`** -- UTC+8 timestamp-based run identifier generation with conflict detection, used to create unique, human-readable run directory names.
+3. **`timing.py`** -- Node-level execution timing infrastructure for the LangGraph pipeline, providing non-invasive profiling of workflow nodes.
+
+**Design Philosophy**: These utilities are stateless, side-effect-contained functions and classes. They have no domain knowledge -- they provide generic capabilities that any module can use. The exception is `timing.py`, which has some awareness of LangGraph node conventions and known LLM-calling node names.
 
 ---
 
-## §1 目录概述
+## §12.2 File Analysis
 
-| 维度 | 值 |
-|------|-----|
-| 路径 | `app/utils/` |
-| 文件数 | 3（含 `__init__.py`） |
-| 分析文件 | 2 |
-| 目录职责 | 底层工具函数：文件 I/O 辅助与运行 ID 生成 |
-| 依赖层级 | 项目最底层模块，无内部依赖 |
+### §12.2.1 filesystem.py
 
-## §2 文件清单
+**Type**: Type C -- Infrastructure Utility  
+**Criticality**: **MEDIUM** (foundational, used by all repositories)  
+**Lines**: ~65  
+**Primary Exports**: `ensure_directory()`, `write_json()`, `read_json()`, `write_text()`
 
-| # | 文件 | 类型 | 行数(估) | 核心导出 |
-|---|------|------|----------|----------|
-| 1 | `__init__.py` | - | 0 | 空 |
-| 2 | `filesystem.py` | G-工具 | ~40 | `ensure_directory()`, `save_json()`, `load_json()`, `save_text()` |
-| 3 | `run_id.py` | G-工具 | ~15 | `generate_run_id()` |
+#### Function Inventory
 
-## §3 逐文件分析
+| Function | Purpose | Key Behavior |
+|---|---|---|
+| `ensure_directory(path)` | Create directory (recursive) | `mkdir(parents=True, exist_ok=True)`, returns `Path` |
+| `write_json(path, payload)` | Serialize and write JSON | Auto-creates parent dirs, handles Pydantic models |
+| `read_json(path)` | Read and deserialize JSON | Raises `FileNotFoundError` / `JSONDecodeError` |
+| `write_text(path, content)` | Write plain text | Auto-creates parent dirs, UTF-8 encoding |
 
-### §3.1 filesystem.py
+#### Pydantic-Aware JSON Serialization
 
-- **类型**: G-工具函数
-- **职责**: 封装文件系统 I/O 操作，提供统一的 JSON/文本读写接口
-- **函数清单**:
-  | 函数 | 职责 | 参数 |
-  |------|------|------|
-  | `ensure_directory(path)` | 确保目录存在，不存在则递归创建 | Path |
-  | `save_json(path, data)` | 将数据保存为 JSON 文件 | Path, Any |
-  | `load_json(path)` | 从 JSON 文件加载数据 | Path → Any |
-  | `save_text(path, content)` | 将文本保存到文件 | Path, str |
-- **JSON 配置**: `ensure_ascii=False`（保留中文原文）, `indent=2`（可读性）
-- **设计**: 纯函数，无状态，无副作用（除 I/O 本身）
-- **调用方**: `RunRepository`, `RunStateRepository`, `PlatformDispatcher`
+The internal `_to_jsonable(payload)` function recursively converts payloads to JSON-serializable types:
 
-### §3.2 run_id.py
+```python
+def _to_jsonable(payload):
+    if isinstance(payload, BaseModel):
+        return payload.model_dump(mode="json")
+    if isinstance(payload, dict):
+        return {key: _to_jsonable(value) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_to_jsonable(item) for item in payload]
+    return payload
+```
 
-- **类型**: G-工具函数
-- **职责**: 生成全局唯一的运行 ID
-- **ID 格式**: `run_YYYYMMDD_HHMMSS_{4-char-uuid}`
-  - 示例：`run_20260315_143052_a1b2`
-  - 时间部分：UTC+8（北京时间）
-  - 随机部分：UUID4 前 4 位十六进制字符
-- **碰撞概率分析**:
-  | 场景 | 同秒并发 | 碰撞概率 |
-  |------|---------|----------|
-  | 单用户 | 1 | ~0 |
-  | 小团队 | 2-3 | ~1/65536 |
-  | 高并发 | 10+ | 需考虑 |
-- **时区选择**: 硬编码 UTC+8，适合中国团队使用场景。跨时区部署需注意 ID 的时间语义
+This handles:
+- **Pydantic BaseModel instances** -> converted via `model_dump(mode="json")`
+- **Nested dicts** -> recursively process values
+- **Lists** -> recursively process elements
+- **Primitives** -> pass through to `json.dumps()`
 
-## §4 补充观察
+The `mode="json"` parameter ensures Pydantic uses JSON-compatible types (e.g., `datetime` -> ISO string, `Enum` -> value).
 
-1. **依赖图底层**: `utils` 不依赖任何 `app.*` 模块，仅使用标准库（`pathlib`, `json`, `datetime`, `uuid`）。这是正确的依赖方向
-2. **缺少原子写入**: `save_json()` 和 `save_text()` 使用标准 `open()` 写入，非原子操作。建议改用"写入临时文件 → `os.rename()`"模式
-3. **缺少 `parse_run_id()`**: 有生成但无解析，无法从 ID 中提取时间信息。建议添加反向解析函数
-4. **缺少 `get_data_dir()`**: 数据目录路径分散在各 repository 中硬编码。建议集中到 utils 或 settings
-5. **可测试性**: 纯函数设计使单元测试简单直接，配合 `tmp_path` fixture 即可
+#### JSON Formatting
+
+`write_json()` uses `json.dumps(..., ensure_ascii=False, indent=2)`:
+- `ensure_ascii=False` -- preserves Chinese characters as-is (critical for this project's Chinese-language output)
+- `indent=2` -- human-readable formatting (important for debugging run artifacts)
+
+#### Error Handling Strategy
+
+- **Write operations**: Implicitly raise `OSError` on permission/disk issues (no catch/wrap)
+- **Read operations**: `read_json()` propagates `FileNotFoundError` and `json.JSONDecodeError` without wrapping
+- This is intentional -- callers are expected to handle storage errors at the appropriate level
+
+---
+
+### §12.2.2 run_id.py
+
+**Type**: Type C -- Infrastructure Utility  
+**Criticality**: **LOW-MEDIUM**  
+**Lines**: ~55  
+**Primary Export**: `generate_run_id()` function
+
+#### ID Format and Generation
+
+```
+Format: YYYY-MM-DD_HH-mm-ss
+Example: 2026-04-06_14-30-00
+```
+
+The run_id serves dual purposes:
+1. **Unique identifier** for API responses and internal references
+2. **Directory name** under `output/runs/` for artifact storage
+
+#### Timezone Handling
+
+Uses `zoneinfo.ZoneInfo("Asia/Shanghai")` (UTC+8) explicitly, not the system default timezone. This ensures:
+- Consistent IDs regardless of server timezone setting
+- Human-readable timestamps in the team's local timezone
+- Deterministic behavior across different deployment environments
+
+#### Conflict Resolution Strategy
+
+```
+1. Try base ID: "2026-04-06_14-30-00"
+2. If exists: try "2026-04-06_14-30-00_2"
+3. If exists: try "2026-04-06_14-30-00_3"
+   ...
+100. If exists: try "2026-04-06_14-30-00_101"
+101. Fallback: use UUID hex (32 characters)
+```
+
+The conflict check uses `(root / candidate).exists()` -- a filesystem existence check on the target directory path. The sequential numbering provides human-readable disambiguation for rapid successive runs, while the UUID fallback ensures uniqueness under extreme conditions.
+
+**`_MAX_CONFLICT_RETRIES = 100`**: This limit is generous -- hitting it would require 100+ runs within the same second, which is implausible in normal operation. The UUID fallback logs a warning, signaling an unusual condition.
+
+#### Edge Cases
+
+- Multiple workers generating IDs simultaneously could race, but the filesystem existence check provides eventual uniqueness (at worst, two workers might skip the same suffix and both get unique IDs)
+- The UUID fallback breaks the timestamp-based naming convention but maintains uniqueness
+
+---
+
+### §12.2.3 timing.py
+
+**Type**: Type B -- Observability Infrastructure  
+**Criticality**: **MEDIUM**  
+**Lines**: ~280  
+**Primary Exports**: `NodeTimer`, `TimingRecord`, `wrap_node()`, `maybe_wrap()`, `log_timing_report()`
+
+#### Architecture Overview
+
+The timing module provides a **non-invasive profiling system** for LangGraph workflow nodes. It wraps individual node functions to measure execution time without modifying the node implementations.
+
+```
+[Node Function] → wrap_node() → [Wrapped Function]
+                                     │
+                                     ├─ Records start time
+                                     ├─ Calls original function
+                                     ├─ Records end time
+                                     ├─ Stores TimingRecord in NodeTimer
+                                     └─ Logs timing info
+```
+
+#### TimingRecord Dataclass
+
+| Field | Type | Purpose |
+|---|---|---|
+| `node_name` | `str` | Node identifier |
+| `elapsed_seconds` | `float` | Wall-clock execution time |
+| `is_llm_node` | `bool` | Whether this node contains LLM calls |
+| `iteration_index` | `int` | Which iteration this timing belongs to |
+| `timestamp_start` | `str` | ISO UTC timestamp at start |
+| `timestamp_end` | `str` | ISO UTC timestamp at end |
+| `had_error` | `bool` | Whether the node raised an exception |
+| `is_internal` | `bool` | Whether this is an infrastructure record |
+
+#### NodeTimer Class
+
+A mutable container that accumulates `TimingRecord` entries with filtering and aggregation capabilities:
+
+**Recording**: `record(name, elapsed, is_llm_node, ...)` appends a new `TimingRecord`
+
+**Retrieval**:
+- `get_records(iteration_index, include_internal)` -- filtered record access
+- `get_all_records()` -- unfiltered access
+- `total_seconds(iteration_index)` -- sum of non-internal elapsed times
+- `llm_seconds(iteration_index)` -- sum of LLM node elapsed times
+
+**Export**: `to_dict()` produces a serializable summary:
+```json
+{
+    "iterations": {"0": [...records...], "1": [...records...]},
+    "internal": [...internal records...],
+    "total_pipeline_seconds": 45.2,
+    "total_llm_nodes_seconds": 38.7,
+    "llm_ratio": 0.856
+}
+```
+
+The `llm_ratio` metric is particularly valuable -- it shows what fraction of pipeline time is spent on LLM calls, which is typically the dominant cost factor.
+
+#### LLM Node Auto-Detection
+
+```python
+_LLM_NODE_NAMES: frozenset[str] = frozenset({
+    "context_research",
+    "checkpoint_generator",
+    "checkpoint_outline_planner",
+    "draft_writer",
+})
+```
+
+When `is_llm_node=None` (default), `wrap_node()` automatically checks this set to classify nodes. This hardcoded set must be kept in sync with actual LLM-calling nodes in the pipeline, which is a maintenance concern (new LLM nodes could be missed).
+
+**Notably missing**: `mr_analyzer` is an LLM-calling node (§6.2.2) but is not in this set. This means MR analysis time is not tracked as LLM time in the profiling reports.
+
+#### `wrap_node()` Implementation
+
+```python
+def wrap_node(name, fn, timer, is_llm_node=None, iteration_index=0):
+    @functools.wraps(fn)
+    def wrapper(state):
+        ts_start = _now_iso()
+        start = time.monotonic()
+        had_error = False
+        try:
+            result = fn(state)
+            return result
+        except Exception:
+            had_error = True
+            raise
+        finally:
+            elapsed = time.monotonic() - start
+            # ... record timing ...
+    return wrapper
+```
+
+Key design points:
+- Uses `time.monotonic()` for elapsed time (immune to system clock changes)
+- `functools.wraps(fn)` preserves the original function's metadata
+- Error tracking via `finally` block -- timing is recorded even on failure
+- Uses a dedicated `timing_logger` (named `app.timing`) for timing-specific log output
+
+#### `maybe_wrap()` Convenience
+
+```python
+def maybe_wrap(name, fn, timer, iteration_index):
+    if timer is None:
+        return fn
+    return wrap_node(name, fn, timer, iteration_index=iteration_index)
+```
+
+This is used extensively in both `main_workflow.py` and `case_generation.py` (§6) when adding nodes to the graph builder. It allows timer to be optional without littering the graph construction code with conditional checks.
+
+#### `log_timing_report()` Reporting
+
+Produces a formatted console report:
+
+```
+[TIMING] ═══ Timing Report (iteration 0) ═══
+[TIMING] input_parser                    :     0.12s
+[TIMING] template_loader                 :     0.05s
+[TIMING] context_research                :    12.34s  ⚠ LLM
+[TIMING] checkpoint_generator            :    15.67s  ⚠ LLM
+[TIMING] ──────────────────────────────────────────────
+[TIMING] Total pipeline                  :    45.20s
+[TIMING] Total LLM nodes                 :    38.70s (85.6%)
+[TIMING] ══════════════════════════════════════════════
+```
+
+Also returns a serializable dict with the same data for persistence in run artifacts.
+
+---
+
+## §12.3 Key Findings
+
+1. **Chinese character preservation**: The `ensure_ascii=False` in `write_json()` is essential for this project, which generates Chinese-language test cases. Without it, all Chinese text would be escaped to `\uXXXX` sequences in the JSON files, making them unreadable.
+
+2. **UTC+8 hardcoded timezone**: The run_id generator uses a hardcoded `Asia/Shanghai` timezone. This is appropriate for the current team but would need parameterization for global deployment.
+
+3. **Missing LLM node in timing set**: `mr_analyzer` performs LLM calls but is not in `_LLM_NODE_NAMES`. This means timing reports under-report the LLM ratio when MR analysis is active. The `build_coco_consistency_validator_node` and `checkpoint_outline_planner` (which is listed) are other nodes worth verifying.
+
+4. **No async timing support**: `wrap_node()` only handles synchronous node functions. If any node were to become async (e.g., the knowledge retrieval node), the timing wrapper would need an async variant.
+
+5. **Race condition in run_id generation**: Under concurrent requests, two threads could check the same directory, find it doesn't exist, and both generate the same run_id. In practice, the filesystem `mkdir` call in downstream code would cause one to succeed and the other to get a directory that already exists (harmless with `exist_ok=True`), but the two runs would share the same directory, which would be problematic. The synchronous endpoint model (§3) makes this unlikely in the current architecture.
+
+6. **Internal record separation**: The timing system distinguishes between regular node records and "internal" records (like workflow-level overhead). This prevents infrastructure overhead from inflating per-node timing metrics -- a thoughtful design for accurate profiling.
+
+7. **Monotonic time is correct**: Using `time.monotonic()` instead of `time.time()` ensures elapsed time measurements are not affected by NTP adjustments or system clock changes. This is a best practice for performance measurement.
+
+---
+
+## §12.4 Cross-References
+
+| Reference | Target | Relationship |
+|---|---|---|
+| `ensure_directory` used by | `app/repositories/run_repository.py` (§9) | Directory creation for run artifacts |
+| `write_json`, `read_json` used by | `app/repositories/run_repository.py` (§9) | JSON artifact I/O |
+| `write_json`, `read_json` used by | `app/repositories/run_state_repository.py` (§9) | State persistence I/O |
+| `write_text` used by | `app/repositories/run_repository.py` (§9) | Text artifact output |
+| `generate_run_id` used by | `app/services/workflow_service.py` | Run identifier creation |
+| `NodeTimer` used by | `app/graphs/main_workflow.py` (§6) | Main workflow timing |
+| `NodeTimer` used by | `app/graphs/case_generation.py` (§6) | Sub-graph timing |
+| `maybe_wrap` used by | `app/graphs/main_workflow.py` (§6) | Conditional node wrapping |
+| `maybe_wrap` used by | `app/graphs/case_generation.py` (§6) | Conditional node wrapping |
+| `log_timing_report` used by | `app/services/workflow_service.py` | Report generation after run |
+| Timing data persisted by | `app/repositories/run_repository.py` (§9) | Saved as run artifact |
