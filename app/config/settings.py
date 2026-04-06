@@ -7,6 +7,7 @@
 新增 llm_max_retries / llm_retry_* / llm_fallback_* 系列配置项，
 支持 LLM 调用重试与模型降级。
 新增 CocoSettings，支持 Coco Agent 代码搜索配置。
+新增 checkpoint_batch_* 配置项，支持 Checkpoint 分批规划。
 """
 
 from __future__ import annotations
@@ -43,6 +44,10 @@ class Settings(BaseSettings):
 
     # ---- Checklist 优化配置 ----
     enable_checklist_optimization: bool = True
+
+    # ---- Checkpoint 分批规划配置 ----
+    checkpoint_batch_threshold: int = 20
+    checkpoint_batch_size: int = 20
 
     # ---- 模版配置 ----
     template_dir: str = "templates"
