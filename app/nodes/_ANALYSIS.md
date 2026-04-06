@@ -1,349 +1,937 @@
-# app/nodes/_ANALYSIS.md — 工作流节点分析
-> 分析分支自动生成 · 源分支 `main`
+# app/nodes/ Directory Analysis
+
+> Auto-generated analysis for the LangGraph pipeline nodes of AutoChecklist
+
+## §7.1 Directory Overview
+
+| Property | Value |
+|----------|-------|
+| Path | `app/nodes/` |
+| Total Files | 18 |
+| Total Lines | 4,178 |
+| Main Purpose | LangGraph workflow node implementations |
+
+All 18 files implement pipeline steps for AutoChecklist's LangGraph-based test case generation workflow. Nodes follow a consistent pattern: a factory function (`build_*_node()`) captures dependencies (typically `LLMClient`) via closure and returns a callable with signature `(state: dict) -> dict` that reads from and writes incremental updates to a shared `CaseGenState` or `GlobalState`.
+
+**Line counts by file:**
+
+| File | Lines | Category |
+|------|-------|----------|
+| `mr_analyzer.py` | 763 | MR analysis (largest) |
+| `draft_writer.py` | 518 | Draft generation |
+| `checkpoint_generator.py` | 514 | Checkpoint generation |
+| `coco_consistency_validator.py` | 393 | Code consistency |
+| `evaluation.py` | 351 | Quality evaluation |
+| `structure_assembler.py` | 321 | Structure assembly (CRITICAL) |
+| `mr_checkpoint_injector.py` | 308 | MR checkpoint injection |
+| `reflection.py` | 203 | Quality reflection |
+| `scenario_planner.py` | 124 | Scenario planning |
+| `knowledge_retrieval.py` | 99 | Knowledge retrieval |
+| `context_research.py` | 92 | Context research |
+| `project_context_loader.py` | 89 | Project context |
+| `xmind_reference_loader.py` | 85 | XMind reference loading |
+| `evidence_mapper.py` | 79 | Evidence mapping |
+| `template_loader.py` | 73 | Template loading |
+| `checklist_optimizer.py` | 60 | Checklist optimization (CRITICAL/ORPHANED) |
+| `input_parser.py` | 54 | Input parsing |
+| `checkpoint_evaluator.py` | 52 | Checkpoint evaluation |
+
 ---
-## §1 目录概述
-| 维度 | 值 |
-|------|-----|
-| 路径 | `app/nodes/` |
-| 文件数 | 13（含 `__init__.py`） |
-| 分析文件 | 12（排除空 `__init__.py`） |
-| 目录职责 | LangGraph 工作流节点层：每个文件导出 `build_*_node()` 工厂函数，封装单步业务逻辑 |
-| 设计模式 | 工厂闭包模式 — 外层注入 LLMClient/Settings 依赖，返回 `async def node(state) → dict` |
-## §2 文件清单
-| # | 文件 | 工厂函数 | 使用LLM | 流水线位置 | 核心输出字段 |
-|---|------|----------|---------|-----------|-------------|
-| 1 | input_parser.py | build_input_parser_node | 否 | 主图·入口 | parsed_document |
-| 2 | project_context_loader.py | build_project_context_loader_node | 否 | 主图·可选 | project_context |
-| 3 | context_research.py | build_context_research_node | 是 | 主图 | research_facts, planned_scenarios |
-| 4 | scenario_planner.py | build_scenario_planner_node | 否 | 子图·入口 | planned_scenarios (pass-through) |
-| 5 | checkpoint_generator.py | build_checkpoint_generator_node | 是 | 子图 | checkpoints |
-| 6 | checkpoint_evaluator.py | build_checkpoint_evaluator_node | 是 | 子图 | checkpoints (filtered/revised) |
-| 7 | checklist_optimizer.py | build_checklist_optimizer_node | 是 | ⚠️ 未启用 | optimized_tree |
-| 8 | checkpoint_outline_planner.py | build_checkpoint_outline_planner_node | 是 | 子图 | optimized_tree |
-| 9 | evidence_mapper.py | build_evidence_mapper_node | 是 | 子图 | evidence_map |
-| 10 | draft_writer.py | build_draft_writer_node | 是 | 子图 | test_cases |
-| 11 | evaluation.py | build_evaluation_node | 否 | 主图·反思 | evaluation_report |
-| 12 | reflection.py | build_reflection_node | 否 | 主图·反思 | final response |
-| - | structure_assembler.py | build_structure_assembler_node | 否 | 子图·出口 | optimized_tree (final) |
-| - | template_loader.py | build_template_loader_node | 否 | 主图·模版 | project_template, template_leaf_targets, mandatory_skeleton |
-## §3 逐文件分析
-### §3.1 input_parser.py
-- **类型**: B-流程编排
-- **职责**: 解析原始 PRD 文本，通过 DocumentParser 生成 ParsedDocument
-- **签名**: `build_input_parser_node(parser: DocumentParser) → Callable`
-- **输入**: `state["prd_content"]`
-- **输出**: `{"parsed_document": ParsedDocument}`
-- **设计**: 纯转换节点，无 LLM 调用，无副作用
-### §3.2 project_context_loader.py
-- **类型**: B-流程编排
-- **职责**: 从 SQLite 加载项目上下文（历史测试用例、项目特定规则）
-- **签名**: `build_project_context_loader_node(service: ProjectContextService) → Callable`
-- **条件执行**: 仅当 `state["project_id"]` 非空时触发
-- **输出**: `{"project_context": ProjectContext | None}`
-### §3.3 context_research.py
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: LLM 驱动的上下文研究，从 PRD 章节提取 ResearchFact 和 PlannedScenario
-- **LLM 策略**: 使用 `generate_structured()` + `ResearchOutput` schema，逐章节调用
-- **输入**: `parsed_document.sections`
-- **输出**: `{"research_facts": list[ResearchFact], "planned_scenarios": list[PlannedScenario]}`
-- **防御设计**: ResearchOutput 的 model_validator 处理 LLM 输出的 str→list 畸变
-### §3.4 scenario_planner.py
-- **类型**: B-流程编排
-- **职责**: 分发 PlannedScenario，当前为直接透传
-- **现状**: pass-through 实现，预留为未来场景拆分/优先级排序扩展点
-### §3.5 checkpoint_generator.py
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: LLM 将 ResearchFact 转换为 Checkpoint
-- **核心逻辑**:
-- 使用 CheckpointDraft 中间模型接收 LLM 输出
-- 前置条件 str→list 强制转换（应对 LLM 输出不一致）
-- SHA-256 稳定 ID 生成：`hash(title + description + test_objective)`
-- **输出**: `{"checkpoints": list[Checkpoint]}`
-### §3.6 checkpoint_evaluator.py
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: LLM 评估 checkpoint 质量，可请求重新生成
-- **评估维度**: 完整性、可测试性、非冗余性
-- **输出**: 过滤/修订后的 checkpoints
-### §3.7 checklist_optimizer.py ⚠️
-- **类型**: A-核心算法 + C-LLM集成
-- **状态**: **已弃用 — 未纳入当前子图流水线**
-- **原始设计**: `SemanticPathNormalizer.normalize()` → `ChecklistMerger.merge()`
-- Phase 1: LLM 两阶段路径归一化
-- Phase 2: Trie 树合并为 ChecklistNode 层级
-- **被替代原因**: 路径归一化质量不稳定，trie 合并产生不合理层级
-- **容错设计**: 异常时返回空 `optimized_tree`，不阻断流水线
-- **保留价值**: 两阶段归一化思路值得在改进方案中复用
-### §3.8 checkpoint_outline_planner.py（节点）
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: 调用 CheckpointOutlinePlanner 服务，从 checkpoints 创建 CanonicalOutlineNode 树
-- **核心流程**:
-1. 收集所有 checkpoint 标题 → 输入 LLM
-2. LLM 生成层级 outline JSON
-3. 解析为 CanonicalOutlineNode 树
-- **输出**: `{"optimized_tree": list[ChecklistNode]}`（通过 attach 转换）
-### §3.9 evidence_mapper.py
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: LLM 将 research_facts 中的证据映射到对应 checkpoint
-- **输出**: `{"evidence_map": list[EvidenceRef]}`
-### §3.10 draft_writer.py ⭐
-- **类型**: A-核心算法 + C-LLM集成
-- **职责**: LLM 基于 checkpoint + evidence 生成 TestCase
-- **关键特性**:
-- **_SYSTEM_PROMPT** 包含 5 条前置条件编写规则：
-1. 归一化：统一措辞格式
-2. 层级性：体现测试场景的层级关系
-3. 原子性：每条前置条件只描述一个状态
-4. 充分性：覆盖测试执行所需全部前提
-5. 复用感知：相似前置条件使用一致表述
-- **_resolve_path_context()**: 从 optimized_tree 提取层级路径注入 prompt
-- **Checklist 整合关键点**: 此处是 outline 结构影响测试用例生成的核心节点
-### §3.11 evaluation.py
-- **类型**: A-核心算法
-- **职责**: 6 维度评估测试用例集质量
-- **评估维度**:
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| fact_coverage | 高 | 研究事实覆盖率 |
-| checkpoint_coverage | 高 | 检查点覆盖率 |
-| evidence_completeness | 中 | 证据引用完整度 |
-| duplicate_rate | 中 | 重复率（越低越好） |
-| case_completeness | 中 | 用例字段完整度 |
-| branch_coverage | 低 | 分支覆盖率 |
-- **输出**: `EvaluationReport(overall_score, pass_)`
-### §3.12 reflection.py
-- **类型**: A-核心算法
-- **职责**: 最终反思节点 — 去重、质量检查、构建最终响应
-- **去重策略**: 基于 `checkpoint_id` 去重，保留首条
-- **覆盖计算**: `covered_checkpoints / total_checkpoints`
-- **输出**: 构建 `CaseGenerationResponse` 返回给 API 层
-### §3.13 structure_assembler.py ⭐ (PR #23 大幅增强)
-- **类型**: A-核心算法 + B-流程编排
-- **职责**: 组装并标准化测试用例 + **强制约束最终防线** + source 标注
-- **角色**: 从被动组装升级为主动约束执行者
-**原有功能**（保留）:
-- 遍历 draft 用例，补全 ID、列表字段、证据引用
-- 从 checkpoint 继承模版绑定字段（兆底补全）
-- 调用 `normalize_test_case()` 文本归一化
-- 调用 `attach_expected_results_to_outline()` 挂载 expected_results
-**PR #23 新增功能：**
-| 新增函数 | 签名 | 说明 |
-|----------|------|------|
-| `_enforce_mandatory_constraints()` | `(tree, skeleton) → list[ChecklistNode]` | 强制约束最终防线 |
-| `_restore_or_merge()` | `(sk_node, tree_lookup) → ChecklistNode` | 从树中查找或从骨架复原节点 |
-| `_annotate_source()` | `(tree, skeleton) → None` | 为每个节点标注 source 字段 |
-| `_set_source_recursive()` | `(node, skeleton_ids) → None` | 递归设置 source 标记 |
-| `_collect_skeleton_ids()` | `(node) → set[str]` | 收集骨架所有节点 ID |
-| `_index_tree()` | `(tree, lookup) → None` | 递归索引树节点 |
-**`_enforce_mandatory_constraints()` — 最终防线策略：**
-```
-输入: optimized_tree (已挂载 expected_results) + mandatory_skeleton
-│
-├── 1. 收集骨架所有节点 ID → skeleton_ids
-├── 2. 索引树所有节点 → tree_lookup
-│
-├── 3. 遍历骨架顶层子节点:
-│ └── _restore_or_merge():
-│ ├── 在 tree_lookup 中查找对应节点
-│ ├── 递归处理子骨架节点 → merged_children
-│ ├── 保留已有节点的非骨架子节点
-│ └── 构建 ChecklistNode:
-│ node_id = sk_node.id
-│ title = sk_node.title
-│ source = "template"
-│ is_mandatory = sk_node.is_mandatory
-│ priority = original_metadata["priority"]
-│
-├── 4. 收集非骨架的顶层节点 → overflow_cases
-│ ├── 计算溢出比例 = overflow / total
-│ ├── 比例 > 20%? → logger.warning 告警
-│ └── 包装为 ChecklistNode:
-│ node_id = "_overflow"
-│ title = "待分配 (Overflow)"
-│ source = "overflow"
-│
-└── 返回: 合并后的树
-```
-**`_annotate_source()` — 来源标注：**
-- 骨架 ID 集合中的节点 → `source = "template"`, `is_mandatory = True`
-- `_overflow` 节点 → `source = "overflow"`
-- 其他节点 → 保留默认 `source = "generated"`
-**溢出机制设计分析：**
-- 阈值 20% 是经验值，含义是"如果超过 1/5 的节点无法匹配到模版骨架，说明模版与实际 PRD 的匹配度不足"
-- 溢出节点不丢弃（收集到 `_overflow` 容器），确保信息不丢失
-- `_overflow` 容器在 Markdown 渲染时标记为 `[待分配]`，在 XMind 中标记为红色旗标，引导人工分配
-**与 checkpoint_outline_planner._enforce_mandatory_skeleton() 的关系：**
-- `checkpoint_outline_planner` 是第一道防线（在 outline 规划阶段修复）
-- `structure_assembler` 是最终防线（在用例组装阶段再次修复）
-- 两道防线的逻辑相似但独立：即使 planner 的修复遗漏了某些情况，assembler 会兆底
-- 设计意图：关键约束的"防御性深度"——宁可重复检查也不遗漏
-### §3.14 template_loader.py（节点）(PR #23 增强)
-- **类型**: B-流程编排
-- **职责**: 从工作流状态中读取模版文件路径或名称，加载模版，构建强制骨架
-- **签名**: `build_template_loader_node() → Callable`
-- **条件执行**: 当 `template_file_path` 和 `template_name` 均为空时跳过
-- **输出**: `{"project_template": ..., "template_leaf_targets": [...], "mandatory_skeleton": ...}`
-**PR #23 变更：**
-| 变更 | 说明 |
-|------|------|
-| 支持 `template_name` | 除了 `template_file_path`，新增从 `request.template_name` 读取模版名称 |
-| 优先级 | `template_name` 优先于 `template_file_path`（通过 `loader.load_by_name()` 加载） |
-| 骨架构建 | 加载模版后调用 `loader.build_mandatory_skeleton(template)` 构建强制骨架 |
-| 条件输出 | `mandatory_skeleton` 仅在非 None 时写入状态（避免下游错误消费 None 值） |
-**模版加载优先级链：**
-```
-1. state["template_name"] 非空? → loader.load_by_name(template_name)
-2. state["template_file_path"] 非空? → loader.load(template_file_path)
-3. 均为空 → 跳过（返回空 dict）
-```
-**骨架输出逻辑：**
-```python
-mandatory_skeleton = loader.build_mandatory_skeleton(template)
-result = {"project_template": template, "template_leaf_targets": leaf_targets}
-if mandatory_skeleton is not None:
-result["mandatory_skeleton"] = mandatory_skeleton
-return result
-```
-**设计说明：**
-- `mandatory_skeleton` 的条件写入是刻意的——`None` 值不写入状态，确保下游 `state.get("mandatory_skeleton")` 在无约束时返回 `None` 而非被显式设置为 `None`（两者在 LangGraph 的状态合并语义中可能有差异）
-## §4 节点流水线
-### 主图流水线
-```
-START → input_parser → [project_context_loader] → context_research → case_generation_subgraph → reflection → END
-```
-### 子图流水线（case_generation）
-```
-scenario_planner → checkpoint_generator → checkpoint_evaluator → checkpoint_outline_planner → evidence_mapper → draft_writer → structure_assembler
-```
-### 数据流关键路径
-```
-PRD文本 → ParsedDocument → ResearchFact[] → Checkpoint[] → CanonicalOutlineNode[] → ChecklistNode[] → TestCase[] → CaseGenerationResponse
-```
-## §5 补充观察 — Checklist 整合深度分析
-> **用户重点关注**: 此部分是分析的核心焦点。
-### §5.1 当前 Checklist 整合架构全景
-Checklist 整合涉及 4 个节点的协作链：
-```
-checkpoint_outline_planner → evidence_mapper → draft_writer → structure_assembler
-↓ ↓ ↓
-CanonicalOutlineNode树 路径上下文注入(prompt) 挂载expected_results
-↓ ↓ ↓
-optimized_tree TestCase生成 最终ChecklistNode树
-```
-### §5.2 checklist_optimizer 被架空的影响分析
-`build_checklist_optimizer_node()` 虽然代码完整但未接入子图，这意味着：
-1. **SemanticPathNormalizer 的两阶段归一化能力被闲置**
-- Phase 1（路径提取）和 Phase 2（LLM 归一化）的设计思路正确
-- 问题在于执行层面：LLM 输出格式不稳定，缺乏 few-shot 约束
-2. **ChecklistMerger 的 Trie 树合并被放弃**
-- Trie 合并是确定性算法，可重复性好
-- 问题在于路径归一化质量不足导致树结构不合理（过深/过浅/同义重复）
-3. **被 checkpoint_outline_planner 替代的权衡**
-- 优势：LLM 一次性规划更灵活，可理解语义关系
-- 劣势：丧失了确定性，输出不可重复，大量 checkpoint 时质量下降
-### §5.3 checkpoint_outline_planner 的局限性
-1. **单次 LLM 调用的规模瓶颈**
-- 输入：所有 checkpoint 标题（约 20-50 个，每个 50-100 字）
-- Token 估算：输入 2000-5000 tokens + 系统提示 ~1000 tokens
-- 当 checkpoint 超过 30 个时，LLM 层级规划质量显著下降
-2. **缺乏 PRD 结构锚定**
-- 当前仅输入 checkpoint 标题，不包含 PRD 原文章节结构
-- LLM 需要"凭空"创建层级，缺乏领域锚点
-3. **结构化输出脆弱性**
-- 依赖 LLM 生成合法 JSON 树结构
-- 嵌套深度不可控，可能产生单子节点长链
-4. **无质量验证环节**
-- outline 生成后直接进入下游，没有类似 checkpoint_evaluator 的验证节点
-### §5.4 draft_writer 路径注入机制分析
-`_resolve_path_context()` 将 `optimized_tree` 层级路径注入 LLM prompt：
-- **优势**: 为 LLM 提供结构化上下文，指导前置条件和用例组织
-- **风险 1**: 路径上下文过长 → prompt 膨胀 → 挤压生成空间
-- **风险 2**: 固定路径 → 限制 LLM 对边界场景的创造性组织
-- **风险 3**: 路径查找失败时（checkpoint 未匹配到 outline 节点）→ 降级为无上下文生成，质量断崖
-### §5.5 structure_assembler 的角色升级 (PR #23)
-**PR #23 前**:
-- 仅执行 `attach_expected_results_to_outline()` → 字符串匹配挂载
-- 不做任何智能整合（不合并相似 expected_results，不检测遗漏）
-- 是质量损失链中的"透明管道"
-**PR #23 后**:
-- 新增 `_enforce_mandatory_constraints()` — 强制约束最终防线
-- 新增 `_annotate_source()` — 来源标注
-- 新增溢出机制 — 未匹配节点收集到 `_overflow` 容器
-- 从"透明管道"升级为"主动约束执行者"，是 Checklist 质量保证链的关键一环
-### §5.6 端到端质量损失链
-```
-checkpoint_outline_planner → evidence_mapper → draft_writer → structure_assembler
-[中风险 ↓] [中风险] [中风险] [低风险]
-· 层级不合理 · 证据错配 · 路径注入失效 · 挂载遗漏
-· 同义节点重复 · 遗漏映射 · 前置条件不一致 · 顺序混乱
-· 单子链过深 · 生成质量波动
-PR #23 缓解: PR #23 缓解:
-· 强制骨架 prompt 注入 · 最终防线修复
-· 后处理修复 · source 标注
-· ↓ 风险从高降为中 · 溢出告警
-```
-### §5.7 改进建议
-> **PR #23 进展**: 短期改进中的"建议 1: PRD 章节锚定"已通过强制模版骨架方式实现（变体）。详见 [services §5.6](../services/_ANALYSIS.md)。
-#### 短期（1-2 周）
-1. **PRD 章节锚定**: 将 PRD 一级/二级标题作为 outline 顶层骨架，LLM 仅规划叶级分组
-2. **分批规划**: 按 PlannedScenario 分组 checkpoint，每组独立 LLM 规划，最后合并
-3. **增加 outline 验证**: 复用 checkpoint_evaluator 模式，对 outline 做完整性/合理性检查
-#### 中期（2-4 周）
-4. **混合方案**: 恢复 SemanticPathNormalizer 做预处理 + CheckpointOutlinePlanner 做精调
-5. **PreconditionGrouper 语义升级**: 用 embedding 相似度替代关键词匹配
-6. **双向验证**: outline 生成后反向验证每个 checkpoint 的归属正确性
-#### 长期（1-2 月）
-7. **多轮迭代 outline**: 参照 case generation 迭代循环，outline 也做多轮评估优化
-8. **结构化模板库**: 构建常见测试场景的标准分类模板，作为 LLM 规划参考
-9. **用户反馈闭环**: 记录人工对 outline 的修改历史，作为未来规划的微调信号
-## §6 PR #24 变更 — 知识检索节点
 
-> 同步自 PR #24 `feat/graphrag-knowledge-retrieval`
+## §7.2 Pipeline Execution Order
 
-PR #24 新增 `knowledge_retrieval.py` 节点文件，并修改 `context_research.py` 以注入知识上下文。
+The pipeline is split into a **main workflow** (defined in `graphs/main_workflow.py`) and a **case generation subgraph** (defined in `graphs/case_generation.py`).
 
-### §6.1 新增文件：knowledge_retrieval.py
+### §7.2.1 Main Workflow (GlobalState)
 
-- **类型**: N-工作流节点
-- **行数**: ~95
-- **职责**: 工厂闭包模式构建知识检索节点，执行检索并将结果写入 GlobalState
+```
+START
+  → input_parser                    # Parse PRD document
+  → template_loader                 # Load project checklist template
+  → [xmind_reference_loader]       # Optional: load XMind reference
+  → [project_context_loader]       # Optional: load project context
+  → [knowledge_retrieval]          # Optional: GraphRAG knowledge retrieval
+  → context_research               # LLM-based PRD context extraction
+  → case_generation (subgraph)     # ← Entire subgraph invoked as one node
+  → reflection                     # Quality check and deduplication
+  → END
+```
 
-#### 工厂函数
+Nodes in brackets `[]` are optional -- added to the graph only when their factory dependencies are provided.
+
+### §7.2.2 Case Generation Subgraph (CaseGenState)
+
+```
+START
+  → mr_analyzer                    # MR diff analysis + agentic code search
+  → mr_checkpoint_injector         # Convert MR code facts → checkpoints
+  → scenario_planner               # Plan test scenarios from research output
+  → checkpoint_generator           # Convert facts → explicit checkpoints (LLM)
+  → checkpoint_evaluator           # Deduplicate checkpoints, init coverage
+  → coverage_detector              # Detect checkpoint/XMind leaf coverage
+  → checkpoint_outline_planner     # Build shared hierarchy (optimized_tree) ← SERVICE, not in nodes/
+  → evidence_mapper                # Map scenarios to PRD evidence
+  → draft_writer                   # Generate test case drafts (LLM)
+  → coco_consistency_validator     # Optional: Coco Agent code consistency check
+  → structure_assembler            # Standardize, assemble, enforce constraints
+  → END
+```
+
+**Critical observation:** `checklist_optimizer.py` is **NOT registered** in either graph. It is an orphaned file. The `optimized_tree` is now produced by `checkpoint_outline_planner` (a service in `services/`) and then rewritten by `structure_assembler`. See §7.3.1 for detailed analysis.
+
+### §7.2.3 State Bridge
+
+The subgraph is connected to the main graph via `state_bridge.build_bridge()`, which:
+- **Inbound (main → sub):** Auto-forwards shared keys from `GlobalState` to `CaseGenState`
+- **Outbound (sub → main):** Explicit allowlist: `{planned_scenarios, checkpoints, checkpoint_coverage, draft_cases, test_cases, optimized_tree, coverage_result}`
+
+---
+
+## §7.3 File Analysis
+
+### §7.3.1 checklist_optimizer.py -- CRITICAL / ORPHANED
+
+| Property | Value |
+|----------|-------|
+| Lines | 60 |
+| Type | A -- core pipeline node (ORPHANED) |
+| State | `CaseGenState` |
+| Input | `test_cases` |
+| Output | `test_cases`, `optimized_tree` |
+| Dependencies | `SemanticPathNormalizer`, `ChecklistMerger`, `LLMClient` |
+| Registered in graph | **NO -- not registered in any graph** |
+
+#### Detailed Analysis
+
+This file is **the most critical finding in the entire nodes layer**. Despite being documented as a core pipeline node that "runs after structure_assembler," it is **completely orphaned** -- not imported or registered in `case_generation.py` or `main_workflow.py`.
+
+**The file contains only ~2 lines of real logic:**
 
 ```python
-def build_knowledge_retrieval_node(engine: GraphRAGEngine, settings: Settings):
-    async def knowledge_retrieval(state: GlobalState) -> dict:
-        ...
-    return knowledge_retrieval
+normalized_paths = SemanticPathNormalizer(llm_client).normalize(test_cases)
+optimized_tree = ChecklistMerger().merge(normalized_paths)
 ```
 
-- 与项目中 `project_context_loader` 的工厂模式完全一致
-- 闭包捕获 `engine` 和 `settings`，节点函数签名为 `(GlobalState) → dict`
+All meaningful work is delegated to:
+1. `SemanticPathNormalizer` -- LLM-based semantic path normalization
+2. `ChecklistMerger` -- Prefix tree merging
 
-#### 执行流程
+**Timing Conflict (Docstring vs. Reality):**
 
-1. 从 `state["parsed_document"]` 提取已解析的 PRD
-2. 调用 `retrieve_knowledge(engine, parsed_document, mode=settings.knowledge_retrieval_mode)`
-3. 返回 `{"knowledge_context": ..., "knowledge_sources": ..., "knowledge_retrieval_success": ...}`
+The module docstring states:
+```python
+"""Checklist 共享逻辑树优化节点。
+在 ``structure_assembler`` 之后执行：
+1. 使用 LLM 将 ``test_cases`` 归一化为共享语义路径
+2. 将语义路径合并为共享前缀树 ``optimized_tree``
+```
 
-#### 降级策略
+But `structure_assembler` already **produces** `optimized_tree` as its output. If `checklist_optimizer` ran after `structure_assembler`, it would **overwrite** the carefully assembled tree with a freshly generated one from raw test cases, discarding:
+- Template field inheritance
+- Mandatory skeleton enforcement
+- Consistency TODO annotations
+- Source annotations
 
-- **核心原则**: 知识检索失败永远不阻塞主工作流
-- `try/except Exception` 包裹全部检索逻辑
-- 异常时返回 `{"knowledge_context": "", "knowledge_sources": [], "knowledge_retrieval_success": False}`
-- 日志记录异常但不中断
+This means the docstring describes an **impossible** execution order. The node was likely designed for an earlier architecture where `optimized_tree` was built post-assembly, but was superseded by `checkpoint_outline_planner` (which builds the tree pre-draft-writing) and never removed.
 
-### §6.2 修改文件：context_research.py
-
-- **变更范围**: 知识上下文注入
-- **注入方式**: 当 `state.get("knowledge_context")` 非空时，在 LLM prompt 中追加一段 `[Domain Knowledge Reference]` 段落
+**Dual entry points -- legacy compatibility risk:**
 
 ```python
-knowledge_context = state.get("knowledge_context", "")
-if knowledge_context:
-    prompt += f"\n\n[Domain Knowledge Reference]\n{knowledge_context}"
+def build_checklist_optimizer_node(llm_client: LLMClient):
+    """构建使用 LLM 语义归一化的 checklist optimizer 节点。"""
+    def checklist_optimizer_node(state: CaseGenState) -> dict[str, Any]:
+        # ... actual logic with LLM ...
+    return checklist_optimizer_node
+
+def checklist_optimizer_node(state: CaseGenState) -> dict[str, Any]:
+    """兼容旧调用入口。未注入 LLM 客户端时不执行语义优化，直接回退为扁平渲染。"""
+    test_cases = state.get("test_cases", [])
+    return {"test_cases": test_cases, "optimized_tree": []}
 ```
 
-- **设计评价**:
-  1. 条件注入：知识上下文为空时无任何 prompt 变更，不影响 LLM 推理质量
-  2. 标签明确：`[Domain Knowledge Reference]` 标签让 LLM 清楚区分知识上下文与 PRD 正文
-  3. 注入位置合理：context_research 是检索阶段入口，知识上下文在此注入可影响后续所有场景规划
+The module-level `checklist_optimizer_node` function (without LLM) is a no-op fallback that returns an empty tree. This creates a confusing dual-API where the function name is identical but behavior differs depending on which reference is used.
+
+**Exception handling -- all-or-nothing:**
+
+```python
+try:
+    normalized_paths = SemanticPathNormalizer(llm_client).normalize(test_cases)
+    optimized_tree = ChecklistMerger().merge(normalized_paths)
+except Exception:
+    logger.warning(
+        "Checklist semantic optimization failed; returning empty tree",
+        exc_info=True,
+    )
+    optimized_tree = []
+```
+
+Issues:
+- Catch-all `Exception` with no step-level degradation. If normalization succeeds but merging fails, the normalized paths are silently discarded.
+- No logging of what was normalized or merged -- impossible to debug partial failures.
+- Returns empty tree `[]` on any error, forcing downstream to "flat rendering" with no intermediate recovery.
+
+**Feature flag guard without telemetry:**
+
+```python
+settings = get_settings()
+if not settings.enable_checklist_optimization:
+    return {"test_cases": test_cases, "optimized_tree": []}
+```
+
+The feature flag check happens at runtime with no logging when disabled. In production troubleshooting, it would be unclear whether the node was skipped due to the flag or due to being unregistered.
+
+#### Improvement Recommendations
+
+1. **Delete or archive this file.** It is dead code that will confuse future maintainers. The `checkpoint_outline_planner` service has fully replaced its functionality.
+2. If the semantic normalization + merging logic is still desired as a post-assembly pass, it should be integrated as an optional step within `structure_assembler` rather than a separate node.
+3. Remove the module-level `checklist_optimizer_node` function to eliminate the confusing dual-API.
+4. If retained for any reason, add step-level try/except between normalize and merge.
+
+---
+
+### §7.3.2 structure_assembler.py -- CRITICAL
+
+| Property | Value |
+|----------|-------|
+| Lines | 321 |
+| Type | A -- core pipeline node |
+| State | `CaseGenState` |
+| Input | `draft_cases`, `mapped_evidence`, `checkpoints`, `optimized_tree`, `checkpoint_paths`, `canonical_outline_nodes`, `mandatory_skeleton` |
+| Output | `test_cases`, `optimized_tree` |
+| Dependencies | `TestCase`, `ChecklistNode`, `Checkpoint`, `MandatorySkeletonNode`, `attach_expected_results_to_outline`, `normalize_test_case` |
+| Registered in graph | Yes -- final node in case_generation subgraph |
+
+#### Detailed Analysis
+
+`structure_assembler` is the **terminal node** of the case generation subgraph and the last node to touch `optimized_tree` before it exits to the main graph. It performs a **6-step assembly process** that is critical to checklist integration quality.
+
+**Step-by-step breakdown of `structure_assembler_node()`:**
+
+**Step 1 -- Field completion (lines 37-72):** For each `draft_case`, fills in missing fields:
+- Auto-generates IDs (`TC-001`, `TC-002`, ...)
+- Sets defaults for `preconditions`, `steps`, `expected_results`, `priority`, `category`
+- Backfills `evidence_refs` from `mapped_evidence`
+- Preserves `checkpoint_id`
+
+**Step 2 -- Template inheritance (lines 54-72):** If a case lacks `template_leaf_id` but has a `checkpoint_id`, it inherits template binding fields from the checkpoint:
+
+```python
+if not case.template_leaf_id and case.checkpoint_id:
+    cp = cp_lookup.get(case.checkpoint_id)
+    if cp and cp.template_leaf_id:
+        update_fields.update({
+            "template_leaf_id": cp.template_leaf_id,
+            "template_path_ids": cp.template_path_ids,
+            "template_path_titles": cp.template_path_titles,
+            "template_match_confidence": cp.template_match_confidence,
+            "template_match_low_confidence": cp.template_match_low_confidence,
+        })
+```
+
+**Step 3 -- Text normalization (line 74):** Each assembled case passes through `normalize_test_case()` for Chinese-English mixed text formatting.
+
+**Step 4 -- Code consistency TODO application (line 77):** The `_apply_consistency_todos()` function iterates over cases and their associated checkpoints, appending `[TODO-CODE-MISMATCH]` or `[TODO-CODE-UNVERIFIED]` strings to `expected_results`.
+
+**Step 5 -- Mount to optimized_tree (lines 88-92):** This is the **first rewrite** of `optimized_tree`:
+
+```python
+optimized_tree = attach_expected_results_to_outline(
+    state.get("optimized_tree", []),
+    assembled_cases,
+    state.get("checkpoint_paths", []),
+    state.get("canonical_outline_nodes", []),
+)
+```
+
+The `optimized_tree` produced by `checkpoint_outline_planner` is taken and enriched with expected results from the assembled test cases.
+
+**Step 6 -- Mandatory constraint enforcement (lines 95-101):** This is the **second rewrite** of `optimized_tree`:
+
+```python
+if mandatory_skeleton:
+    optimized_tree = _enforce_mandatory_constraints(
+        optimized_tree, mandatory_skeleton
+    )
+    _annotate_source(optimized_tree, mandatory_skeleton)
+```
+
+The tree is restructured to ensure all mandatory template nodes exist, with an overflow bucket for unmatched nodes.
+
+#### Critical Issue: Double-Write of `optimized_tree`
+
+The `optimized_tree` undergoes **two sequential rewrites** in a single node:
+
+1. `attach_expected_results_to_outline()` -- Enriches the tree with test case expected results
+2. `_enforce_mandatory_constraints()` -- Restructures the tree to match mandatory skeleton
+
+The second rewrite can **discard or relocate** nodes that were just enriched in the first step. Specifically:
+- `_enforce_mandatory_constraints()` rebuilds the tree from scratch based on skeleton children
+- Nodes not matching skeleton IDs go into an `_overflow` bucket
+- The `_restore_or_merge()` function creates new `ChecklistNode` objects, potentially losing metadata attached by `attach_expected_results_to_outline()`
+
+**Evidence of potential data loss in `_restore_or_merge()`:**
+
+```python
+def _restore_or_merge(sk_node, tree_lookup):
+    existing = tree_lookup.get(sk_node.id)
+    merged_children = []
+    # ... merge skeleton children ...
+    # Preserves existing non-skeleton children, BUT:
+    priority = sk_node.original_metadata.get("priority", "P2")
+    return ChecklistNode(
+        node_id=sk_node.id,
+        title=sk_node.title,        # ← Uses skeleton title, not enriched title
+        node_type="group",
+        hidden=False,
+        source="template",
+        is_mandatory=sk_node.is_mandatory,
+        priority=priority,
+        children=merged_children,
+    )
+```
+
+A **new** `ChecklistNode` is created with the skeleton's title and metadata, discarding any enrichment that `attach_expected_results_to_outline()` may have applied to the existing node's direct properties.
+
+#### Overflow Bucket Warning Logic
+
+```python
+if overflow_cases:
+    overflow_ratio = len(overflow_cases) / max(len(tree), 1)
+    if overflow_ratio > 0.2:
+        logger.warning(
+            "大量节点进入溢出区 (%d/%d = %.0f%%)，建议检查模版与 PRD 的匹配度",
+            ...
+        )
+```
+
+The 20% threshold is arbitrary with no configuration option. When triggered, it only logs a warning but does not adjust behavior or signal the issue to downstream consumers.
+
+#### `_apply_consistency_todos()` -- Mutation concerns
+
+```python
+def _apply_consistency_todos(cases, checkpoints):
+    for case in cases:
+        # ...
+        if todo_text not in case.expected_results:
+            case.expected_results.append(todo_text)  # ← Mutates in place
+        if not case.code_consistency:
+            case.code_consistency = consistency        # ← Mutates in place
+        if hasattr(case, "tags") and tag not in case.tags:
+            case.tags.append(tag)                      # ← Mutates in place
+    return cases
+```
+
+This function mutates `TestCase` objects in place despite claiming to return a new list. If any upstream code retains references to the original `draft_cases`, they will see the mutations.
+
+#### Error Handling Analysis
+
+The node has **no try/except** at the top level. Any exception in the 6-step process crashes the entire pipeline. This is particularly risky because:
+- `attach_expected_results_to_outline()` is an external service call
+- `_enforce_mandatory_constraints()` does recursive tree manipulation
+- Missing or malformed state keys (e.g., `mandatory_skeleton` with unexpected structure) will cause `AttributeError`
+
+#### Improvement Recommendations
+
+1. **Add top-level try/except** with graceful degradation: if constraint enforcement fails, return the pre-enforcement tree.
+2. **Eliminate the double-write pattern**: Either merge the two tree transformations into a single pass, or make `_enforce_mandatory_constraints()` operate on enriched nodes rather than creating new ones.
+3. **Preserve enrichment during skeleton merge**: In `_restore_or_merge()`, copy enrichment data from the existing node when available.
+4. **Make overflow threshold configurable** via settings.
+5. **Add intermediate validation** between Steps 5 and 6 to verify tree integrity.
+6. **Avoid in-place mutation** in `_apply_consistency_todos()`: use `model_copy(update=...)` consistently.
+
+---
+
+### §7.3.3 checkpoint_generator.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 514 |
+| Type | A -- core pipeline node |
+| State | `CaseGenState` |
+| Input | `research_output`, `template_leaf_targets`, `xmind_reference_summary`, `mr_code_facts` |
+| Output | `checkpoints` |
+| Dependencies | `LLMClient`, `Checkpoint`, `ResearchFact`, `TemplateLeafTarget` |
+
+#### Detailed Analysis
+
+This node is the central LLM-driven checkpoint generation step. It converts `ResearchFact` objects into explicit `Checkpoint` objects through a carefully orchestrated prompt assembly process.
+
+**Prompt assembly injects 4 context types:**
+
+1. **Base facts** -- Formatted list of research facts with IDs, categories, and source sections.
+2. **Template binding instructions** -- When `template_leaf_targets` exist, injects a list of valid leaf IDs and instructs the LLM to assign each checkpoint to a leaf with a confidence score.
+3. **XMind reference structure** -- When `xmind_reference_summary` exists, injects the reference checklist's coverage dimensions to guide structural alignment.
+4. **MR code facts** -- When `mr_code_facts` exist, appends code-level facts from MR analysis to ensure checkpoints cover code changes.
+
+**Post-processing includes invalid leaf_id clearing:**
+
+```python
+if template_leaf_id not in valid_leaf_ids:
+    original_leaf_id = template_leaf_id
+    template_leaf_id = ""
+    template_match_confidence = 0.0
+    # ...
+    invalid_cleared_count += 1
+```
+
+When the LLM returns a `template_leaf_id` not in the valid set, the binding is silently cleared. This is logged but has no recovery mechanism (e.g., fuzzy matching to the closest valid leaf).
+
+**Legacy compatibility via `_synthesize_facts_from_legacy()`:** When `research_output.facts` is empty, synthesizes facts from `user_scenarios`, `feature_topics`, and `constraints`. This backward-compat path ensures the node works even with older research outputs.
+
+**`CheckpointDraft` model with auto-repair:**
+
+```python
+@model_validator(mode="before")
+@classmethod
+def coerce_and_strip_extra_fields(cls, values):
+    _EXTRA_FIELDS = {"steps", "expected_result", "expected_results", "checkpoint_id"}
+    for key in _EXTRA_FIELDS:
+        values.pop(key, None)
+    # Also: splits preconditions string → list
+```
+
+Proactively strips fields that the LLM should not produce but often does. This is a pragmatic defense against LLM hallucination.
+
+**Low confidence threshold:** `_LOW_CONFIDENCE_THRESHOLD = 0.6`. Matches below this are flagged as `template_match_low_confidence = True` but are still used -- no escalation or re-prompting.
+
+#### Issues
+
+- No retry logic for LLM failures; a single `generate_structured` call with no fallback.
+- `effective_fact_ids` has a subtle bug: `draft.fact_ids or [facts[0].fact_id] if facts else []` -- due to Python operator precedence, this evaluates as `(draft.fact_ids or [facts[0].fact_id]) if facts else []` when `facts` is truthy but `draft.fact_ids` is empty, which is correct but fragile.
+- Template binding summary logging is excellent but only at INFO level; production environments may miss it.
+
+---
+
+### §7.3.4 draft_writer.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 518 |
+| Type | A -- core pipeline node |
+| State | `CaseGenState` |
+| Input | `checkpoints`, `checkpoint_paths`, `canonical_outline_nodes`, `planned_scenarios`, `mapped_evidence`, `xmind_reference_summary`, `project_context_summary` |
+| Output | `draft_cases`, `draft_writer_timing` |
+| Dependencies | `LLMClient`, `TestCase`, `Checkpoint`, `ChecklistNode`, `ThreadPoolExecutor` |
+
+#### Detailed Analysis
+
+**Dual-path design:** The node has two generation paths:
+
+1. **Checkpoint path (primary):** When `checkpoints` exist, generates test cases from checkpoints with fixed hierarchy path context resolved from `checkpoint_paths` and `canonical_outline_nodes`.
+2. **Scenario path (fallback):** When no checkpoints exist, falls back to generating from `planned_scenarios` with evidence. However, scenario-path test cases **lack `checkpoint_id`**, breaking downstream coverage tracking in `evaluation.py` and `reflection.py`.
+
+**ThreadPoolExecutor concurrent reference leaf generation:**
+
+```python
+_REF_LEAF_BATCH_SIZE: int = 40
+_MAX_WORKERS: int = 5
+```
+
+When an XMind reference tree exists, the node collects reference leaves (source='reference') and generates details for them concurrently using `ThreadPoolExecutor`. Batches of 40 leaves are processed with 5 concurrent threads.
+
+**Title preservation concern:** After LLM generates cases for reference leaves, the code overwrites titles:
+
+```python
+for i in range(paired):
+    returned_cases[i].title = batch[i].title
+```
+
+If the LLM returns fewer cases than leaves, only `min(returned, expected)` get title alignment, and a warning is logged. Excess LLM-generated cases retain LLM-chosen titles that may not match reference leaves.
+
+**Code consistency annotation helper:** `_apply_code_consistency_to_xmind_node()` adds child annotation nodes to the tree with visual markers (✓, ⚠, ?) but is defined in this file rather than in a shared utility, coupling tree annotation to the draft writer.
+
+**Missing error handling at the main generation call:** The primary `llm_client.generate_structured()` call for the main checkpoint/scenario prompt has no try/except wrapping.
+
+---
+
+### §7.3.5 evaluation.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 351 |
+| Type | A -- core pipeline node |
+| State | `CaseGenState` (via function params) |
+| Input | `test_cases`, `checkpoints`, `research_output`, `previous_score` |
+| Output | `EvaluationReport` |
+| Dependencies | `TestCase`, `Checkpoint`, `ResearchOutput`, `EvaluationReport` |
+
+#### Detailed Analysis
+
+This node performs **6-dimension evaluation** of the generated test case quality:
+
+| Dimension | What it measures | Threshold |
+|-----------|-----------------|------------|
+| `fact_coverage` | % of facts referenced by at least one checkpoint | < 0.6 → retry context_research |
+| `checkpoint_coverage` | % of checkpoints covered by at least one test case | < 0.6 → retry checkpoint_generation |
+| `evidence_completeness` | % of test cases with evidence_refs | < 0.6 → retry draft_generation |
+| `duplicate_rate` | Uniqueness of test case titles (casefold) | < 0.6 → retry draft_generation |
+| `case_completeness` | % of cases with non-empty steps and expected_results | < 0.6 → retry draft_generation |
+| `branch_coverage` | Coverage of non-functional checkpoints (edge_case, boundary) | Scored 0.5 if all cases are functional |
+
+**Retry stage determination (`_determine_retry_stage()`):** Returns one of `context_research`, `checkpoint_generation`, `draft_generation`, or `None` based on which dimension scores lowest. Priority: fact > checkpoint > testcase quality. However, the returned `suggested_retry_stage` is **not consumed by any graph routing logic** -- the pipeline is linear with no conditional edges.
+
+**Note:** This file defines a pure function `evaluate()` rather than a LangGraph node function. It is called by the iteration/reflection layer rather than being directly registered as a graph node. The evaluation results influence iteration decisions but the pipeline itself has no conditional branching.
+
+---
+
+### §7.3.6 input_parser.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 54 |
+| Type | Entry point node |
+| State | `GlobalState` |
+| Input | `file_path` or `request.file_path` |
+| Output | `parsed_document` |
+
+Simple node that resolves a file path from state and delegates to `parsers.factory.get_parser()`. Supports relative paths (resolved against cwd). Raises `ValueError` if no path is provided and `FileNotFoundError` if the file doesn't exist. No try/except wrapping -- errors propagate to the graph runner.
+
+---
+
+### §7.3.7 context_research.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 92 |
+| Type | A -- core pipeline node |
+| State | `GlobalState` |
+| Input | `parsed_document`, `model_config`, `project_context_summary`, `knowledge_context`, `language` |
+| Output | `research_output` (ResearchOutput) |
+
+LLM-driven extraction of testing-relevant context from PRD documents. The system prompt is detailed and prescriptive, requiring structured JSON output with `facts`, `feature_topics`, `user_scenarios`, `constraints`, `ambiguities`, and `test_signals`.
+
+**Context injection layers:**
+1. Project context summary (if available)
+2. Knowledge context from GraphRAG (if available)
+3. Full document text
+
+The prompt includes strict language requirements: Chinese for descriptions, English for proper nouns, with mixed formatting rules.
+
+---
+
+### §7.3.8 knowledge_retrieval.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 99 |
+| Type | Optional enrichment node |
+| State | `dict[str, Any]` |
+| Input | `parsed_document` |
+| Output | `knowledge_context`, `knowledge_sources`, `knowledge_retrieval_success` |
+
+Retrieves domain knowledge from GraphRAG engine. Uses `asyncio.new_event_loop()` to run async retrieval in a sync node context -- this is a known anti-pattern that can cause issues if LangGraph itself runs in an async event loop (nested event loops).
+
+**Graceful degradation:** Three-layer fallback:
+1. Engine not ready → empty result
+2. Missing parsed_document → empty result  
+3. Any exception → empty result with logging
+
+Never blocks the main workflow.
+
+---
+
+### §7.3.9 template_loader.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 73 |
+| Type | Configuration node |
+| State | `GlobalState` |
+| Input | `template_file_path`, `template_name`, `request` |
+| Output | `project_template`, `template_leaf_targets`, `mandatory_skeleton` |
+
+Loads project-level checklist templates. Supports two loading modes: by file path or by name (from a `templates/` directory). After loading, flattens leaf targets and builds mandatory skeleton for downstream constraint enforcement.
+
+**Auto-skip behavior:** Returns empty `{}` when neither path nor name is provided -- downstream nodes handle absence gracefully.
+
+---
+
+### §7.3.10 xmind_reference_loader.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 85 |
+| Type | Optional enrichment node |
+| State | `GlobalState` |
+| Input | `reference_xmind_path` |
+| Output | `xmind_reference_summary` |
+
+Parses XMind reference files and generates both a summary analysis and a deterministic reference tree. The tree converter is optional -- if it fails, the node degrades to summary-only mode.
+
+**Exception handling is thorough** -- separate handlers for `FileNotFoundError`, `XMindParseError`, and generic `Exception`, each returning empty `{}` to avoid blocking the workflow.
+
+---
+
+### §7.3.11 mr_analyzer.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 763 (largest node) |
+| Type | A -- MR analysis pipeline node |
+| State | `CaseGenState` |
+| Input | `frontend_mr_config`, `backend_mr_config`, `mr_input` |
+| Output | `mr_code_facts`, `mr_consistency_issues`, `mr_combined_summary`, `frontend_mr_result`, `backend_mr_result` |
+
+The most complex node in the system. Implements a 3-phase MR analysis pipeline:
+
+**Phase 1 -- Diff Summary:** Parses MR diff files and generates a change summary via LLM.
+
+**Phase 2 -- Agentic Search:** An LLM-driven tool-calling loop (max 10 rounds, 60s timeout) that searches the codebase for related code context. Uses `CODEBASE_TOOLS` (grep, find_references, get_file_content) with the LLM deciding which tool to call each round.
+
+**Phase 3 -- Fact Extraction + Consistency Check:** Extracts code-level facts and checks PRD-vs-code consistency with a confidence threshold of 0.7.
+
+**Dual path support:**
+- **Local analysis:** Uses direct file access and agentic search
+- **Coco delegation:** Sends the entire task to a Coco Agent for remote analysis
+
+The node is **async** (`async def mr_analyzer_node`), one of only two async nodes (along with `coco_consistency_validator`). The `_run_agentic_search()` function is also async but calls `await llm_client.chat()` which may not be universally async-compatible.
+
+**Issue:** The `_safe_parse_json()` function imports from `app.services.coco_response_validator` at call time, creating a hidden dependency.
+
+---
+
+### §7.3.12 mr_checkpoint_injector.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 308 |
+| Type | MR pipeline node |
+| State | `CaseGenState` |
+| Input | `mr_code_facts`, `checkpoints` |
+| Output | `checkpoints` (merged), `mr_injected_checkpoint_ids` |
+
+Converts `MRCodeFact` objects into checkpoint dictionaries and merges them with existing checkpoints. Uses character-level bigram similarity (`_text_similarity()`) with a threshold of 0.75 for deduplication.
+
+**Design note:** Produces checkpoint **dictionaries** rather than `Checkpoint` model instances to avoid hard dependency on `checkpoint_models`. This is a pragmatic but inconsistent choice -- downstream consumers must handle both dict and Pydantic model checkpoints.
+
+**`_link_consistency_issues()`** mutates `ConsistencyIssue` objects in place by appending to `affected_checkpoint_ids`, which could cause issues if the same issue list is referenced elsewhere.
+
+---
+
+### §7.3.13 project_context_loader.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 89 |
+| Type | Optional enrichment node |
+| State | `dict[str, Any]` |
+| Input | `project_id` |
+| Output | `project_context_summary` |
+
+Loads project context and generates a summary string. Factory pattern captures `ProjectContextService`. Graceful degradation: returns empty string on missing project, lookup failure, or summary generation failure. Well-documented with English docstrings.
+
+---
+
+### §7.3.14 reflection.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 203 |
+| Type | A -- terminal quality node |
+| State | `GlobalState` |
+| Input | `test_cases`, `planned_scenarios`, `checkpoints`, `research_output`, `project_context_summary` |
+| Output | `test_cases` (deduped), `quality_report`, `checkpoint_coverage` |
+
+Performs final quality checks:
+1. **Title deduplication** -- casefold-based, preserves first occurrence
+2. **Field completeness** -- checks for missing expected_results and evidence_refs
+3. **Coverage assessment** -- compares generated case count vs. planned scenario count
+4. **Checkpoint quality** -- uncovered facts, uncovered checkpoints, evidence gaps, title overlap detection
+5. **Checkpoint coverage computation** -- builds `CheckpointCoverage` records
+
+**Overlap detection uses substring containment** rather than similarity scoring:
+```python
+if title_i in titles[j] or titles[j] in title_i:
+```
+This is simplistic -- "验证登录" would match "验证登录功能的边界条件" even though they test different things.
+
+---
+
+### §7.3.15 scenario_planner.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 124 |
+| Type | Planning node |
+| State | `GlobalState` |
+| Input | `research_output`, `mr_combined_summary` |
+| Output | `planned_scenarios` |
+
+Deterministic scenario planning (no LLM call). Priority: `user_scenarios` > `feature_topics` derivation > fallback. MR summary lines starting with `"- "` are converted to `"验证 ..."` scenarios.
+
+**All scenarios get `category="functional"` and `risk="medium"`** regardless of content. The MR-derived scenarios get a distinct rationale but the same flat categorization.
+
+---
+
+### §7.3.16 checkpoint_evaluator.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 52 |
+| Type | Post-processing node |
+| State | `CaseGenState` |
+| Input | `checkpoints` |
+| Output | `checkpoints` (deduped), `checkpoint_coverage` (initialized) |
+
+Simple deduplication by `title.casefold()` and initialization of `CheckpointCoverage` records with `coverage_status="uncovered"`. No LLM calls, no complex logic. Acts as a data normalization step between `checkpoint_generator` and `coverage_detector`.
+
+---
+
+### §7.3.17 coco_consistency_validator.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 393 |
+| Type | Optional MR pipeline node (async) |
+| State | `CaseGenState` |
+| Input | `checkpoints`, `frontend_mr_config`, `backend_mr_config` |
+| Output | `checkpoints` (annotated), `coco_validation_summary` |
+
+Async node that validates each checkpoint against code implementation via Coco Agent. Features:
+- Concurrency control: `asyncio.Semaphore(5)`, per-case timeout 120s, total timeout 600s
+- Graceful degradation: failed validations marked as `"unverified"`, never block other cases
+- Annotates checkpoints with `code_consistency` field and tags (`code_confirmed`, `code_mismatch`, `code_unverified`)
+
+**Concern:** High-confidence mismatches append TODO text directly to `expected_result`:
+```python
+todo_text = (
+    f"\n\n**TODO: 代码实现与预期不一致** — "
+    f"预期「{expected[:50]}」，"
+    f"但代码实现为「{result.actual_implementation[:80]}」"
+)
+new_expected = (expected or "") + todo_text
+_set_attr_safe(cp, "expected_result", new_expected)
+```
+
+This mutates checkpoint `expected_result` strings, which are then inherited by test cases in `structure_assembler`. The mutation is **permanent** and cannot be distinguished from original content without parsing the `**TODO:` prefix.
+
+---
+
+### §7.3.18 evidence_mapper.py
+
+| Property | Value |
+|----------|-------|
+| Lines | 79 |
+| Type | Enrichment node |
+| State | `CaseGenState` |
+| Input | `parsed_document`, `planned_scenarios` |
+| Output | `mapped_evidence` |
+
+Keyword-intersection based evidence mapping. Tokenizes scenario titles and section headings/content, then checks for set intersection. Falls back to first document section with `confidence=0.4` when no match is found.
+
+**Tokenization is basic:** `re.findall(r"[a-zA-Z0-9\u4e00-\u9fff]+", ...)` -- splits on every non-alphanumeric/CJK character, treating each Chinese character as a separate token. This makes matching very aggressive (any single shared character triggers a match).
+
+---
+
+## §7.4 Data Flow Analysis
+
+### §7.4.1 Checklist Tree (`optimized_tree`) Lifecycle
+
+The `optimized_tree` is the central data structure representing the hierarchical checklist output. It undergoes the following transformations:
+
+```
+checkpoint_outline_planner (service)
+  ├── Stage A: LLM generates canonical outline nodes
+  ├── Stage B: LLM maps checkpoints to paths
+  └── Stage C: Deterministic tree construction
+        ↓
+    optimized_tree v1 (skeleton with checkpoint mappings)
+        ↓
+draft_writer
+  └── No modification to optimized_tree (reads checkpoint_paths + canonical_outline_nodes)
+        ↓
+structure_assembler
+  ├── Step 5: attach_expected_results_to_outline()
+  │     → optimized_tree v2 (enriched with test case results)
+  ├── Step 6: _enforce_mandatory_constraints()
+  │     → optimized_tree v3 (restructured to match skeleton)
+  └── _annotate_source()
+        → optimized_tree v3+ (source annotations added)
+        ↓
+    Final optimized_tree exits subgraph via state bridge
+        ↓
+reflection
+  └── No modification to optimized_tree (reads test_cases only)
+```
+
+### §7.4.2 Checkpoint Data Flow
+
+```
+context_research → research_output.facts
+        ↓
+checkpoint_generator → checkpoints (with template bindings)
+        ↓
+checkpoint_evaluator → checkpoints (deduped)
+        ↓
+mr_checkpoint_injector → checkpoints (merged with MR checkpoints)
+        ↓                     ↓
+coverage_detector    checkpoint_outline_planner
+        ↓                     ↓
+    coverage_result     checkpoint_paths + canonical_outline_nodes + optimized_tree
+        ↓                     ↓
+draft_writer → draft_cases (with checkpoint_id links)
+        ↓
+coco_consistency_validator → checkpoints (annotated with code_consistency)
+        ↓
+structure_assembler → test_cases (final) + optimized_tree (final)
+```
+
+### §7.4.3 State Key Inventory
+
+| State Key | Produced By | Consumed By |
+|-----------|-------------|-------------|
+| `parsed_document` | input_parser | context_research, evidence_mapper, knowledge_retrieval |
+| `research_output` | context_research | checkpoint_generator, scenario_planner, evaluation, reflection |
+| `project_template` | template_loader | (bridge to subgraph) |
+| `template_leaf_targets` | template_loader | checkpoint_generator |
+| `mandatory_skeleton` | template_loader | structure_assembler |
+| `xmind_reference_summary` | xmind_reference_loader | checkpoint_generator, draft_writer, coverage_detector |
+| `project_context_summary` | project_context_loader | context_research, draft_writer |
+| `knowledge_context` | knowledge_retrieval | context_research |
+| `planned_scenarios` | scenario_planner | evidence_mapper, reflection |
+| `checkpoints` | checkpoint_generator → evaluator → mr_injector → coco_validator | draft_writer, structure_assembler, evaluation, reflection |
+| `checkpoint_paths` | checkpoint_outline_planner | draft_writer, structure_assembler |
+| `canonical_outline_nodes` | checkpoint_outline_planner | draft_writer, structure_assembler |
+| `optimized_tree` | checkpoint_outline_planner → structure_assembler | (output) |
+| `mapped_evidence` | evidence_mapper | structure_assembler |
+| `draft_cases` | draft_writer | structure_assembler |
+| `test_cases` | structure_assembler | reflection, evaluation |
+| `mr_code_facts` | mr_analyzer | checkpoint_generator, mr_checkpoint_injector |
+| `mr_consistency_issues` | mr_analyzer | mr_checkpoint_injector |
+
+---
+
+## §7.5 Key Findings
+
+### §7.5.1 CRITICAL: `checklist_optimizer.py` is Orphaned Dead Code
+
+The file is not registered in any graph definition. Its docstring claims execution after `structure_assembler`, but this would produce a timing conflict where the carefully assembled `optimized_tree` would be overwritten. The `checkpoint_outline_planner` service (in `services/`) has fully replaced this node's functionality. **This file should be deleted.**
+
+### §7.5.2 CRITICAL: Double-Write of `optimized_tree` in `structure_assembler`
+
+The `optimized_tree` is rewritten twice in `structure_assembler_node()`:
+1. `attach_expected_results_to_outline()` enriches the tree
+2. `_enforce_mandatory_constraints()` restructures it, potentially losing enrichment
+
+The second pass creates **new** `ChecklistNode` objects from skeleton metadata, discarding properties that may have been set during enrichment. This is a data integrity risk.
+
+### §7.5.3 HIGH: No Top-Level Error Handling in Critical Nodes
+
+Neither `structure_assembler` nor `checkpoint_generator` have top-level exception handling. A failure in any step crashes the entire pipeline with no partial output recovery.
+
+### §7.5.4 HIGH: Async/Sync Mismatch in knowledge_retrieval
+
+`knowledge_retrieval.py` creates a new event loop via `asyncio.new_event_loop()` inside a synchronous node. If LangGraph's executor is already running an event loop, this will fail or cause undefined behavior.
+
+### §7.5.5 MEDIUM: Inconsistent Checkpoint Types
+
+`mr_checkpoint_injector` outputs checkpoint **dictionaries** while all other nodes produce `Checkpoint` Pydantic model instances. Downstream consumers must handle both types, as evidenced by the `_get_attr_safe()` / `_set_attr_safe()` dual-mode helpers in `coco_consistency_validator.py`.
+
+### §7.5.6 MEDIUM: In-Place Mutations of Shared State
+
+Multiple nodes mutate objects in place:
+- `structure_assembler._apply_consistency_todos()` mutates `TestCase.expected_results`
+- `coco_consistency_validator._annotate_checkpoints()` mutates checkpoint objects
+- `mr_checkpoint_injector._link_consistency_issues()` mutates `ConsistencyIssue` objects
+
+This violates the immutable-state-update pattern that LangGraph encourages and can cause subtle bugs when state snapshots are compared or when nodes are retried.
+
+### §7.5.7 MEDIUM: Aggressive Token-Level Evidence Matching
+
+`evidence_mapper` treats each Chinese character as a separate token. A single shared character (e.g., "的") would create a match. This likely produces many false-positive evidence associations.
+
+### §7.5.8 LOW: Evaluation Results Not Consumed by Graph Routing
+
+`evaluation.py` computes `suggested_retry_stage` but the pipeline is strictly linear. The retry suggestion is never used for conditional routing, making the evaluation purely informational.
+
+---
+
+## §7.6 Checklist Integration Impact Analysis
+
+This section traces how each node contributes to or degrades the quality of the final checklist output (`optimized_tree` + `test_cases`).
+
+| Node | Impact on Checklist | Risk Level |
+|------|-------------------|------------|
+| `input_parser` | **Foundation** -- incorrect parsing propagates to all downstream | Low (well-tested) |
+| `template_loader` | **Structural anchor** -- defines mandatory skeleton | Medium |
+| `xmind_reference_loader` | **Reference quality** -- guides structural alignment | Low |
+| `project_context_loader` | **Context enrichment** -- indirect quality improvement | Low |
+| `knowledge_retrieval` | **Domain coverage** -- enriches fact extraction | Low |
+| `context_research` | **Fact quality** -- determines checkpoint completeness | High |
+| `mr_analyzer` | **Code coverage** -- adds code-level testing dimensions | Medium |
+| `mr_checkpoint_injector` | **Checkpoint completeness** -- but dict/model inconsistency risk | Medium |
+| `scenario_planner` | **Coverage breadth** -- flat categorization limits differentiation | Low |
+| `checkpoint_generator` | **CRITICAL** -- template binding quality directly affects tree structure | High |
+| `checkpoint_evaluator` | **Dedup quality** -- prevents redundant tree nodes | Low |
+| `checkpoint_outline_planner` | **CRITICAL** -- produces the initial `optimized_tree` | Highest |
+| `evidence_mapper` | **Traceability** -- aggressive matching dilutes evidence quality | Medium |
+| `draft_writer` | **Content quality** -- test case detail generation | High |
+| `coco_consistency_validator` | **Code alignment** -- mutates checkpoint expected_result permanently | Medium |
+| `structure_assembler` | **CRITICAL** -- final assembly with double-write risk | Highest |
+| `reflection` | **Quality gate** -- but no enforcement mechanism | Low |
+| `checklist_optimizer` | **DEAD CODE** -- no impact (orphaned) | N/A |
+
+### Key Checklist Quality Risks
+
+1. **Template binding → tree structure chain:** If `checkpoint_generator` assigns wrong `template_leaf_id`, the tree structure in `checkpoint_outline_planner` will place checkpoints under wrong branches. The invalid-ID clearing logic catches non-existent IDs but not semantically wrong assignments.
+
+2. **Double-write data loss:** `structure_assembler` enriches the tree then restructures it, potentially losing enrichment for nodes that get recreated from skeleton metadata.
+
+3. **Permanent TODO mutation:** `coco_consistency_validator` appends TODO text to `expected_result` fields, which flows through to `structure_assembler` and into the final `test_cases`. These mutations are irreversible and mixed with actual expected results.
+
+4. **Evidence quality dilution:** The aggressive token matching in `evidence_mapper` means most test cases get evidence refs, but many may be false positives, reducing the traceability value.
+
+---
+
+## §7.7 Improvement Recommendations
+
+### Priority 1 (Critical)
+
+| # | Recommendation | Affected Files |
+|---|---------------|----------------|
+| 1 | **Delete `checklist_optimizer.py`** -- it is dead code with a misleading docstring | `checklist_optimizer.py` |
+| 2 | **Eliminate double-write in `structure_assembler`** -- merge enrichment and constraint enforcement into a single tree pass that preserves enriched properties | `structure_assembler.py` |
+| 3 | **Add top-level error handling** to `structure_assembler` and `checkpoint_generator` with graceful degradation | `structure_assembler.py`, `checkpoint_generator.py` |
+
+### Priority 2 (High)
+
+| # | Recommendation | Affected Files |
+|---|---------------|----------------|
+| 4 | **Fix async/sync pattern** in `knowledge_retrieval` -- use `asyncio.get_event_loop()` with fallback or make the node async | `knowledge_retrieval.py` |
+| 5 | **Standardize checkpoint types** -- `mr_checkpoint_injector` should produce `Checkpoint` model instances, not dicts | `mr_checkpoint_injector.py` |
+| 6 | **Separate TODO annotations** from expected_result content in `coco_consistency_validator` -- use a dedicated field | `coco_consistency_validator.py` |
+| 7 | **Add intermediate validation** between tree enrichment and constraint enforcement in `structure_assembler` | `structure_assembler.py` |
+
+### Priority 3 (Medium)
+
+| # | Recommendation | Affected Files |
+|---|---------------|----------------|
+| 8 | **Improve evidence matching** -- use TF-IDF or embedding similarity instead of raw token intersection, filter out stop words and single-character tokens | `evidence_mapper.py` |
+| 9 | **Avoid in-place mutations** -- use `model_copy(update=...)` consistently throughout all nodes | Multiple files |
+| 10 | **Add fuzzy matching** for invalid `template_leaf_id` in `checkpoint_generator` before clearing | `checkpoint_generator.py` |
+| 11 | **Make overflow threshold configurable** in `structure_assembler._enforce_mandatory_constraints()` | `structure_assembler.py` |
+| 12 | **Wire evaluation results to graph routing** -- add conditional edges based on `suggested_retry_stage` | `evaluation.py`, `case_generation.py` |
+
+---
+
+## §7.8 Cross-References
+
+| Reference | Target | Relationship |
+|-----------|--------|-------------|
+| §7.3.1 `checklist_optimizer.py` | `services/semantic_path_normalizer.py` | Delegates normalization (orphaned) |
+| §7.3.1 `checklist_optimizer.py` | `services/checklist_merger.py` | Delegates merging (orphaned) |
+| §7.3.2 `structure_assembler.py` | `services/checkpoint_outline_planner.py` | Consumes `optimized_tree` produced by planner |
+| §7.3.2 `structure_assembler.py` | `services/text_normalizer.py` | Uses `normalize_test_case()` |
+| §7.3.2 `structure_assembler.py` | `domain/template_models.py` (`MandatorySkeletonNode`) | Constraint enforcement |
+| §7.3.2 `structure_assembler.py` | `domain/checklist_models.py` (`ChecklistNode`) | Tree node type |
+| §7.3.3 `checkpoint_generator.py` | `domain/checkpoint_models.py` (`Checkpoint`, `generate_checkpoint_id`) | Output model |
+| §7.3.3 `checkpoint_generator.py` | `domain/template_models.py` (`TemplateLeafTarget`) | Template binding |
+| §7.3.4 `draft_writer.py` | `domain/checklist_models.py` (`ChecklistNode`, `CanonicalOutlineNode`, `CheckpointPathMapping`) | Path resolution |
+| §7.3.11 `mr_analyzer.py` | `services/codebase_tools.py` | Agentic search tools |
+| §7.3.11 `mr_analyzer.py` | `services/coco_client.py` | Coco Agent delegation |
+| §7.3.17 `coco_consistency_validator.py` | `services/coco_client.py` | Checkpoint validation |
+| §7.3.2, §7.3.3, §7.3.4 | `graphs/case_generation.py` | Subgraph registration |
+| §7.3.6, §7.3.7, §7.3.14 | `graphs/main_workflow.py` | Main graph registration |
+| §7.2 Pipeline Order | `graphs/state_bridge.py` | State bridging between main/sub graphs |
+| §7.5.1 Dead code finding | Entire `checklist_optimizer.py` | Should reference deletion in cleanup tasks |
+| §7.5.2 Double-write finding | `services/checkpoint_outline_planner.py` | Produces the tree that gets double-written |
