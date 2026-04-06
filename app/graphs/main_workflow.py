@@ -16,6 +16,8 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
   → [project_context_loader] → [knowledge_retrieval] → context_research
 - 新增可选 knowledge_retrieval 节点，在 context_research 前注入知识检索结果
 - 新增可选 timer / iteration_index 参数，支持节点级耗时计量
+- 使用 state_bridge.build_bridge 替代手动桥接函数，实现自动字段转发
+- 出向回传采用显式 allowlist，避免子图内部中间态默认泄漏回主图
 - 新增可选 codebase_root / coco_settings 参数，支持 MR 代码分析
 - 桥接节点新增 MR 相关字段映射（mr_input, mr_code_facts, mr_consistency_issues 等）
 """
@@ -24,8 +26,9 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.clients.llm import LLMClient
-from app.domain.state import GlobalState
+from app.domain.state import CaseGenState, GlobalState
 from app.graphs.case_generation import build_case_generation_subgraph
+from app.graphs.state_bridge import build_bridge
 from app.nodes.context_research import build_context_research_node
 from app.nodes.input_parser import input_parser_node
 from app.nodes.reflection import reflection_node
@@ -81,6 +84,35 @@ def build_workflow(
         coco_settings=coco_settings,
     )
 
+    # 使用自动状态桥接替代手动字段映射。
+    #
+    # 设计说明：
+    # 1. 入向（主图 -> 子图）默认使用 shared keys 自动转发，降低新增字段时遗漏接线的概率。
+    # 2. 出向（子图 -> 主图）必须显式 include_out allowlist，避免子图内部中间态字段
+    #    因为“恰好同名”被自动暴露到主图，放宽工作流状态边界。
+    # 3. 后续若业务上需要新增某个主图可见输出字段，必须：
+    #    - 在 include_out 中显式登记
+    #    - 同步补充对应测试，说明该字段成为主图契约的一部分是有意设计。
+    case_gen_bridge = build_bridge(
+        subgraph=case_generation_subgraph,
+        parent_type=GlobalState,
+        child_type=CaseGenState,
+        override_in={
+            "language": "zh-CN",
+            "project_context_summary": "",
+            "template_leaf_targets": [],
+        },
+        include_out={
+            "planned_scenarios",
+            "checkpoints",
+            "checkpoint_coverage",
+            "draft_cases",
+            "test_cases",
+            "optimized_tree",
+            "coverage_result",
+        },
+    )
+
     builder = StateGraph(GlobalState)
 
     builder.add_node("input_parser", maybe_wrap("input_parser", input_parser_node, timer, iteration_index))
@@ -96,7 +128,7 @@ def build_workflow(
         builder.add_node("knowledge_retrieval", maybe_wrap("knowledge_retrieval", knowledge_retrieval_node, timer, iteration_index))
 
     builder.add_node("context_research", maybe_wrap("context_research", build_context_research_node(llm_client), timer, iteration_index))
-    builder.add_node("case_generation", maybe_wrap("case_generation", _build_case_generation_bridge(case_generation_subgraph), timer, iteration_index))
+    builder.add_node("case_generation", maybe_wrap("case_generation", case_gen_bridge, timer, iteration_index))
     builder.add_node("reflection", maybe_wrap("reflection", reflection_node, timer, iteration_index))
 
     # 边连接：input_parser → template_loader → [xmind_reference_loader]
@@ -127,9 +159,13 @@ def build_workflow(
     return builder.compile()
 
 
-def _build_case_generation_bridge(case_generation_subgraph):
-    """构建主图与用例生成子图之间的桥接节点。
+# ---- DEPRECATED: 旧手动桥接函数，保留用于回滚 ----
+# 如需回滚到手动桥接，将 build_workflow 中的 case_gen_bridge 替换为
+# _build_case_generation_bridge(case_generation_subgraph) 即可。
+def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
+    """[DEPRECATED] 手动桥接节点，已被 state_bridge.build_bridge 替代。
 
+    保留此函数仅用于紧急回滚。正常开发应使用 build_bridge 自动桥接。
     变更：
     - 新增 mandatory_skeleton 字段的传入与传出映射
     - 新增 xmind_reference_summary 字段的传入与传出映射
@@ -143,12 +179,9 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "parsed_document": state["parsed_document"],
             "research_output": state["research_output"],
             "project_context_summary": state.get("project_context_summary", ""),
-            # ---- 模版相关字段传入子图 ----
             "template_leaf_targets": state.get("template_leaf_targets", []),
             "project_template": state.get("project_template"),
-            # ---- 强制骨架传入子图 ----
             "mandatory_skeleton": state.get("mandatory_skeleton"),
-            # ---- XMind 参考传入子图 ----
             "xmind_reference_summary": state.get("xmind_reference_summary"),
             # ---- MR 分析相关字段传入子图 ----
             "frontend_mr_config": state.get("frontend_mr_config"),
@@ -160,7 +193,6 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "mr_analysis_result": state.get("mr_analysis_result"),
         }
 
-        # 清理 None 值
         subgraph_input = {k: v for k, v in subgraph_input.items() if v is not None}
 
         subgraph_result = case_generation_subgraph.invoke(subgraph_input)
@@ -169,13 +201,9 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "checkpoints": subgraph_result.get("checkpoints", []),
             "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),
-            "checkpoint_paths": subgraph_result.get("checkpoint_paths", []),
-            "canonical_outline_nodes": subgraph_result.get("canonical_outline_nodes", []),
-            "mapped_evidence": subgraph_result.get("mapped_evidence", {}),
             "draft_cases": subgraph_result.get("draft_cases", []),
             "test_cases": subgraph_result.get("test_cases", []),
             "optimized_tree": subgraph_result.get("optimized_tree", []),
-            # ---- 覆盖检测结果回传 ----
             "coverage_result": subgraph_result.get("coverage_result"),
             # ---- MR 分析结果回传 ----
             "mr_analysis_result": subgraph_result.get("mr_analysis_result"),
