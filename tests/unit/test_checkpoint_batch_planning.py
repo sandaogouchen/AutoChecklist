@@ -21,6 +21,7 @@ from app.domain.checklist_models import (
 )
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.research_models import ResearchFact, ResearchOutput
+from app.services.coverage_detector import CoverageResult
 from app.services.checkpoint_outline_planner import (
     CheckpointOutlinePlanner,
     _BatchGroup,
@@ -83,13 +84,11 @@ class TestGroupCheckpointsBySection(unittest.TestCase):
 
         groups = self.planner._group_checkpoints_by_section(checkpoints, research)
 
-        # 应该有 2 个组
         self.assertEqual(len(groups), 2)
         section_names = {g.section_name for g in groups}
         self.assertIn("Login Module", section_names)
         self.assertIn("Payment Module", section_names)
 
-        # 每组各有 2 个 checkpoint
         for g in groups:
             self.assertEqual(len(g.checkpoints), 2)
 
@@ -105,7 +104,6 @@ class TestGroupCheckpointsBySection(unittest.TestCase):
 
         groups = self.planner._group_checkpoints_by_section(checkpoints, research)
 
-        # batch_size=3, 7 checkpoints → ceil(7/3)=3 groups
         self.assertEqual(len(groups), 3)
         total = sum(len(g.checkpoints) for g in groups)
         self.assertEqual(total, 7)
@@ -122,7 +120,6 @@ class TestGroupCheckpointsBySection(unittest.TestCase):
 
         groups = self.planner._group_checkpoints_by_section(checkpoints, research)
 
-        # batch_size=3, 5 checkpoints in one section → 2 sub-groups
         self.assertEqual(len(groups), 2)
         self.assertIn("(part", groups[1].section_name)
 
@@ -249,10 +246,9 @@ class TestDeduplicateOutlineNodes(unittest.TestCase):
             ),
         ]
 
-        deduped, remap = self.planner._deduplicate_outline_nodes(nodes)
+        deduped, _ = self.planner._deduplicate_outline_nodes(nodes)
 
         self.assertEqual(len(deduped), 1)
-        # aliases should include both "Pay" and "Checkout" (and possibly "Payment" removed)
         self.assertIn("Pay", deduped[0].aliases)
         self.assertIn("Checkout", deduped[0].aliases)
 
@@ -312,7 +308,6 @@ class TestBatchThresholdDecision(unittest.TestCase):
             batch_size=20,
         )
 
-        # Mock LLM responses for single-batch
         self.llm_client.generate_structured.side_effect = [
             CanonicalOutlineNodeCollection(canonical_nodes=[]),
             CheckpointPathCollection(checkpoint_paths=[]),
@@ -338,7 +333,6 @@ class TestBatchThresholdDecision(unittest.TestCase):
             batch_size=3,
         )
 
-        # Setup mocks
         mock_group.return_value = [
             _BatchGroup("Section A", [_make_checkpoint(f"cp{i}", f"CP{i}") for i in range(2)]),
             _BatchGroup("Section B", [_make_checkpoint(f"cp{i+2}", f"CP{i+2}") for i in range(2)]),
@@ -356,6 +350,52 @@ class TestBatchThresholdDecision(unittest.TestCase):
 
         mock_group.assert_called_once()
         mock_batch.assert_called_once()
+
+    @patch.object(CheckpointOutlinePlanner, "_build_outline_tree", return_value=[])
+    @patch.object(CheckpointOutlinePlanner, "_resolve_checkpoint_paths", return_value=[])
+    @patch.object(CheckpointOutlinePlanner, "_merge_reference_and_llm_trees", return_value=[])
+    def test_coverage_filter_uses_checkpoint_id(
+        self,
+        mock_merge,
+        mock_resolve,
+        mock_build_tree,
+    ):
+        """coverage 过滤应使用 checkpoint_id，而不是不存在的 id 字段。"""
+        planner = CheckpointOutlinePlanner(
+            llm_client=self.llm_client,
+            batch_threshold=20,
+            batch_size=20,
+        )
+
+        self.llm_client.generate_structured.side_effect = [
+            CanonicalOutlineNodeCollection(canonical_nodes=[]),
+            CheckpointPathCollection(checkpoint_paths=[]),
+        ]
+
+        checkpoints = [
+            _make_checkpoint("cp-1", "First checkpoint", fact_ids=[]),
+            _make_checkpoint("cp-2", "Second checkpoint", fact_ids=[]),
+        ]
+        coverage_result = CoverageResult(
+            covered_checkpoint_ids=[],
+            uncovered_checkpoint_ids=["cp-2"],
+            coverage_ratio=0.5,
+            fully_covered=False,
+        )
+
+        planner.plan(
+            ResearchOutput(facts=[]),
+            checkpoints,
+            coverage_result=coverage_result,
+        )
+
+        path_call = self.llm_client.generate_structured.call_args_list[1]
+        active_checkpoints = path_call.kwargs["user_prompt"]
+        self.assertIn("cp-2", active_checkpoints)
+        self.assertNotIn("cp-1", active_checkpoints)
+        mock_resolve.assert_called_once()
+        resolve_args = mock_resolve.call_args.args
+        self.assertEqual([cp.checkpoint_id for cp in resolve_args[0]], ["cp-2"])
 
 
 class TestEmptyInput(unittest.TestCase):
@@ -391,7 +431,7 @@ class TestEqualSplitGroups(unittest.TestCase):
         checkpoints = [_make_checkpoint(f"cp{i}", f"CP {i}") for i in range(10)]
         groups = planner._equal_split_groups(checkpoints)
 
-        self.assertEqual(len(groups), 3)  # ceil(10/4) = 3
+        self.assertEqual(len(groups), 3)
         self.assertEqual(len(groups[0].checkpoints), 4)
         self.assertEqual(len(groups[1].checkpoints), 4)
         self.assertEqual(len(groups[2].checkpoints), 2)
