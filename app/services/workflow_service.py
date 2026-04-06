@@ -15,6 +15,7 @@
   构建知识检索节点并传入 build_workflow()
 - 新增节点级计时基础设施集成：在 _execute_with_iteration 中创建 NodeTimer，
   包装所有节点记录耗时，并持久化 timing_report.json
+- 新增 LLM 重试/降级配置透传到 LLMClientConfig
 """
 
 from __future__ import annotations
@@ -588,6 +589,12 @@ class WorkflowService:
                 timeout_seconds=self.settings.llm_timeout_seconds,
                 temperature=self.settings.llm_temperature,
                 max_tokens=self.settings.llm_max_tokens,
+                max_retries=self.settings.llm_max_retries,
+                retry_base_delay=self.settings.llm_retry_base_delay,
+                retry_max_delay=self.settings.llm_retry_max_delay,
+                fallback_model=self.settings.llm_fallback_model,
+                fallback_base_url=self.settings.llm_fallback_base_url,
+                fallback_api_key=self.settings.llm_fallback_api_key,
             )
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client

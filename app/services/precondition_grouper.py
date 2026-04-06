@@ -5,11 +5,13 @@
 2. 以规范化后的 precondition tuple 作为分桶键
 3. 同键用例合并为一个 precondition_group 节点
 4. 构建 ≤3 层 ChecklistNode 树: root → precondition_group → case
+5. (可选) LLM 语义合并：对关键词分桶后的结果使用 LLM 进行语义重新分组
 
 设计约束：
 - _MIN_GROUP_SIZE = 2：单条用例不创建分组，直接挂根节点
 - _MAX_TREE_DEPTH = 3：仅支持三层结构
-- 纯函数，无副作用，无 LLM 调用
+- LLM 分组为可选增强，llm_client=None 时退化为纯关键词分桶
+- 纯函数，无副作用（LLM 调用除外）
 """
 
 from __future__ import annotations
@@ -19,10 +21,14 @@ import re
 import unicodedata
 import uuid
 from collections import Counter, OrderedDict
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import ChecklistNode
+from app.domain.precondition_models import PreconditionGroupingResult
+
+if TYPE_CHECKING:
+    from app.clients.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,31 @@ _PUNCT_MAP = str.maketrans(
         "\uff1f": "?",   # ？
     }
 )
+
+# ---------------------------------------------------------------------------
+# LLM Prompt 模板
+# ---------------------------------------------------------------------------
+
+_LLM_SYSTEM_PROMPT = """\
+你是一个测试前置条件分析专家。你的任务是将语义等价的测试前置条件归为同一组。
+
+规则：
+1. 如果两个前置条件描述的是相同的环境准备要求（即使措辞不同），它们属于同一组
+2. 如果两个前置条件描述的是不同的环境准备要求，它们属于不同组
+3. 每组选择最简洁清晰的前置条件作为该组的代表名称（representative）
+4. 不要过度合并——只有真正语义等价的才合并
+5. 如果某个前置条件与其他所有条件都不等价，它独立成组
+
+示例：
+输入: ["已登录账号", "用户处于登录状态", "广告主余额 > 0", "广告主账户有余额"]
+输出: 两组 — {"已登录账号": [1,2]}, {"广告主余额充足": [3,4]}"""
+
+_LLM_USER_PROMPT = """\
+以下是 {n} 个测试前置条件，请将语义等价的前置条件归为同一组：
+
+{list}
+
+请输出分组结果。每组包含一个简洁的代表名称和成员编号列表。"""
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +241,14 @@ class PreconditionGrouper:
 
     将 list[TestCase] 按主关键词单归属分组，
     返回 list[ChecklistNode]（根节点的 children）。
+
+    当传入 ``llm_client`` 时，会在关键词分桶之后尝试使用 LLM
+    对桶进行语义合并——将措辞不同但语义等价的前置条件归入同一组。
+    LLM 调用失败时自动回退到纯关键词分桶结果。
     """
+
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self._llm_client = llm_client
 
     def group(self, test_cases: list[TestCase]) -> list[ChecklistNode]:
         """执行分组，返回根节点的子节点列表。
@@ -226,9 +264,142 @@ class PreconditionGrouper:
             return []
 
         buckets = self._bucket_by_keyword(test_cases)
+
+        # LLM 语义合并（可选增强）
+        if self._llm_client is not None:
+            try:
+                buckets = self._llm_merge_buckets(buckets)
+            except Exception as e:
+                logger.warning(
+                    "LLM 语义分组失败，使用关键词分组结果: %s: %s",
+                    type(e).__name__, e,
+                )
+
         return self._build_grouped_tree(buckets)
 
-    # ----- 内部方法 -----
+    # ----- LLM 语义合并 -----
+
+    def _llm_merge_buckets(
+        self, buckets: OrderedDict[str, list[TestCase]]
+    ) -> OrderedDict[str, list[TestCase]]:
+        """使用 LLM 对分桶结果进行语义合并。
+
+        将所有桶的 key（关键词）和"其他"桶中各用例的前置条件文本
+        一次性提交给 LLM，由 LLM 判定哪些应合并为同一组。
+
+        Args:
+            buckets: 关键词分桶的结果。
+
+        Returns:
+            合并后的桶。
+
+        Raises:
+            任何 LLM 调用异常均向上抛出，由 group() 统一捕获并 fallback。
+        """
+        assert self._llm_client is not None
+
+        other_cases = list(buckets.get(_OTHER_GROUP_TITLE, []))
+        non_other_keys = [k for k in buckets if k != _OTHER_GROUP_TITLE]
+
+        # 为"其他"桶中每个用例生成前置条件摘要文本
+        other_case_texts: list[str] = []
+        for case in other_cases:
+            text = "; ".join(case.preconditions) if case.preconditions else case.title
+            other_case_texts.append(text)
+
+        # 去重后的"其他"文本（保持顺序）
+        unique_other_texts = list(dict.fromkeys(other_case_texts))
+
+        # 合并为 LLM 输入列表：[关键词桶 key...] + [其他桶前置条件文本...]
+        all_entries = non_other_keys + unique_other_texts
+
+        if len(all_entries) <= 1:
+            return buckets
+
+        logger.info(
+            "LLM 语义分组启动: %d 个条目 (%d 个关键词桶 + %d 个待分组前置条件)",
+            len(all_entries),
+            len(non_other_keys),
+            len(unique_other_texts),
+        )
+
+        # 调用 LLM
+        numbered = "\n".join(
+            f"{i + 1}. {e}" for i, e in enumerate(all_entries)
+        )
+        result: PreconditionGroupingResult = self._llm_client.generate_structured(
+            system_prompt=_LLM_SYSTEM_PROMPT,
+            user_prompt=_LLM_USER_PROMPT.format(
+                n=len(all_entries), list=numbered,
+            ),
+            response_model=PreconditionGroupingResult,
+        )
+
+        # 应用分组结果
+        n_bucket = len(non_other_keys)
+        new_buckets: OrderedDict[str, list[TestCase]] = OrderedDict()
+        consumed_bucket_keys: set[str] = set()
+        consumed_other_texts: set[str] = set()
+
+        for sem_group in result.groups:
+            valid_indices = [
+                idx - 1
+                for idx in sem_group.member_indices
+                if 1 <= idx <= len(all_entries)
+            ]
+            if not valid_indices:
+                continue
+
+            group_cases: list[TestCase] = []
+
+            for idx in valid_indices:
+                if idx < n_bucket:
+                    # 现有关键词桶
+                    key = non_other_keys[idx]
+                    if key not in consumed_bucket_keys:
+                        group_cases.extend(buckets[key])
+                        consumed_bucket_keys.add(key)
+                else:
+                    # "其他"桶前置条件文本
+                    text = all_entries[idx]
+                    if text not in consumed_other_texts:
+                        consumed_other_texts.add(text)
+                        group_cases.extend(
+                            case
+                            for case, ct in zip(other_cases, other_case_texts)
+                            if ct == text
+                        )
+
+            if group_cases:
+                new_buckets[sem_group.representative] = group_cases
+                logger.debug(
+                    "合并语义组: '%s' (%d 个用例)",
+                    sem_group.representative,
+                    len(group_cases),
+                )
+
+        # 未被 LLM 覆盖的关键词桶保持原样
+        for key in non_other_keys:
+            if key not in consumed_bucket_keys:
+                new_buckets[key] = buckets[key]
+
+        # 未被 LLM 覆盖的"其他"用例保留在"其他"桶
+        remaining_other = [
+            case
+            for case, text in zip(other_cases, other_case_texts)
+            if text not in consumed_other_texts
+        ]
+        if remaining_other:
+            new_buckets[_OTHER_GROUP_TITLE] = remaining_other
+
+        logger.info(
+            "LLM 语义分组完成: %d 个桶 → %d 个桶",
+            len(buckets),
+            len(new_buckets),
+        )
+        return new_buckets
+
+    # ----- 关键词分桶 -----
 
     def _bucket_by_keyword(
         self, test_cases: list[TestCase]
@@ -292,7 +463,7 @@ class PreconditionGrouper:
 
         规则：
         - 命中主关键词的桶：创建 precondition_group 节点
-        - 未命中共享关键词的用例：收敛到“其他”桶
+        - 未命中共享关键词的用例：收敛到"其他"桶
         - 仅单条、且无任何可分组上下文时：保持独立 case 节点
         """
         children: list[ChecklistNode] = []

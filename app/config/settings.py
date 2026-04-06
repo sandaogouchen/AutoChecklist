@@ -4,7 +4,10 @@
 新增 enable_checklist_optimization 配置项。
 新增模版相关配置项。
 新增 knowledge_* 系列配置项，支持 GraphRAG 知识检索功能。
+新增 llm_max_retries / llm_retry_* / llm_fallback_* 系列配置项，
+支持 LLM 调用重试与模型降级。
 新增 CocoSettings，支持 Coco Agent 代码搜索配置。
+新增 checkpoint_batch_* 配置项，支持 Checkpoint 分批规划。
 """
 
 from __future__ import annotations
@@ -27,12 +30,24 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 50000
 
+    # ---- LLM 重试与降级配置 ----
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 1.0
+    llm_retry_max_delay: float = 60.0
+    llm_fallback_model: str = ""
+    llm_fallback_base_url: str = ""
+    llm_fallback_api_key: str = ""
+
     # ---- 迭代评估回路配置 ----
     max_iterations: int = 3
     evaluation_pass_threshold: float = 0.7
 
     # ---- Checklist 优化配置 ----
     enable_checklist_optimization: bool = True
+
+    # ---- Checkpoint 分批规划配置 ----
+    checkpoint_batch_threshold: int = 20
+    checkpoint_batch_size: int = 20
 
     # ---- 模版配置 ----
     template_dir: str = "templates"
