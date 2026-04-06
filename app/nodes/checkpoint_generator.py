@@ -176,13 +176,13 @@ def _build_mr_code_facts_prompt(mr_code_facts: list) -> str:
     for i, fact in enumerate(mr_code_facts, start=1):
         if hasattr(fact, "description"):
             desc = fact.description
-            file_path = getattr(fact, "file_path", "")
-            change_type = getattr(fact, "change_type", "")
+            file_path = getattr(fact, "source_file", getattr(fact, "file_path", ""))
+            change_type = getattr(fact, "fact_type", getattr(fact, "change_type", ""))
             fact_id = getattr(fact, "fact_id", f"MR-FACT-{i:03d}")
         elif isinstance(fact, dict):
             desc = fact.get("description", "")
-            file_path = fact.get("file_path", "")
-            change_type = fact.get("change_type", "")
+            file_path = fact.get("source_file", fact.get("file_path", ""))
+            change_type = fact.get("fact_type", fact.get("change_type", ""))
             fact_id = fact.get("fact_id", f"MR-FACT-{i:03d}")
         else:
             continue
@@ -459,12 +459,23 @@ def _build_checkpoint_prompt(facts: list[ResearchFact], language: str) -> str:
         lines.append(f"- [{fact.fact_id}] ({fact.category}) {fact.description}")
         if fact.source_section:
             lines.append(f"  Source: {fact.source_section}")
+        if fact.requirement:
+            lines.append(f"  Requirement: {fact.requirement}")
+        if fact.branch_hint:
+            lines.append(f"  Branch hint: {fact.branch_hint}")
+        if fact.code_actual_implementation:
+            lines.append(f"  Code implementation: {fact.code_actual_implementation}")
+        if fact.code_todo:
+            lines.append(f"  Code TODO: {fact.code_todo}")
 
     lines.append("")
     lines.append(
         "For each fact, generate 1 or more specific, verifiable test checkpoints. "
         "Include the source fact_ids in each checkpoint. "
         "Ensure checkpoint titles are unique and descriptive.\n\n"
+        "If a fact contains Code TODO / Code implementation notes, "
+        "carry that mismatch risk into the generated checkpoints so the checklist "
+        "explicitly covers the pending discrepancy.\n\n"
         "【输出语言】\n"
         "- checkpoint 的 title 和 objective 请使用中文书写。\n"
         "- preconditions 请使用中文书写，其中的专有名词保留英文原文。\n"

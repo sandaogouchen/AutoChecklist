@@ -202,7 +202,7 @@ def _render_node(
     elif node.node_type == "expected_result":
         _render_expected_result_node(node, lines)
     elif node.node_type == "case":
-        _render_case_node(node, lines, heading_level=2)
+        _render_case_node(node, lines, heading_level=heading_level)
 
 
 def _render_group_node(

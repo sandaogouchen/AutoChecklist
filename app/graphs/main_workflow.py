@@ -23,6 +23,8 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
 """
 from __future__ import annotations
 
+import logging
+
 from langgraph.graph import END, START, StateGraph
 
 from app.clients.llm import LLMClient
@@ -34,6 +36,8 @@ from app.nodes.input_parser import input_parser_node
 from app.nodes.reflection import reflection_node
 from app.nodes.template_loader import build_template_loader_node
 from app.utils.timing import maybe_wrap
+
+logger = logging.getLogger(__name__)
 
 
 def build_workflow(
@@ -175,6 +179,8 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
 
     def case_generation_node(state: GlobalState) -> GlobalState:
         subgraph_input = {
+            "run_id": state.get("run_id"),
+            "run_output_dir": state.get("run_output_dir"),
             "language": state.get("language", "zh-CN"),
             "parsed_document": state["parsed_document"],
             "research_output": state["research_output"],
@@ -191,13 +197,28 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
             "mr_consistency_issues": state.get("mr_consistency_issues", []),
             "mr_combined_summary": state.get("mr_combined_summary", ""),
             "mr_analysis_result": state.get("mr_analysis_result"),
+            "coco_cache_dir": state.get("coco_cache_dir", ""),
+            "coco_cache_run_id": state.get("coco_cache_run_id", ""),
         }
 
         subgraph_input = {k: v for k, v in subgraph_input.items() if v is not None}
 
-        subgraph_result = case_generation_subgraph.invoke(subgraph_input)
+        try:
+            subgraph_result = case_generation_subgraph.invoke(subgraph_input)
+        except Exception as exc:
+            logger.exception(
+                "case_generation subgraph failed: error_type=%s, input_keys=%s, "
+                "has_frontend_mr=%s, has_backend_mr=%s, has_mr_input=%s",
+                exc.__class__.__name__,
+                sorted(subgraph_input.keys()),
+                bool(subgraph_input.get("frontend_mr_config")),
+                bool(subgraph_input.get("backend_mr_config")),
+                bool(subgraph_input.get("mr_input")),
+            )
+            raise
 
         return {
+            "research_output": subgraph_result.get("research_output", state["research_output"]),
             "planned_scenarios": subgraph_result.get("planned_scenarios", []),
             "checkpoints": subgraph_result.get("checkpoints", []),
             "checkpoint_coverage": subgraph_result.get("checkpoint_coverage", []),
@@ -212,6 +233,10 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
             "mr_combined_summary": subgraph_result.get("mr_combined_summary", ""),
             "frontend_mr_result": subgraph_result.get("frontend_mr_result"),
             "backend_mr_result": subgraph_result.get("backend_mr_result"),
+            "coco_validation_summary": subgraph_result.get("coco_validation_summary", {}),
+            "coco_artifacts": subgraph_result.get("coco_artifacts", {}),
+            "coco_cache_dir": subgraph_result.get("coco_cache_dir", state.get("coco_cache_dir", "")),
+            "coco_cache_run_id": subgraph_result.get("coco_cache_run_id", state.get("coco_cache_run_id", "")),
         }
 
     return case_generation_node

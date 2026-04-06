@@ -29,7 +29,6 @@ nodes:
           - id: "campaign-name"
             title: "Campaign name"
             priority: "P2"
-            mandatory: true
           - id: "campaign-objective"
             title: "Campaign objective"
             priority: "P0"
@@ -54,3 +53,12 @@ nodes:
           - id: "ad-landing-page"
             title: "Ad landing page"
             priority: "P1"
+
+  - id: "后端校验" 
+    title: "后端字段校验"
+    children: 
+    - id: "主动派生"
+      title: "主动派生字段"
+    - id: "被动响应"
+      title: "被动响应校验"
+

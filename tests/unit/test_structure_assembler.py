@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.domain.checkpoint_models import Checkpoint
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import CanonicalOutlineNode, ChecklistNode, CheckpointPathMapping
 from app.nodes.structure_assembler import structure_assembler_node
@@ -165,3 +166,147 @@ def test_structure_assembler_merges_equivalent_page_and_operation_nodes() -> Non
 
     locate_node = page_entry.children[0]
     assert _leaf_titles(locate_node) == ["结果一", "结果二"]
+
+
+def test_structure_assembler_adds_code_mismatch_pointer_and_logic_branch() -> None:
+    state = {
+        "draft_cases": [
+            TestCase(
+                id="TC-001",
+                title="验证提交结果",
+                preconditions=["用户已进入提交页"],
+                steps=["点击 `Submit`"],
+                expected_results=["提交成功"],
+                checkpoint_id="CP-001",
+                evidence_refs=[],
+            )
+        ],
+        "checkpoints": [
+            Checkpoint(
+                checkpoint_id="CP-001",
+                title="验证提交结果",
+                code_consistency={
+                    "status": "mismatch",
+                    "detail": "实际代码走降级分支",
+                    "actual_implementation": "1. 先检查开关。\n2. 开关关闭时直接走 fallback 结果。",
+                    "code_snippet": "if not flag: return fallback",
+                },
+            )
+        ],
+        "optimized_tree": [
+            _group(
+                "node-submit",
+                "提交流程",
+                [
+                    _group("node-submit-action", "点击 `Submit`"),
+                ],
+            )
+        ],
+        "checkpoint_paths": [
+            CheckpointPathMapping(
+                checkpoint_id="CP-001",
+                path_node_ids=["node-submit", "node-submit-action"],
+            )
+        ],
+        "canonical_outline_nodes": [
+            CanonicalOutlineNode(
+                node_id="node-submit",
+                display_text="提交流程",
+                kind="business_object",
+                visibility="visible",
+            ),
+            CanonicalOutlineNode(
+                node_id="node-submit-action",
+                display_text="点击 `Submit`",
+                kind="action",
+                visibility="visible",
+            ),
+        ],
+    }
+
+    result = structure_assembler_node(state)
+
+    case = result["test_cases"][0]
+    assert case.expected_results[-1].startswith("[TODO-CODE-MISMATCH] 代码实现逻辑-1")
+
+    submit_action = result["optimized_tree"][0].children[0]
+    assert submit_action.title == "点击 `Submit`"
+    assert [child.title for child in submit_action.children[:2]] == [
+        "提交成功",
+        "[TODO-CODE-MISMATCH] 代码实现逻辑-1: 代码实现与 PRD 不一致",
+    ]
+
+    logic_branch = result["optimized_tree"][1]
+    assert logic_branch.title == "代码实现逻辑"
+    assert logic_branch.children[0].title == "代码实现逻辑-1"
+    assert [child.title for child in logic_branch.children[0].children] == [
+        "1. 先检查开关。",
+        "2. 开关关闭时直接走 fallback 结果。",
+    ]
+
+
+def test_structure_assembler_omits_unverified_code_todo_from_checklist() -> None:
+    state = {
+        "draft_cases": [
+            TestCase(
+                id="TC-001",
+                title="验证提交结果",
+                preconditions=["用户已进入提交页"],
+                steps=["点击 `Submit`"],
+                expected_results=["提交成功"],
+                checkpoint_id="CP-001",
+                evidence_refs=[],
+            )
+        ],
+        "checkpoints": [
+            Checkpoint(
+                checkpoint_id="CP-001",
+                title="验证提交结果",
+                code_consistency={
+                    "status": "unverified",
+                    "detail": "Coco 未能完成验证",
+                    "actual_implementation": "",
+                },
+            )
+        ],
+        "optimized_tree": [
+            _group(
+                "node-submit",
+                "提交流程",
+                [
+                    _group("node-submit-action", "点击 `Submit`"),
+                ],
+            )
+        ],
+        "checkpoint_paths": [
+            CheckpointPathMapping(
+                checkpoint_id="CP-001",
+                path_node_ids=["node-submit", "node-submit-action"],
+            )
+        ],
+        "canonical_outline_nodes": [
+            CanonicalOutlineNode(
+                node_id="node-submit",
+                display_text="提交流程",
+                kind="business_object",
+                visibility="visible",
+            ),
+            CanonicalOutlineNode(
+                node_id="node-submit-action",
+                display_text="点击 `Submit`",
+                kind="action",
+                visibility="visible",
+            ),
+        ],
+    }
+
+    result = structure_assembler_node(state)
+
+    case = result["test_cases"][0]
+    assert case.expected_results == ["提交成功"]
+    assert case.code_consistency["status"] == "unverified"
+    assert "code-unverified" in case.tags
+
+    submit_action = result["optimized_tree"][0].children[0]
+    assert [child.title for child in submit_action.children] == ["提交成功"]
+    assert all(node.title != "代码实现逻辑" for node in result["optimized_tree"])

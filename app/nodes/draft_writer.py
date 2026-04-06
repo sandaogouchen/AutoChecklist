@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 _REF_LEAF_BATCH_SIZE: int = 40
 """参考叶子节点每批处理数量。增大可减少 LLM 调用次数，但单次 prompt 更长。"""
 
-_MAX_WORKERS: int = 5
+_MAX_WORKERS: int = 12
 """ThreadPoolExecutor 并发线程数。控制同时发出的 LLM 请求数量。"""
 
 # LLM 系统提示词：指导模型基于 checkpoint 生成结构化的手动 QA 测试用例

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -159,6 +160,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _summarize_mapping_keys(value) -> list[str]:
+    """返回映射对象的已排序键名列表，非映射对象返回空列表。"""
+    if isinstance(value, dict):
+        return sorted(str(key) for key in value.keys())
+    return []
+
+
 def wrap_node(
     name: str,
     fn,
@@ -189,9 +197,34 @@ def wrap_node(
         had_error = False
         try:
             result = fn(state)
+            if inspect.isawaitable(result):
+                timing_logger.error(
+                    "Node returned awaitable instead of dict: node=%s, fn=%s, "
+                    "return_type=%s, state_keys=%s",
+                    name,
+                    getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn))),
+                    type(result).__name__,
+                    _summarize_mapping_keys(state),
+                )
+            elif not isinstance(result, dict):
+                timing_logger.error(
+                    "Node returned non-dict result: node=%s, fn=%s, "
+                    "return_type=%s, state_keys=%s",
+                    name,
+                    getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn))),
+                    type(result).__name__,
+                    _summarize_mapping_keys(state),
+                )
             return result
-        except Exception:
+        except Exception as exc:
             had_error = True
+            timing_logger.exception(
+                "Node execution failed: node=%s, fn=%s, error_type=%s, state_keys=%s",
+                name,
+                getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn))),
+                exc.__class__.__name__,
+                _summarize_mapping_keys(state),
+            )
             raise
         finally:
             elapsed = time.monotonic() - start

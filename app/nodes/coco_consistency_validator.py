@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from app.domain.mr_models import (
@@ -26,6 +27,9 @@ from app.domain.mr_models import (
 
 logger = logging.getLogger(__name__)
 
+from app.utils.filesystem import ensure_directory, write_json
+from app.utils.filesystem import read_json
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -34,14 +38,30 @@ logger = logging.getLogger(__name__)
 _MAX_CONCURRENCY = 5
 """最大并发校验数。"""
 
-_PER_CASE_TIMEOUT_S = 120
+_PER_CASE_TIMEOUT_S = 2000
 """单个 checkpoint 校验的最大等待时间（秒）。"""
 
-_TOTAL_TIMEOUT_S = 600
+_TOTAL_TIMEOUT_S = 6000
 """全部 checkpoint 校验的最大总时间（秒）。"""
 
 _CONFIDENCE_THRESHOLD = 0.7
 """置信度阈值：低于此值的 mismatch 不标注 TODO。"""
+
+
+def _resolve_total_timeout_s(checkpoint_count: int) -> float:
+    """根据 checkpoint 数量推导本轮 Coco 校验的总超时。
+
+    现有配置中的 `_TOTAL_TIMEOUT_S` 作为下限；
+    当 checkpoint 数量较多时，按 `ceil(count / concurrency) * per_case_timeout`
+    放大总超时，避免配置上出现“理论最短串批耗时已经超过总超时”的情况。
+    """
+    if checkpoint_count <= 0:
+        return float(_TOTAL_TIMEOUT_S)
+
+    concurrency = max(int(_MAX_CONCURRENCY), 1)
+    waves = (checkpoint_count + concurrency - 1) // concurrency
+    required_timeout = waves * float(_PER_CASE_TIMEOUT_S)
+    return max(float(_TOTAL_TIMEOUT_S), required_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +83,7 @@ def build_coco_consistency_validator_node(
         ``coco_consistency_validator_node(state: CaseGenState) -> dict`` 节点函数。
     """
 
-    async def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
+    async def _run_validation(state: dict[str, Any]) -> dict[str, Any]:
         """Coco Task 2 — 逐 checkpoint 一致性校验主逻辑。
 
         当 use_coco 未启用或无 checkpoint 时直接 pass-through。
@@ -92,6 +112,17 @@ def build_coco_consistency_validator_node(
             logger.info("coco_consistency_validator: 无 Coco 端配置，pass-through")
             return {}
 
+        cached = _load_cached_task2_results(state, checkpoints)
+        if cached is not None:
+            logger.info(
+                "coco_consistency_validator: 命中缓存 run=%s",
+                state.get("coco_cache_run_id", ""),
+            )
+            return cached
+
+        if not coco_settings or not getattr(coco_settings, "coco_jwt_token", ""):
+            raise RuntimeError("Coco 校验已启用，但 coco_settings / COCO_JWT_TOKEN 未配置")
+
         logger.info(
             "coco_consistency_validator: 开始校验 %d 个 checkpoint (Coco 端: %s)",
             len(checkpoints),
@@ -104,29 +135,37 @@ def build_coco_consistency_validator_node(
         # ---- 多线程并行校验 ----
         semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
         start_time = time.monotonic()
+        effective_total_timeout_s = _resolve_total_timeout_s(len(checkpoints))
+
+        task2_records: list[dict[str, Any]] = []
 
         async def _validate_single(cp: Any, index: int) -> tuple[int, CodeConsistencyResult]:
             """校验单个 checkpoint，带信号量和超时控制。"""
             async with semaphore:
                 # 总超时检查
                 elapsed = time.monotonic() - start_time
-                if elapsed > _TOTAL_TIMEOUT_S:
+                if elapsed > effective_total_timeout_s:
                     logger.warning(
-                        "coco_consistency_validator: 总超时 %.1fs > %ds，跳过 checkpoint #%d",
-                        elapsed, _TOTAL_TIMEOUT_S, index,
+                        "coco_consistency_validator: 总超时 %.1fs > %.1fs，跳过 checkpoint #%d",
+                        elapsed, effective_total_timeout_s, index,
                     )
                     return index, CodeConsistencyResult(status="unverified", verified_by="")
 
                 try:
-                    result = await asyncio.wait_for(
+                    result, artifact_record = await asyncio.wait_for(
                         _validate_checkpoint_via_coco(
                             checkpoint=cp,
                             mr_context=mr_context,
                             coco_settings=coco_settings,
                             llm_client=llm_client,
+                            artifact_context={
+                                "run_output_dir": state.get("run_output_dir"),
+                                "checkpoint_index": index,
+                            },
                         ),
                         timeout=_PER_CASE_TIMEOUT_S,
                     )
+                    task2_records.append(artifact_record)
                     return index, result
                 except asyncio.TimeoutError:
                     cp_name = _get_cp_name(cp)
@@ -150,22 +189,34 @@ def build_coco_consistency_validator_node(
                     )
 
         # 并发执行
-        tasks = [
-            _validate_single(cp, i)
+        tasks = {
+            asyncio.create_task(_validate_single(cp, i)): i
             for i, cp in enumerate(checkpoints)
-        ]
+        }
+        raw_results: list[Any] = []
 
-        try:
-            raw_results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=_TOTAL_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
+        done, pending = await asyncio.wait(
+            tasks.keys(),
+            timeout=effective_total_timeout_s,
+        )
+
+        for task in done:
+            try:
+                raw_results.append(task.result())
+            except Exception as exc:
+                raw_results.append(exc)
+
+        if pending:
             logger.error(
-                "coco_consistency_validator: 全部校验总超时 (%ds)",
+                "coco_consistency_validator: 全部校验总超时 (configured=%.1fs, effective=%.1fs, pending=%d)",
                 _TOTAL_TIMEOUT_S,
+                effective_total_timeout_s,
+                len(pending),
             )
-            raw_results = []
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         # ---- 整理结果 ----
         results_map: dict[int, CodeConsistencyResult] = {}
@@ -183,6 +234,12 @@ def build_coco_consistency_validator_node(
         summary = _build_validation_summary(results_map, len(checkpoints))
 
         total_elapsed = time.monotonic() - start_time
+        coco_artifacts = _persist_task2_artifacts(
+            state=state,
+            mr_context=mr_context,
+            summary=summary,
+            records=task2_records,
+        )
         logger.info(
             "coco_consistency_validator 完成: "
             "total=%d, confirmed=%d, mismatch=%d, unverified=%d, elapsed=%.1fs",
@@ -192,13 +249,81 @@ def build_coco_consistency_validator_node(
             summary["unverified"],
             total_elapsed,
         )
+        if summary["unverified"] > 0:
+            logger.warning(
+                "coco_consistency_validator: 存在未完成校验，继续后续流程: total=%d, unverified=%d",
+                summary["total"],
+                summary["unverified"],
+            )
 
         return {
             "checkpoints": annotated,
             "coco_validation_summary": summary,
+            "coco_artifacts": {
+                **state.get("coco_artifacts", {}),
+                **coco_artifacts,
+            },
         }
 
+    def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
+        """同步 LangGraph 节点入口，内部显式执行异步校验流程。"""
+        return asyncio.run(_run_validation(state))
+
     return coco_consistency_validator_node
+
+
+def _load_cached_task2_results(
+    state: dict[str, Any],
+    checkpoints: list[Any],
+) -> dict[str, Any] | None:
+    """从历史 Coco 工件中恢复 Task2 校验结果。"""
+    cache_dir = state.get("coco_cache_dir")
+    if not cache_dir:
+        return None
+
+    results_path = Path(cache_dir) / "task2_results.json"
+    summary_path = Path(cache_dir) / "task2_summary.json"
+    if not results_path.exists():
+        return None
+
+    payload = read_json(results_path)
+    result_by_checkpoint_id: dict[str, CodeConsistencyResult] = {}
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        checkpoint_id = str(item.get("checkpoint_id", "")).strip()
+        result_payload = item.get("result")
+        if not checkpoint_id or not isinstance(result_payload, dict):
+            continue
+        result_by_checkpoint_id[checkpoint_id] = CodeConsistencyResult.model_validate(
+            result_payload
+        )
+
+    results_map: dict[int, CodeConsistencyResult] = {}
+    for idx, checkpoint in enumerate(checkpoints):
+        checkpoint_id = _get_attr_safe(checkpoint, "checkpoint_id", "")
+        cached_result = result_by_checkpoint_id.get(checkpoint_id)
+        if cached_result is not None:
+            results_map[idx] = cached_result
+
+    annotated = _annotate_checkpoints(checkpoints, results_map)
+    summary = _build_validation_summary(results_map, len(checkpoints))
+
+    artifacts = {}
+    if summary_path.exists():
+        artifacts["task2_summary"] = str(summary_path)
+    artifacts["task2_results"] = str(results_path)
+
+    return {
+        "checkpoints": annotated,
+        "coco_validation_summary": summary,
+        "coco_artifacts": {
+            **state.get("coco_artifacts", {}),
+            **artifacts,
+        },
+        "coco_cache_dir": state.get("coco_cache_dir", ""),
+        "coco_cache_run_id": state.get("coco_cache_run_id", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +336,8 @@ async def _validate_checkpoint_via_coco(
     mr_context: dict[str, str],
     coco_settings: Any | None,
     llm_client: Any | None,
-) -> CodeConsistencyResult:
+    artifact_context: dict[str, Any] | None = None,
+) -> tuple[CodeConsistencyResult, dict[str, Any]]:
     """向 Coco 发送单个 checkpoint 的一致性校验请求。
 
     Args:
@@ -231,15 +357,38 @@ async def _validate_checkpoint_via_coco(
     client = CocoClient(coco_settings, llm_client=llm_client)
 
     try:
-        result = await client.send_validation_task(
+        result, artifacts = await client.run_validation_task(
             checkpoint=checkpoint,
             mr_context=mr_context,
+            timeout_s=int(_PER_CASE_TIMEOUT_S),
         )
-        return result
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": _get_cp_name(checkpoint),
+            "mr_context": mr_context,
+            **artifacts,
+        }
+        run_output_dir = (artifact_context or {}).get("run_output_dir")
+        checkpoint_index = (artifact_context or {}).get("checkpoint_index", 0)
+        if run_output_dir:
+            coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+            detail_path = write_json(
+                coco_dir / f"task2_checkpoint_{checkpoint_index:03d}.json",
+                record,
+            )
+            record["artifact_file"] = str(detail_path)
+        return result, record
     except Exception as exc:
         cp_name = _get_cp_name(checkpoint)
         logger.warning("Coco Task 2 校验失败 [%s]: %s", cp_name, exc)
-        return CodeConsistencyResult(status="unverified", verified_by="")
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": cp_name,
+            "mr_context": mr_context,
+            "error_type": exc.__class__.__name__,
+            "error_message": str(exc),
+        }
+        return CodeConsistencyResult(status="unverified", verified_by=""), record
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +410,11 @@ def _annotate_checkpoints(
     for idx, cp in enumerate(checkpoints):
         result = results_map.get(idx)
         if result is None:
-            # 未校验的 checkpoint 保持原样
-            continue
+            result = CodeConsistencyResult(status="unverified", verified_by="")
+        result_payload = result.model_dump(mode="json")
 
         # ---- 设置 code_consistency ----
-        _set_attr_safe(cp, "code_consistency", result)
+        _set_attr_safe(cp, "code_consistency", result_payload)
 
         # ---- 设置 tags ----
         existing_tags = _get_tags(cp)
@@ -292,7 +441,6 @@ def _annotate_checkpoints(
                 )
                 new_expected = (expected or "") + todo_text
                 _set_attr_safe(cp, "expected_result", new_expected)
-
         elif result.status == "unverified":
             if "code_unverified" not in existing_tags:
                 existing_tags.append("code_unverified")
@@ -316,12 +464,40 @@ def _build_mr_context(
     """
     mr_url = ""
     git_url = ""
+    branch = ""
     for side, config in coco_configs:
         if config.mr_url:
             mr_url = mr_url or config.mr_url
         if config.codebase.git_url:
             git_url = git_url or config.codebase.git_url
-    return {"mr_url": mr_url, "git_url": git_url}
+        if config.codebase.branch:
+            branch = branch or config.codebase.branch
+    return {"mr_url": mr_url, "git_url": git_url, "branch": branch}
+
+
+def _persist_task2_artifacts(
+    state: dict[str, Any],
+    mr_context: dict[str, str],
+    summary: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """持久化 Task 2 汇总与原始返回。"""
+    run_output_dir = state.get("run_output_dir")
+    if not run_output_dir:
+        return {}
+
+    coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+    summary_payload = {
+        "mr_context": mr_context,
+        "summary": summary,
+        "record_count": len(records),
+    }
+    summary_path = write_json(coco_dir / "task2_summary.json", summary_payload)
+    results_path = write_json(coco_dir / "task2_results.json", records)
+    return {
+        "task2_summary": str(summary_path),
+        "task2_results": str(results_path),
+    }
 
 
 def _build_validation_summary(
@@ -389,5 +565,5 @@ def _set_attr_safe(obj: Any, attr: str, value: Any) -> None:
     else:
         try:
             setattr(obj, attr, value)
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError, ValueError):
             logger.debug("无法设置属性 %s on %s", attr, type(obj).__name__)

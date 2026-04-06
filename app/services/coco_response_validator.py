@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import re
 from typing import Any
@@ -36,6 +37,21 @@ class CocoResponseValidator:
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
+
+    async def _call_llm_chat(self, prompt: str) -> str:
+        """兼容同步/异步 chat 接口与不同参数签名。"""
+        chat_fn = self._llm_client.chat
+        try:
+            response = chat_fn(prompt)
+        except TypeError:
+            response = chat_fn(
+                "你负责将 Coco 返回转换为严格 JSON。只输出 JSON。",
+                prompt,
+            )
+
+        if inspect.isawaitable(response):
+            return await response
+        return response
 
     async def validate_and_fix(
         self,
@@ -218,7 +234,7 @@ class CocoResponseValidator:
 
         for attempt in range(self._max_infer_retries):
             try:
-                llm_resp = await self._llm_client.chat(prompt)
+                llm_resp = await self._call_llm_chat(prompt)
                 inferred = self._extract_json(llm_resp)
                 if inferred:
                     try:
@@ -273,7 +289,7 @@ class CocoResponseValidator:
 
         for attempt in range(self._max_infer_retries):
             try:
-                llm_resp = await self._llm_client.chat(prompt)
+                llm_resp = await self._call_llm_chat(prompt)
                 inferred = self._extract_json(llm_resp)
                 if inferred:
                     try:

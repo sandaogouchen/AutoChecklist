@@ -68,8 +68,8 @@ def build_case_generation_subgraph(
 
     子图结构（线性流水线）：
     ```
-    START → mr_analyzer → mr_checkpoint_injector → scenario_planner
-    → checkpoint_generator → checkpoint_evaluator
+    START → mr_analyzer → scenario_planner
+    → checkpoint_generator → checkpoint_evaluator → mr_checkpoint_injector
     → coverage_detector → checkpoint_outline_planner → evidence_mapper
     → draft_writer → coco_consistency_validator → structure_assembler → END
     ```
@@ -122,18 +122,21 @@ def build_case_generation_subgraph(
     builder.add_node("draft_writer", maybe_wrap("draft_writer", DraftWriterNode(llm_client), timer, iteration_index))
 
     # ---- Coco 一致性验证节点（可选） ----
-    coco_validator_node = build_coco_consistency_validator_node(coco_settings=coco_settings)
+    coco_validator_node = build_coco_consistency_validator_node(
+        llm_client=llm_client,
+        coco_settings=coco_settings,
+    )
     builder.add_node("coco_consistency_validator", maybe_wrap("coco_consistency_validator", coco_validator_node, timer, iteration_index))
 
     builder.add_node("structure_assembler", maybe_wrap("structure_assembler", structure_assembler_node, timer, iteration_index))
 
     # ---- 边连接 ----
     builder.add_edge(START, "mr_analyzer")
-    builder.add_edge("mr_analyzer", "mr_checkpoint_injector")
-    builder.add_edge("mr_checkpoint_injector", "scenario_planner")
+    builder.add_edge("mr_analyzer", "scenario_planner")
     builder.add_edge("scenario_planner", "checkpoint_generator")
     builder.add_edge("checkpoint_generator", "checkpoint_evaluator")
-    builder.add_edge("checkpoint_evaluator", "coverage_detector")
+    builder.add_edge("checkpoint_evaluator", "mr_checkpoint_injector")
+    builder.add_edge("mr_checkpoint_injector", "coverage_detector")
     builder.add_edge("coverage_detector", "checkpoint_outline_planner")
     builder.add_edge("checkpoint_outline_planner", "evidence_mapper")
     builder.add_edge("evidence_mapper", "draft_writer")
