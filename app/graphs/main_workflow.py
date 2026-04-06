@@ -18,6 +18,8 @@ input_parser → template_loader → [xmind_reference_loader] → [project_conte
 - 新增可选 timer / iteration_index 参数，支持节点级耗时计量
 - 使用 state_bridge.build_bridge 替代手动桥接函数，实现自动字段转发
 - 出向回传采用显式 allowlist，避免子图内部中间态默认泄漏回主图
+- 新增可选 codebase_root / coco_settings 参数，支持 MR 代码分析
+- 桥接节点新增 MR 相关字段映射（mr_input, mr_code_facts, mr_consistency_issues 等）
 """
 from __future__ import annotations
 
@@ -41,6 +43,8 @@ def build_workflow(
     xmind_reference_loader_node=None,
     timer=None,
     iteration_index: int = 0,
+    codebase_root: str | None = None,
+    coco_settings=None,
 ):
     """构建并编译主工作流图。
 
@@ -66,12 +70,18 @@ def build_workflow(
             插入在 template_loader 之后、project_context_loader 之前。
         timer: 可选的 ``NodeTimer`` 实例，传入时自动包装每个节点以记录耗时。
         iteration_index: 当前迭代轮次索引，用于在 timer 中区分不同轮次。
+        codebase_root: 可选的本地代码库根路径，传递给 MR 分析节点。
+        coco_settings: 可选的 CocoSettings 实例，传递给 Coco 相关节点。
 
     Returns:
         编译后的 LangGraph 可执行工作流。
     """
     case_generation_subgraph = build_case_generation_subgraph(
-        llm_client, timer=timer, iteration_index=iteration_index,
+        llm_client,
+        timer=timer,
+        iteration_index=iteration_index,
+        codebase_root=codebase_root,
+        coco_settings=coco_settings,
     )
 
     # 使用自动状态桥接替代手动字段映射。
@@ -156,6 +166,11 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
     """[DEPRECATED] 手动桥接节点，已被 state_bridge.build_bridge 替代。
 
     保留此函数仅用于紧急回滚。正常开发应使用 build_bridge 自动桥接。
+    变更：
+    - 新增 mandatory_skeleton 字段的传入与传出映射
+    - 新增 xmind_reference_summary 字段的传入与传出映射
+    - 新增 coverage_result 字段的传出映射
+    - 新增 MR 相关字段的传入与传出映射
     """
 
     def case_generation_node(state: GlobalState) -> GlobalState:
@@ -168,6 +183,14 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
             "project_template": state.get("project_template"),
             "mandatory_skeleton": state.get("mandatory_skeleton"),
             "xmind_reference_summary": state.get("xmind_reference_summary"),
+            # ---- MR 分析相关字段传入子图 ----
+            "frontend_mr_config": state.get("frontend_mr_config"),
+            "backend_mr_config": state.get("backend_mr_config"),
+            "mr_input": state.get("mr_input"),
+            "mr_code_facts": state.get("mr_code_facts", []),
+            "mr_consistency_issues": state.get("mr_consistency_issues", []),
+            "mr_combined_summary": state.get("mr_combined_summary", ""),
+            "mr_analysis_result": state.get("mr_analysis_result"),
         }
 
         subgraph_input = {k: v for k, v in subgraph_input.items() if v is not None}
@@ -182,6 +205,13 @@ def _build_case_generation_bridge(case_generation_subgraph):  # pragma: no cover
             "test_cases": subgraph_result.get("test_cases", []),
             "optimized_tree": subgraph_result.get("optimized_tree", []),
             "coverage_result": subgraph_result.get("coverage_result"),
+            # ---- MR 分析结果回传 ----
+            "mr_analysis_result": subgraph_result.get("mr_analysis_result"),
+            "mr_code_facts": subgraph_result.get("mr_code_facts", []),
+            "mr_consistency_issues": subgraph_result.get("mr_consistency_issues", []),
+            "mr_combined_summary": subgraph_result.get("mr_combined_summary", ""),
+            "frontend_mr_result": subgraph_result.get("frontend_mr_result"),
+            "backend_mr_result": subgraph_result.get("backend_mr_result"),
         }
 
     return case_generation_node

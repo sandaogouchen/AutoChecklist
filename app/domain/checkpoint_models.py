@@ -5,11 +5,13 @@
 - ``CheckpointCoverage``：单个 checkpoint 的用例覆盖状态
 
 新增模版绑定字段，支持将 checkpoint 强制归类到项目级 Checklist 模版的叶子节点。
+新增 code_consistency 字段，支持 Coco 代码一致性校验结果。
 """
 
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +41,7 @@ class Checkpoint(BaseModel):
         template_match_confidence: 模版匹配置信度（0.0-1.0）。
         template_match_reason: 模版匹配的理由说明。
         template_match_low_confidence: 低置信度标记，True 表示匹配不可靠。
+        code_consistency: 代码一致性校验结果（来自 Coco Agent）。
     """
 
     checkpoint_id: str = ""
@@ -59,6 +62,9 @@ class Checkpoint(BaseModel):
     template_match_confidence: float = 0.0
     template_match_reason: str = ""
     template_match_low_confidence: bool = False
+
+    # ---- 代码一致性校验字段 ----
+    code_consistency: dict[str, Any] | None = None
 
 
 class CheckpointCoverage(BaseModel):

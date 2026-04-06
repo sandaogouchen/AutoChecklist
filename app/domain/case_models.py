@@ -4,9 +4,12 @@
 作为工作流最终输出的核心模型。
 
 新增模版绑定字段，支持 testcase 继承 checkpoint 的模版归属信息。
+新增 tags 和 code_consistency 字段，支持 MR 代码分析结果标注。
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -32,6 +35,8 @@ class TestCase(BaseModel):
         template_path_titles: 从模版根到叶子的节点标题路径（继承自 checkpoint）。
         template_match_confidence: 模版匹配置信度（继承自 checkpoint）。
         template_match_low_confidence: 低置信度标记（继承自 checkpoint）。
+        tags: 标签列表，用于标注测试用例的来源或特征（如 'mr_derived'）。
+        code_consistency: 代码一致性校验结果。
     """
 
     # 防止 pytest 将此类误识别为测试类
@@ -54,6 +59,10 @@ class TestCase(BaseModel):
     template_path_titles: list[str] = Field(default_factory=list)
     template_match_confidence: float = 0.0
     template_match_low_confidence: bool = False
+
+    # ---- MR 分析字段 ----
+    tags: list[str] = Field(default_factory=list)
+    code_consistency: dict[str, Any] | None = None
 
 
 class QualityReport(BaseModel):
