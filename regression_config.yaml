@@ -1,0 +1,13 @@
+# AutoChecklist 回归评估配置
+# 只需配置运行目录和 PRD 路径
+
+# 基线运行（效果好的版本）
+baseline_run_dir: "output/runs/RUN-20260406-001"
+baseline_label: "feat/mr-analysis-integration"
+
+# 候选运行（待评估的版本）
+candidate_run_dir: "output/runs/RUN-20260407-001"
+candidate_label: "main"
+
+# PRD 文件路径（Phase 2 LLM 评估时使用）
+prd_path: "testprd.md"
