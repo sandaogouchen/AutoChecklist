@@ -47,7 +47,7 @@ def replay_delivery_from_run_result(
         checkpoints=checkpoints,
         research_output=run.research_summary,
         output_dir=output_dir or run_dir,
-        title=run.input.file_path if run.input else run_result_file.stem,
+        title=run.input.file_id if run.input else run_result_file.stem,
         run_id=run.run_id,
     )
 

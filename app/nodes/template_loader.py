@@ -31,7 +31,7 @@ def build_template_loader_node():
         if not template_file_path:
             request = state.get("request")
             if request is not None:
-                template_file_path = getattr(request, "template_file_path", None) or ""
+                template_file_path = getattr(request, "template_file_id", None) or ""
                 template_name = getattr(request, "template_name", None) or ""
 
         if not template_file_path and not template_name:

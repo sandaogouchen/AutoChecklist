@@ -41,9 +41,11 @@ from app.nodes.evaluation import evaluate
 from app.nodes.project_context_loader import build_project_context_loader
 from app.nodes.xmind_reference_loader import build_xmind_reference_loader_node
 from app.parsers.xmind_parser import XMindParser
+from app.repositories.file_repository import FileRepository
 from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
+from app.services.file_service import FileService
 from app.services.platform_dispatcher import PlatformDispatcher
 from app.services.project_context_service import ProjectContextService
 from app.services.xmind_connector import FileXMindConnector
@@ -78,6 +80,7 @@ class WorkflowService:
         platform_dispatcher: PlatformDispatcher | None = None,
         enable_xmind: bool = True,
         project_context_service: ProjectContextService | None = None,
+        file_service: FileService | None = None,
         graphrag_engine=None,
         coco_settings: CocoSettings | None = None,
     ) -> None:
@@ -104,6 +107,9 @@ class WorkflowService:
             )
 
         self.project_context_service = project_context_service
+        self.file_service = file_service or FileService(
+            FileRepository(db_path=Path(settings.output_dir) / "files.sqlite3")
+        )
 
     def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
         """创建并执行一次带迭代评估回路的用例生成任务。"""
@@ -113,6 +119,7 @@ class WorkflowService:
         )
 
         project_id = getattr(request, 'project_id', None)
+        resolved_files = self._resolve_request_files(run_id, request)
 
         self.repository.save(
             run_id, request.model_dump(mode="json", by_alias=True), "request.json"
@@ -123,7 +130,7 @@ class WorkflowService:
 
         result: dict = {}
         try:
-            result = self._execute_with_iteration(run_id, request, run_state)
+            result = self._execute_with_iteration(run_id, request, run_state, resolved_files)
 
             run_state = self.state_repository.load_run_state(run_id)
 
@@ -184,6 +191,7 @@ class WorkflowService:
         run_id: str,
         request: CaseGenerationRequest,
         run_state,
+        resolved_files: dict[str, str | None],
     ) -> dict:
         """执行带迭代评估回路的工作流。
 
@@ -208,6 +216,7 @@ class WorkflowService:
                 run_id=run_id,
                 request=request,
                 iteration_index=run_state.iteration_index,
+                resolved_files=resolved_files,
             )
 
             if run_state.iteration_index > 0 and result:
@@ -434,23 +443,34 @@ class WorkflowService:
         run_id: str,
         request: CaseGenerationRequest,
         iteration_index: int,
+        resolved_files: dict[str, str | None] | None = None,
     ) -> dict:
         """构建工作流输入，包含 MR/Coco 配置与运行目录。"""
+        if resolved_files is None:
+            resolved_files = {
+                "file_path": request.file_id,
+                "template_file_path": getattr(request, "template_file_id", None),
+                "reference_xmind_path": getattr(request, "reference_xmind_file_id", None),
+            }
+
         workflow_input = {
             "run_id": run_id,
             "run_output_dir": str(self.repository._run_dir(run_id)),
-            "file_path": request.file_path,
+            "file_path": resolved_files["file_path"],
             "language": request.language,
             "request": request,
             "model_config": request.llm_config,
             "iteration_index": iteration_index,
             "project_id": getattr(request, "project_id", None) or "",
-            "reference_xmind_path": request.reference_xmind_path,
         }
 
-        template_file_path = getattr(request, "template_file_path", None)
+        template_file_path = resolved_files.get("template_file_path")
         if template_file_path:
             workflow_input["template_file_path"] = template_file_path
+
+        reference_xmind_path = resolved_files.get("reference_xmind_path")
+        if reference_xmind_path:
+            workflow_input["reference_xmind_path"] = reference_xmind_path
 
         frontend_mr = self._build_mr_source_config(getattr(request, "frontend_mr", None))
         if frontend_mr is not None:
@@ -473,6 +493,39 @@ class WorkflowService:
                 raise RuntimeError("Coco 已启用，但 COCO_JWT_TOKEN 未配置")
 
         return workflow_input
+
+    def _resolve_request_files(
+        self,
+        run_id: str,
+        request: CaseGenerationRequest,
+    ) -> dict[str, str | None]:
+        if self.file_service is None:
+            raise RuntimeError("FileService 未配置，无法解析文件 ID")
+
+        input_dir = self.repository._run_dir(run_id) / "input_files"
+        return {
+            "file_path": str(
+                self.file_service.materialize_to_path(
+                    request.file_id,
+                    target_dir=input_dir,
+                    file_name_prefix="source",
+                )
+            ),
+            "template_file_path": str(
+                self.file_service.materialize_to_path(
+                    request.template_file_id,
+                    target_dir=input_dir,
+                    file_name_prefix="template",
+                )
+            ) if getattr(request, "template_file_id", None) else None,
+            "reference_xmind_path": str(
+                self.file_service.materialize_to_path(
+                    request.reference_xmind_file_id,
+                    target_dir=input_dir,
+                    file_name_prefix="reference_xmind",
+                )
+            ) if getattr(request, "reference_xmind_file_id", None) else None,
+        }
 
     def _find_matching_coco_cache_run(
         self,

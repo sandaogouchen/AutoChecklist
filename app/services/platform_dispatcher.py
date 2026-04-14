@@ -71,7 +71,7 @@ class PlatformDispatcher:
                     checkpoints=workflow_result.get("checkpoints", []),
                     research_output=run.research_summary,
                     optimized_tree=workflow_result.get("optimized_tree", []),
-                    title=run.input.file_path if run.input else "",
+                    title=run.input.file_id if run.input else "",
                     output_dir=run_dir,
                 )
                 if xmind_result.success:

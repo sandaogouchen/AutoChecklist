@@ -14,13 +14,17 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.document_models import ParsedDocument
 from app.domain.research_models import ResearchOutput
+
+
+FILE_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 class ModelConfigOverride(BaseModel):
@@ -73,10 +77,11 @@ class CaseGenerationRequest(BaseModel):
     """用例生成请求。
 
     新增字段：
-    - template_file_path: 可选的项目级 Checklist 模版文件路径（YAML 格式）。
+    - file_id: 主输入文件 ID。
+    - template_file_id: 可选的项目级 Checklist 模版文件 ID（YAML 格式）。
     - template_name: 可选的模版名称，对应 templates/ 目录下的 YAML 文件（不含扩展名）。
-      与 template_file_path 二选一使用，template_name 优先。
-    - reference_xmind_path: 可选的参考 XMind checklist 文件路径，
+      与 template_file_id 二选一使用，template_name 优先。
+    - reference_xmind_file_id: 可选的参考 XMind checklist 文件 ID，
       系统将解析其结构并用于引导 checklist 生成。
     - frontend_mr: 可选的前端 MR 配置。
     - backend_mr: 可选的后端 MR 配置。
@@ -84,7 +89,10 @@ class CaseGenerationRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    file_path: str
+    file_id: str = Field(
+        ...,
+        validation_alias=AliasChoices("file_id", "file_path"),
+    )
     language: str = "zh-CN"
     llm_config: ModelConfigOverride = Field(
         default_factory=ModelConfigOverride,
@@ -93,13 +101,28 @@ class CaseGenerationRequest(BaseModel):
     )
     options: RunOptions = Field(default_factory=RunOptions)
     project_id: str | None = None
-    template_file_path: str | None = None
+    template_file_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("template_file_id", "template_file_path"),
+    )
     template_name: str | None = None
-    reference_xmind_path: str | None = None
+    reference_xmind_file_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reference_xmind_file_id", "reference_xmind_path"),
+    )
 
     # ---- MR 分析字段 ----
     frontend_mr: MRRequestConfig | None = None
     backend_mr: MRRequestConfig | None = None
+
+    @field_validator("file_id", "template_file_id", "reference_xmind_file_id")
+    @classmethod
+    def _validate_file_ids(cls, value: str | None, info):
+        if value is None:
+            return None
+        if not FILE_ID_RE.fullmatch(value):
+            raise ValueError(f"无效的 {info.field_name}: 必须是 32 位十六进制 file_id")
+        return value.lower()
 
 
 class CaseGenerationRun(BaseModel):

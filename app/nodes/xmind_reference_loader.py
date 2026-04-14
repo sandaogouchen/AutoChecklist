@@ -42,6 +42,11 @@ def build_xmind_reference_loader_node(
     def node(state: GlobalState) -> dict[str, Any]:
         ref_path = state.get("reference_xmind_path")
         if not ref_path:
+            request = state.get("request")
+            if request is not None:
+                ref_path = getattr(request, "reference_xmind_file_id", None)
+
+        if not ref_path:
             return {}
 
         try:

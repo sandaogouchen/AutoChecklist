@@ -58,7 +58,12 @@ def create_case_generation_run(
     workflow_service: WorkflowService = Depends(_get_workflow_service),
 ) -> CaseGenerationRun:
     """创建一次用例生成任务，同步执行工作流并返回结果。"""
-    return workflow_service.create_run(payload)
+    try:
+        return workflow_service.create_run(payload)
+    except FileNotFoundError as exc:
+        # 传入的 file_id / template_file_id / reference_xmind_file_id 不存在，
+        # 属于请求参数错误，应返回 4xx 而不是 500。
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/v1/case-generation/runs/{run_id}", response_model=CaseGenerationRun)

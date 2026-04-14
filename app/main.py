@@ -17,11 +17,14 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.api.file_routes import router as file_router
 from app.config.settings import Settings, get_settings
 from app.logging import configure_app_logging
+from app.repositories.file_repository import FileRepository
 from app.services.workflow_service import WorkflowService
 from app.api.project_routes import router as project_router
 from app.repositories.project_repository import ProjectRepository
+from app.services.file_service import FileService
 from app.services.project_context_service import ProjectContextService
 
 logger = logging.getLogger(__name__)
@@ -113,23 +116,30 @@ def create_app(
     default_project_service = ProjectContextService(
         ProjectRepository(db_path=project_db_path)
     )
+    file_db_path = Path(app_settings.output_dir) / "files.sqlite3"
+    default_file_service = FileService(FileRepository(db_path=file_db_path))
 
     if workflow_service is not None:
         project_context_service = (
             workflow_service.project_context_service or default_project_service
         )
         workflow_service.project_context_service = project_context_service
+        if getattr(workflow_service, "file_service", None) is None:
+            workflow_service.file_service = default_file_service
         app.state.workflow_service = workflow_service
     else:
         project_context_service = default_project_service
         app.state.workflow_service = WorkflowService(
             app_settings,
             project_context_service=project_context_service,
+            file_service=default_file_service,
         )
 
     app.state.project_context_service = project_context_service
+    app.state.file_service = app.state.workflow_service.file_service
 
     app.include_router(router)
+    app.include_router(file_router)
     app.include_router(project_router)
 
     # ---- 注册知识库管理 API ----

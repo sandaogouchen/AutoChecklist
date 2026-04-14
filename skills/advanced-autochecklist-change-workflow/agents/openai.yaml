@@ -1,4 +1,4 @@
 interface:
-  display_name: "genFu Change Workflow"
+  display_name: "advanced-autochecklist-change-workflow"
   short_description: "Repo workflow with editable Git config and access mode"
-  default_prompt: "Use $genfu-change-workflow to assemble repo config from the in-skill profile, choose the goal-first or PRD-first path, optionally brainstorm adjacent requirements, and transition into code understanding and execution with self-feedback."
+  default_prompt: "Use $advanced-autochecklist-change-workflow to assemble repo config from the in-skill profile, choose the goal-first or PRD-first path, optionally brainstorm adjacent requirements, and transition into code understanding and execution with self-feedback."

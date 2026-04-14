@@ -32,7 +32,7 @@ def _resolve_file_path(state: GlobalState) -> Path:
 
     路径查找优先级：
     1. ``state["file_path"]`` — 直接指定
-    2. ``state["request"].file_path`` — 从请求对象提取
+    2. ``state["request"].file_id`` — 从请求对象提取
 
     对于相对路径，会以当前工作目录（cwd）为基准转换为绝对路径。
 
@@ -42,7 +42,7 @@ def _resolve_file_path(state: GlobalState) -> Path:
     """
     raw_path = state.get("file_path")
     if not raw_path and state.get("request"):
-        raw_path = state["request"].file_path
+        raw_path = state["request"].file_id
     if not raw_path:
         raise ValueError("Workflow state is missing file_path")
 

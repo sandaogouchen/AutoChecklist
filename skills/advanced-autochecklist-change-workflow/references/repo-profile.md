@@ -16,7 +16,7 @@ default_profile:
   repo_name: "AutoChecklist"
   source_branch: "main"
   analysis_branch: "analysis"
-  runtime_mode: "github_mcp"
+  runtime_mode: "local_git"
   focus_topics: []
   focus_notes: ""
   output_language: "zh-CN"
