@@ -15,3 +15,9 @@ def test_xmind_reference_prompt_section_preserves_mandatory_note() -> None:
     )
 
     assert '标记为"必须保留"的节点是硬约束，不可更改。' in section
+
+
+def test_module_exports_attach_expected_results_helper() -> None:
+    module = importlib.import_module("app.services.checkpoint_outline_planner")
+
+    assert callable(module.attach_expected_results_to_outline)

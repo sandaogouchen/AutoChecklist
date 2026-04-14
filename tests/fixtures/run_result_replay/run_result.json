@@ -1,0 +1,171 @@
+{
+  "run_id": "fixture-run",
+  "status": "succeeded",
+  "input": {
+    "file_path": "/tmp/fixture-prd.md",
+    "language": "zh-CN",
+    "model_config": {
+      "model": null,
+      "temperature": null,
+      "max_tokens": null
+    },
+    "options": {
+      "include_intermediate_artifacts": false
+    },
+    "project_id": "",
+    "template_file_path": null,
+    "template_name": null,
+    "reference_xmind_path": null
+  },
+  "parsed_document": null,
+  "research_summary": {
+    "feature_topics": [
+      "登录能力"
+    ],
+    "user_scenarios": [
+      "用户登录系统"
+    ],
+    "constraints": [],
+    "ambiguities": [],
+    "test_signals": [],
+    "facts": [
+      {
+        "fact_id": "FACT-001",
+        "description": "用户输入正确账号密码后可以登录。",
+        "source_section": "1. 登录",
+        "evidence_refs": [],
+        "category": "requirement",
+        "requirement": "登录成功",
+        "branch_hint": "happy path"
+      },
+      {
+        "fact_id": "FACT-002",
+        "description": "用户输入错误密码后展示错误提示。",
+        "source_section": "1. 登录",
+        "evidence_refs": [],
+        "category": "requirement",
+        "requirement": "登录失败提示",
+        "branch_hint": "error path"
+      }
+    ]
+  },
+  "test_cases": [
+    {
+      "id": "TC-001",
+      "title": "正确凭证登录成功",
+      "preconditions": [
+        "用户已进入 `登录页`",
+        "已存在可用账号"
+      ],
+      "steps": [
+        "输入正确用户名和密码",
+        "点击 `登录` 按钮"
+      ],
+      "expected_results": [
+        "登录成功并跳转到首页"
+      ],
+      "priority": "P0",
+      "category": "functional",
+      "evidence_refs": [],
+      "checkpoint_id": "CP-001",
+      "project_id": "",
+      "template_leaf_id": "",
+      "template_path_ids": [],
+      "template_path_titles": [],
+      "template_match_confidence": 0.0,
+      "template_match_low_confidence": false
+    },
+    {
+      "id": "TC-002",
+      "title": "错误密码展示失败提示",
+      "preconditions": [
+        "用户已进入 `登录页`",
+        "已存在可用账号"
+      ],
+      "steps": [
+        "输入正确用户名和错误密码",
+        "点击 `登录` 按钮"
+      ],
+      "expected_results": [
+        "页面展示密码错误提示"
+      ],
+      "priority": "P1",
+      "category": "functional",
+      "evidence_refs": [],
+      "checkpoint_id": "CP-002",
+      "project_id": "",
+      "template_leaf_id": "",
+      "template_path_ids": [],
+      "template_path_titles": [],
+      "template_match_confidence": 0.0,
+      "template_match_low_confidence": false
+    },
+    {
+      "id": "TC-101",
+      "title": "参考模版叶子一",
+      "preconditions": [
+        "参考模板已存在"
+      ],
+      "steps": [
+        "执行参考模板步骤"
+      ],
+      "expected_results": [
+        "参考模板结果"
+      ],
+      "priority": "P2",
+      "category": "functional",
+      "evidence_refs": [],
+      "checkpoint_id": "ref-a1",
+      "project_id": "",
+      "template_leaf_id": "",
+      "template_path_ids": [],
+      "template_path_titles": [],
+      "template_match_confidence": 0.0,
+      "template_match_low_confidence": false
+    },
+    {
+      "id": "TC-102",
+      "title": "参考模版叶子二",
+      "preconditions": [
+        "参考模板已存在"
+      ],
+      "steps": [
+        "执行另一条参考模板步骤"
+      ],
+      "expected_results": [
+        "另一条参考模板结果"
+      ],
+      "priority": "P2",
+      "category": "functional",
+      "evidence_refs": [],
+      "checkpoint_id": "ref-a2",
+      "project_id": "",
+      "template_leaf_id": "",
+      "template_path_ids": [],
+      "template_path_titles": [],
+      "template_match_confidence": 0.0,
+      "template_match_low_confidence": false
+    }
+  ],
+  "quality_report": {
+    "duplicate_groups": [],
+    "coverage_notes": [],
+    "warnings": [],
+    "repaired_fields": [],
+    "checkpoint_warnings": [],
+    "missing_required_modules": []
+  },
+  "checkpoint_count": 2,
+  "artifacts": {
+    "checkpoints": "checkpoints.json"
+  },
+  "error": null,
+  "iteration_summary": {
+    "iteration_count": 1,
+    "last_evaluation_score": 0.0,
+    "had_retries": false,
+    "final_stage": "completed",
+    "retry_reasons": []
+  },
+  "project_id": ""
+}

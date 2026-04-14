@@ -16,6 +16,9 @@ from app.nodes.mr_analyzer import (
     _build_prd_summary,
     _normalize_codebase_context,
 )
+from app.services.coco_client import build_task2_prompt
+
+REMOVED_CLI_TOKEN = "byted" + "cli"
 
 
 def test_task1_prompt_mentions_repo_branch_and_analysis_flow() -> None:
@@ -30,10 +33,34 @@ def test_task1_prompt_mentions_repo_branch_and_analysis_flow() -> None:
     assert "仓库" in prompt
     assert "分支" in prompt
     assert "feat/pulse-setup" in prompt
+    assert "必须先读取 MR" in prompt
     assert "先定位与场景相关的模块" in prompt
+    assert REMOVED_CLI_TOKEN not in prompt
+    assert "skill" not in prompt
     assert "提炼可用于 checklist / checkpoint 设计的代码事实" in prompt
     assert "code_facts" in prompt
     assert "fact_revision" not in prompt
+
+
+def test_task2_prompt_requires_repo_evidence_first_without_cli_name() -> None:
+    prompt = build_task2_prompt(
+        checkpoint=Checkpoint(
+            checkpoint_id="CP-001",
+            title="校验 tooltip 文案",
+            objective="tooltip 根据白名单和目标类型返回不同文案",
+            preconditions=["已打开 campaign 创建页"],
+        ),
+        mr_context={
+            "mr_url": "https://example.com/org/repo/merge_requests/1",
+            "git_url": "https://example.com/org/repo.git",
+            "branch": "feat/pulse-setup",
+        },
+    )
+
+    assert "必须先读取 MR" in prompt
+    assert REMOVED_CLI_TOKEN not in prompt
+    assert "skill" not in prompt
+    assert "先" in prompt
 
 
 def test_fact_candidate_summary_only_keeps_current_fact_related_context() -> None:

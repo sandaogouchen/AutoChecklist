@@ -28,51 +28,16 @@ from app.domain.checkpoint_models import Checkpoint, generate_checkpoint_id
 from app.domain.research_models import ResearchFact
 from app.domain.state import CaseGenState
 from app.domain.template_models import TemplateLeafTarget
+from app.services.prompt_loader import get_prompt_loader
 
 logger = logging.getLogger(__name__)
+_PROMPT_LOADER = get_prompt_loader()
 
 # 低置信度阈值：低于此值的模版匹配将被标记为低置信度
 _LOW_CONFIDENCE_THRESHOLD = 0.6
 
 # LLM 系统提示词：指导模型从事实列表中生成可验证的测试检查点
-_SYSTEM_PROMPT = (
-    "You are a QA expert. Given a list of product facts extracted from a PRD, "
-    "generate explicit, verifiable test checkpoints. Each fact may produce 1 or more checkpoints. "
-    "Each checkpoint should be a specific, testable verification point. "
-    "Return structured JSON with a 'checkpoints' array.\n\n"
-    "【语言要求】\n"
-    "- 所有 title、objective、preconditions 等描述字段必须使用中文输出。\n"
-    "- 英文专有名词必须保留原文，包括但不限于：产品名、品牌名、UI 按钮文案、"
-    "字段名、枚举值、接口名、类名、函数名、变量名、ID、URL、配置项。\n"
-    "- 中英文混排时采用「中文动作 + 原文对象」形式，例如：验证 `SMS code` 过期后被拒绝。\n"
-    "- category、risk、branch_hint 保留英文枚举值不翻译。"
-    "\n\n"
-    "【输出 JSON 结构约束（严格遵守，违反将导致解析失败）】\n"
-    "你必须严格遵守以下 JSON schema。不要输出 schema 中未定义的字段。\n\n"
-    "每个 checkpoint 对象仅允许以下字段：\n"
-    "- title (string): 必填，检查点标题\n"
-    "- objective (string): 可选，检查点目标\n"
-    "- category (string): 可选，默认 \"functional\"\n"
-    "- risk (string): 可选，默认 \"medium\"\n"
-    "- branch_hint (string): 可选\n"
-    "- fact_ids (array of string): 可选，关联的 fact ID 列表\n"
-    "- preconditions (array of string): 可选，前置条件列表。"
-    "【重要】此字段必须是字符串数组，每个前置条件是数组中的一个独立元素。"
-    "绝对不要将所有前置条件合并为一个字符串。\n"
-    "- template_leaf_id (string): 可选，绑定的模版叶子节点 ID\n"
-    "- template_match_confidence (number): 可选，模版匹配置信度 0.0-1.0\n"
-    "- template_match_reason (string): 可选，模版匹配理由\n\n"
-    "禁止出现的字段（输出这些字段会导致解析失败）：\n"
-    "- steps\n"
-    "- expected_result / expected_results\n"
-    "- checkpoint_id（由系统自动生成，不要手动填写）\n\n"
-    "正确示例：\n"
-    '{"checkpoints": [{"title": "验证...", "preconditions": ["条件1", "条件2"], '
-    '"fact_ids": ["FACT-001"], "template_leaf_id": "leaf-01", '
-    '"template_match_confidence": 0.85, "template_match_reason": "该检查点验证登录功能"}]}\n\n'
-    "错误示例（preconditions 为字符串）：\n"
-    '{"checkpoints": [{"title": "验证...", "preconditions": "条件1。条件2。"}]}'
-)
+_SYSTEM_PROMPT = _PROMPT_LOADER.load("nodes/checkpoint_generator/system.md")
 
 
 class CheckpointDraft(BaseModel):
@@ -143,11 +108,9 @@ def _build_xmind_reference_prompt(xmind_reference_summary) -> str:
         return ""
     if not formatted:
         return ""
-    return (
-        "\n\n## 参考 Checklist 结构\n"
-        f"{formatted}\n"
-        "请参考上述已有 Checklist 的覆盖维度和组织方式来生成检查点，"
-        "确保生成的检查点在结构和命名风格上与参考保持一致。\n"
+    return _PROMPT_LOADER.render(
+        "nodes/checkpoint_generator/xmind_reference_user.md",
+        formatted=formatted,
     )
 
 
@@ -167,11 +130,7 @@ def _build_mr_code_facts_prompt(mr_code_facts: list) -> str:
     if not mr_code_facts:
         return ""
 
-    lines = [
-        "\n\n## MR 代码变更事实",
-        "以下是从 MR 代码变更中提取的事实，请将其纳入检查点生成考量：",
-        "",
-    ]
+    lines: list[str] = []
 
     for i, fact in enumerate(mr_code_facts, start=1):
         if hasattr(fact, "description"):
@@ -195,14 +154,10 @@ def _build_mr_code_facts_prompt(mr_code_facts: list) -> str:
             line += f"  [文件: {file_path}]"
         lines.append(line)
 
-    lines.append("")
-    lines.append(
-        "请为上述代码变更事实生成对应的检查点，"
-        "将其与 PRD 事实生成的检查点一起输出。"
-        "代码变更事实的 fact_ids 使用上方标注的 MR-FACT-xxx 格式。"
+    return _PROMPT_LOADER.render(
+        "nodes/checkpoint_generator/mr_code_facts_user.md",
+        facts_block="\n".join(lines),
     )
-
-    return "\n".join(lines)
 
 
 def build_checkpoint_generator_node(llm_client: LLMClient):

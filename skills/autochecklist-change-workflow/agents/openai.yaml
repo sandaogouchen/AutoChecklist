@@ -1,0 +1,4 @@
+interface:
+  display_name: "AutoChecklist Change Workflow"
+  short_description: "AutoChecklist flow from short goal to PRD, execution, and self-feedback"
+  default_prompt: "Use the AutoChecklist-specific workflow: discuss feasibility and plan from a short goal, send a user checkpoint after the execution plan, generate the PRD with fixed repo defaults, then move into execution and finish with a self-feedback review."

@@ -128,6 +128,26 @@ class PlatformDispatcher:
                 )
             )
 
+        draft_cases = workflow_result.get("draft_cases")
+        if draft_cases is not None:
+            artifacts["draft_cases"] = str(
+                self.repository.save(
+                    run_id,
+                    [case.model_dump(mode="json") for case in draft_cases],
+                    "draft_cases.json",
+                )
+            )
+
+        planned_scenarios = workflow_result.get("planned_scenarios")
+        if planned_scenarios is not None:
+            artifacts["planned_scenarios"] = str(
+                self.repository.save(
+                    run_id,
+                    [scenario.model_dump(mode="json") for scenario in planned_scenarios],
+                    "planned_scenarios.json",
+                )
+            )
+
         checkpoint_coverage = workflow_result.get("checkpoint_coverage", [])
         if checkpoint_coverage:
             artifacts["checkpoint_coverage"] = str(
@@ -135,6 +155,49 @@ class PlatformDispatcher:
                     run_id,
                     [cc.model_dump(mode="json") for cc in checkpoint_coverage],
                     "checkpoint_coverage.json",
+                )
+            )
+
+        checkpoint_paths = workflow_result.get("checkpoint_paths")
+        if checkpoint_paths is not None:
+            artifacts["checkpoint_paths"] = str(
+                self.repository.save(
+                    run_id,
+                    [path.model_dump(mode="json") for path in checkpoint_paths],
+                    "checkpoint_paths.json",
+                )
+            )
+
+        canonical_outline_nodes = workflow_result.get("canonical_outline_nodes")
+        if canonical_outline_nodes is not None:
+            artifacts["canonical_outline_nodes"] = str(
+                self.repository.save(
+                    run_id,
+                    [node.model_dump(mode="json") for node in canonical_outline_nodes],
+                    "canonical_outline_nodes.json",
+                )
+            )
+
+        mapped_evidence = workflow_result.get("mapped_evidence")
+        if mapped_evidence is not None:
+            artifacts["mapped_evidence"] = str(
+                self.repository.save(
+                    run_id,
+                    {
+                        title: [item.model_dump(mode="json") for item in evidence_list]
+                        for title, evidence_list in mapped_evidence.items()
+                    },
+                    "mapped_evidence.json",
+                )
+            )
+
+        optimized_tree = workflow_result.get("optimized_tree")
+        if optimized_tree is not None:
+            artifacts["optimized_tree"] = str(
+                self.repository.save(
+                    run_id,
+                    [node.model_dump(mode="json") for node in optimized_tree],
+                    "optimized_tree.json",
                 )
             )
 
@@ -147,12 +210,12 @@ class PlatformDispatcher:
         )
 
         # 使用共享 Markdown 渲染器，传递 optimized_tree
-        optimized_tree = workflow_result.get("optimized_tree", [])
+        markdown_tree = workflow_result.get("optimized_tree", [])
         artifacts["test_cases_markdown"] = str(
             self.repository.save_text(
                 run_id,
                 "test_cases.md",
-                render_test_cases_markdown(run.test_cases, optimized_tree),
+                render_test_cases_markdown(run.test_cases, markdown_tree),
             )
         )
         artifacts["quality_report"] = str(

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analysis Branch Builder"
+  short_description: "Build or refresh analysis branches for repo-aware workflows"
+  default_prompt: "Build or refresh the repository analysis branch. Prefer GitHub MCP when available, otherwise fall back to local git and filesystem operations."

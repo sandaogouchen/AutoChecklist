@@ -24,6 +24,7 @@ from app.domain.mr_models import (
     CodeConsistencyResult,
     MRSourceConfig,
 )
+from app.services.mira_analysis_service import MiraAnalysisService, mira_code_analysis_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,8 @@ def build_coco_consistency_validator_node(
             )
             return cached
 
-        if not coco_settings or not getattr(coco_settings, "coco_jwt_token", ""):
+        use_mira = mira_code_analysis_enabled(llm_client)
+        if not use_mira and (not coco_settings or not getattr(coco_settings, "coco_jwt_token", "")):
             raise RuntimeError("Coco 校验已启用，但 coco_settings / COCO_JWT_TOKEN 未配置")
 
         logger.info(
@@ -152,17 +154,20 @@ def build_coco_consistency_validator_node(
                     return index, CodeConsistencyResult(status="unverified", verified_by="")
 
                 try:
+                    validate_fn = _validate_checkpoint_via_mira if use_mira else _validate_checkpoint_via_coco
+                    validate_kwargs = {
+                        "checkpoint": cp,
+                        "mr_context": mr_context,
+                        "llm_client": llm_client,
+                        "artifact_context": {
+                            "run_output_dir": state.get("run_output_dir"),
+                            "checkpoint_index": index,
+                        },
+                    }
+                    if not use_mira:
+                        validate_kwargs["coco_settings"] = coco_settings
                     result, artifact_record = await asyncio.wait_for(
-                        _validate_checkpoint_via_coco(
-                            checkpoint=cp,
-                            mr_context=mr_context,
-                            coco_settings=coco_settings,
-                            llm_client=llm_client,
-                            artifact_context={
-                                "run_output_dir": state.get("run_output_dir"),
-                                "checkpoint_index": index,
-                            },
-                        ),
+                        validate_fn(**validate_kwargs),
                         timeout=_PER_CASE_TIMEOUT_S,
                     )
                     task2_records.append(artifact_record)
@@ -234,11 +239,13 @@ def build_coco_consistency_validator_node(
         summary = _build_validation_summary(results_map, len(checkpoints))
 
         total_elapsed = time.monotonic() - start_time
-        coco_artifacts = _persist_task2_artifacts(
+        provider = "mira" if use_mira else "coco"
+        persisted_artifacts = _persist_task2_artifacts(
             state=state,
             mr_context=mr_context,
             summary=summary,
             records=task2_records,
+            provider=provider,
         )
         logger.info(
             "coco_consistency_validator 完成: "
@@ -256,14 +263,16 @@ def build_coco_consistency_validator_node(
                 summary["unverified"],
             )
 
-        return {
+        result = {
             "checkpoints": annotated,
             "coco_validation_summary": summary,
-            "coco_artifacts": {
-                **state.get("coco_artifacts", {}),
-                **coco_artifacts,
-            },
         }
+        artifact_state_key = f"{provider}_artifacts"
+        result[artifact_state_key] = {
+            **state.get(artifact_state_key, {}),
+            **persisted_artifacts,
+        }
+        return result
 
     def coco_consistency_validator_node(state: dict[str, Any]) -> dict[str, Any]:
         """同步 LangGraph 节点入口，内部显式执行异步校验流程。"""
@@ -370,10 +379,10 @@ async def _validate_checkpoint_via_coco(
         }
         run_output_dir = (artifact_context or {}).get("run_output_dir")
         checkpoint_index = (artifact_context or {}).get("checkpoint_index", 0)
-        if run_output_dir:
-            coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+        artifact_dir = _get_artifact_dir(run_output_dir, provider="coco")
+        if artifact_dir is not None:
             detail_path = write_json(
-                coco_dir / f"task2_checkpoint_{checkpoint_index:03d}.json",
+                artifact_dir / f"task2_checkpoint_{checkpoint_index:03d}.json",
                 record,
             )
             record["artifact_file"] = str(detail_path)
@@ -381,6 +390,51 @@ async def _validate_checkpoint_via_coco(
     except Exception as exc:
         cp_name = _get_cp_name(checkpoint)
         logger.warning("Coco Task 2 校验失败 [%s]: %s", cp_name, exc)
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": cp_name,
+            "mr_context": mr_context,
+            "error_type": exc.__class__.__name__,
+            "error_message": str(exc),
+        }
+        return CodeConsistencyResult(status="unverified", verified_by=""), record
+
+
+async def _validate_checkpoint_via_mira(
+    checkpoint: Any,
+    mr_context: dict[str, str],
+    llm_client: Any | None,
+    artifact_context: dict[str, Any] | None = None,
+) -> tuple[CodeConsistencyResult, dict[str, Any]]:
+    """通过 Mira 校验单个 checkpoint。"""
+    if llm_client is None:
+        return CodeConsistencyResult(status="unverified", verified_by=""), {}
+
+    service = MiraAnalysisService(llm_client)
+    try:
+        result, artifacts = await service.run_validation_task(
+            checkpoint=checkpoint,
+            mr_context=mr_context,
+        )
+        record = {
+            "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
+            "checkpoint_title": _get_cp_name(checkpoint),
+            "mr_context": mr_context,
+            **artifacts,
+        }
+        run_output_dir = (artifact_context or {}).get("run_output_dir")
+        checkpoint_index = (artifact_context or {}).get("checkpoint_index", 0)
+        artifact_dir = _get_artifact_dir(run_output_dir, provider="mira")
+        if artifact_dir is not None:
+            detail_path = write_json(
+                artifact_dir / f"task2_checkpoint_{checkpoint_index:03d}.json",
+                record,
+            )
+            record["artifact_file"] = str(detail_path)
+        return result, record
+    except Exception as exc:
+        cp_name = _get_cp_name(checkpoint)
+        logger.warning("Mira Task 2 校验失败 [%s]: %s", cp_name, exc)
         record = {
             "checkpoint_id": _get_attr_safe(checkpoint, "checkpoint_id", ""),
             "checkpoint_title": cp_name,
@@ -475,25 +529,33 @@ def _build_mr_context(
     return {"mr_url": mr_url, "git_url": git_url, "branch": branch}
 
 
+def _get_artifact_dir(run_output_dir: str | None, *, provider: str) -> Path | None:
+    if not run_output_dir:
+        return None
+    return ensure_directory(Path(run_output_dir) / provider)
+
+
 def _persist_task2_artifacts(
     state: dict[str, Any],
     mr_context: dict[str, str],
     summary: dict[str, Any],
     records: list[dict[str, Any]],
+    *,
+    provider: str,
 ) -> dict[str, str]:
     """持久化 Task 2 汇总与原始返回。"""
     run_output_dir = state.get("run_output_dir")
     if not run_output_dir:
         return {}
 
-    coco_dir = ensure_directory(Path(run_output_dir) / "coco")
+    artifact_dir = ensure_directory(Path(run_output_dir) / provider)
     summary_payload = {
         "mr_context": mr_context,
         "summary": summary,
         "record_count": len(records),
     }
-    summary_path = write_json(coco_dir / "task2_summary.json", summary_payload)
-    results_path = write_json(coco_dir / "task2_results.json", records)
+    summary_path = write_json(artifact_dir / "task2_summary.json", summary_payload)
+    results_path = write_json(artifact_dir / "task2_results.json", records)
     return {
         "task2_summary": str(summary_path),
         "task2_results": str(results_path),

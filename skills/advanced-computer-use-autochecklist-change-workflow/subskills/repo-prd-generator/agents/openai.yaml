@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo PRD Generator"
+  short_description: "Generate repo-aware PRDs from analysis branches or lightweight scans"
+  default_prompt: "Generate a full repository-aware PRD. Prefer the analysis branch when available and fall back to the documented lightweight scan only when necessary."

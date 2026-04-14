@@ -12,27 +12,10 @@ from __future__ import annotations
 from app.clients.llm import LLMClient
 from app.domain.research_models import ResearchOutput
 from app.domain.state import GlobalState
+from app.services.prompt_loader import get_prompt_loader
 
-# LLM 系统提示词：指导模型从 PRD 中提取测试相关上下文，包含结构化事实
-_SYSTEM_PROMPT = (
-    "You extract testing-relevant product context from PRD documents. "
-    "In addition to feature_topics, user_scenarios, constraints, ambiguities, and test_signals, "
-    "also extract a list of 'facts' \u2014 each fact is a discrete, testable piece of information "
-    "from the PRD with a unique fact_id (e.g., FACT-001), description, source_section, "
-    "category (requirement/constraint/assumption/behavior), and optional evidence_refs. "
-    "For compatibility, facts may also include requirement and branch_hint, but requirement must be a string. "
-    "evidence_refs must always be an array of objects using the exact shape "
-    '{"section_title": string, "excerpt": string, "line_start": number, '
-    '"line_end": number, "confidence": number}. '
-    'Do not use alternate keys like "section" or "quote". '
-    "Return concise structured JSON.\n\n"
-    "\u3010\u8bed\u8a00\u8981\u6c42\u3011\n"
-    "- \u6240\u6709\u901a\u7528\u63cf\u8ff0\u3001\u8bf4\u660e\u6587\u5b57\u5fc5\u987b\u4f7f\u7528\u4e2d\u6587\u8f93\u51fa\u3002\n"
-    "- \u82f1\u6587\u4e13\u6709\u540d\u8bcd\u5fc5\u987b\u4fdd\u7559\u539f\u6587\uff0c\u5305\u62ec\u4f46\u4e0d\u9650\u4e8e\uff1a\u4ea7\u54c1\u540d\u3001\u54c1\u724c\u540d\u3001UI \u6309\u94ae\u6587\u6848\u3001"
-    "\u5b57\u6bb5\u540d\u3001\u679a\u4e3e\u503c\u3001\u63a5\u53e3\u540d\u3001\u7c7b\u540d\u3001\u51fd\u6570\u540d\u3001\u53d8\u91cf\u540d\u3001ID\u3001URL\u3001\u914d\u7f6e\u9879\u3002\n"
-    "- \u4e2d\u82f1\u6587\u6df7\u6392\u65f6\u91c7\u7528\u300c\u4e2d\u6587\u52a8\u4f5c + \u539f\u6587\u5bf9\u8c61\u300d\u5f62\u5f0f\uff0c\u4f8b\u5982\uff1a\u70b9\u51fb `Create campaign`\u3002\n"
-    "- fact \u7684 description \u5b57\u6bb5\u4f7f\u7528\u4e2d\u6587\u63cf\u8ff0\uff0csource_section \u4fdd\u7559\u539f\u6587\u3002"
-)
+_PROMPT_LOADER = get_prompt_loader()
+_SYSTEM_PROMPT = _PROMPT_LOADER.load("nodes/context_research/system.md")
 
 
 def build_context_research_node(llm_client: LLMClient):

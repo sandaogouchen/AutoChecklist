@@ -207,6 +207,7 @@ def _build_case_generation_bridge(case_generation_subgraph):
             "backend_mr_result": subgraph_result.get("backend_mr_result"),
             "coco_validation_summary": subgraph_result.get("coco_validation_summary", {}),
             "coco_artifacts": subgraph_result.get("coco_artifacts", {}),
+            "mira_artifacts": subgraph_result.get("mira_artifacts", {}),
             "coco_cache_dir": subgraph_result.get("coco_cache_dir", state.get("coco_cache_dir", "")),
             "coco_cache_run_id": subgraph_result.get("coco_cache_run_id", state.get("coco_cache_run_id", "")),
         }

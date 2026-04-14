@@ -12,8 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
-import subprocess
 import time
 from typing import Any
 
@@ -28,8 +26,10 @@ from app.domain.mr_models import (
     MRCodeFact,
     RelatedCodeSnippet,
 )
+from app.services.prompt_loader import get_prompt_loader
 
 logger = logging.getLogger(__name__)
+_PROMPT_LOADER = get_prompt_loader()
 
 
 def build_task2_prompt(
@@ -48,30 +48,15 @@ def build_task2_prompt(
     if not cp_steps:
         cp_steps = "\n".join(getattr(checkpoint, "preconditions", [])[:5])
 
-    return (
-        "你是一名资深 QA 工程师，请在指定仓库和分支中核对下面这个测试场景是否符合当前代码实现。\n\n"
-        f"[代码仓库]\n"
-        f"- MR URL: {mr_context.get('mr_url', '')}\n"
-        f"- Git URL: {mr_context.get('git_url', '')}\n"
-        f"- Branch: {mr_context.get('branch', 'unknown')}\n\n"
-        f"[测试场景]\n"
-        f"- 名称: {cp_name}\n"
-        f"- 场景描述: {cp_desc}\n"
-        f"- 预期效果: {cp_expected}\n"
-        f"- 关键步骤/前置条件: {cp_steps}\n\n"
-        "请严格按以下顺序执行：\n"
-        "1. 先在对应仓库分支中定位与该场景最相关的模块、入口函数、配置和调用链。\n"
-        "2. 再基于代码逻辑判断实现是否符合上述预期，不要只复述 MR 描述。\n"
-        "3. 若不符合，请指出实际实现、偏差原因和相关代码位置；若证据不足，请明确说明。\n\n"
-        "请严格按以下 JSON 格式输出：\n"
-        '{\n'
-        '  "is_consistent": true/false,\n'
-        '  "confidence": 0.0-1.0,\n'
-        '  "actual_implementation": "实际实现描述",\n'
-        '  "inconsistency_reason": "不一致原因（一致时为空）",\n'
-        '  "related_code_file": "相关代码文件路径",\n'
-        '  "related_code_snippet": "关键代码片段"\n'
-        '}'
+    return _PROMPT_LOADER.render(
+        "services/coco_client/task2_user.md",
+        mr_url=mr_context.get("mr_url", ""),
+        git_url=mr_context.get("git_url", ""),
+        branch=mr_context.get("branch", "unknown"),
+        cp_name=cp_name,
+        cp_desc=cp_desc,
+        cp_expected=cp_expected,
+        cp_steps=cp_steps,
     )
 
 
@@ -169,7 +154,9 @@ class CocoClient:
         self._base_url: str = getattr(settings, "coco_api_base_url", "https://codebase-api.byted.org/v2/")
         self._jwt_token: str = getattr(settings, "coco_jwt_token", "")
         self._agent_name: str = getattr(settings, "coco_agent_name", "sandbox")
-        self._model_name: str = getattr(settings, "coco_model_name", "")
+        self._model_name: str = getattr(settings, "coco_model_name", "GPT-5.4")
+        self._repo_id: str = getattr(settings, "coco_repo_id", "")
+        self._branch: str = getattr(settings, "coco_branch", "")
         self._timeout: int = getattr(settings, "coco_task_timeout", 300)
         self._poll_start: int = getattr(settings, "coco_poll_interval_start", 5)
         self._poll_max: int = getattr(settings, "coco_poll_interval_max", 20)
@@ -216,83 +203,15 @@ class CocoClient:
             )
         return "sandbox"
 
-    @staticmethod
-    def _extract_repo_path(mr_url: str, git_url: str) -> str:
-        """从内部仓库 URL 中提取 org/repo 路径。"""
-        candidates = [git_url, mr_url]
-        patterns = [
-            r"^https://code\.byted\.org/([^/]+/[^/.]+)(?:\.git)?(?:$|[/?#])",
-            r"^git@code\.byted\.org:([^/]+/[^/.]+)\.git$",
-            r"^https://bits\.bytedance\.net/code/([^/]+/[^/]+)(?:$|/)",
-        ]
-        for value in candidates:
-            candidate = (value or "").strip()
-            if not candidate:
-                continue
-            for pattern in patterns:
-                match = re.match(pattern, candidate)
-                if match:
-                    return match.group(1)
-        return ""
-
-    @staticmethod
-    def _lookup_repo_id(repo_path: str) -> str:
-        """通过 bytedcli 查询内部仓库的数值型 RepoId。"""
-        if not repo_path:
-            return ""
-        try:
-            completed = subprocess.run(
-                ["bytedcli", "--json", "codebase", "repo", "view", repo_path],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-        except FileNotFoundError:
-            logger.warning("未找到 bytedcli，跳过 Coco RepoId 自动解析")
-            return ""
-        except subprocess.TimeoutExpired:
-            logger.warning("bytedcli 查询 RepoId 超时: repo_path=%s", repo_path)
-            return ""
-
-        if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()
-            stdout = (completed.stdout or "").strip()
-            logger.warning(
-                "bytedcli 查询 RepoId 失败: repo_path=%s, returncode=%s, detail=%s",
-                repo_path,
-                completed.returncode,
-                stderr or stdout[:500],
-            )
-            return ""
-
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            logger.warning("bytedcli RepoId 响应无法解析 JSON: repo_path=%s", repo_path)
-            return ""
-
-        repo_id = payload.get("data", {}).get("Repository", {}).get("Id", "")
-        if repo_id:
-            return str(repo_id)
-        logger.warning("bytedcli RepoId 响应缺少 Repository.Id: repo_path=%s", repo_path)
-        return ""
-
-    def _resolve_repo_id(self, mr_url: str, git_url: str) -> str:
-        """为 Coco sandbox 任务解析可接受的 RepoId。"""
-        repo_path = self._extract_repo_path(mr_url=mr_url, git_url=git_url)
-        if not repo_path:
-            return ""
-        repo_id = self._lookup_repo_id(repo_path)
-        if repo_id:
-            logger.info("已解析 Coco RepoId: repo_path=%s, repo_id=%s", repo_path, repo_id)
-        return repo_id
+    def _build_action_url(self, action: str) -> str:
+        """构造 Coco OpenAPI Action URL，遵循官方 /v2/?Action=... 形式。"""
+        return f"{self._base_url.rstrip('/')}/?Action={action}"
 
     async def _post(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发送 POST 请求到 Coco API。"""
-        url = f"{self._base_url.rstrip('/')}/?Action={action}"
+        url = self._build_action_url(action)
         logger.debug("Coco API 请求: %s, payload keys=%s", action, list(payload.keys()))
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
             try:
                 resp.raise_for_status()
@@ -318,13 +237,16 @@ class CocoClient:
         timeout: int | None = None,
     ) -> list[dict[str, Any]]:
         """通过 SSE 订阅收集 full_message 事件中的消息。"""
-        url = f"{self._base_url.rstrip('/')}/?Action=SubscribeCopilotTaskEvents"
+        url = self._build_action_url("SubscribeCopilotTaskEvents")
         max_wait = max(float(timeout or self._timeout), 10.0)
         messages: list[dict[str, Any]] = []
         logger.info("开始订阅 Coco SSE: task_id=%s, timeout=%.1fs", task_id, max_wait)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=max_wait, write=30.0, pool=30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=30.0, read=max_wait, write=30.0, pool=30.0),
+                follow_redirects=True,
+            ) as client:
                 async with client.stream(
                     "POST",
                     url,
@@ -409,10 +331,12 @@ class CocoClient:
             },
         }
         if self._model_name.strip():
-            payload["ModelName"] = self._model_name.strip()
-        repo_id = self._resolve_repo_id(mr_url=mr_url, git_url=git_url)
-        if repo_id:
-            payload["RepoId"] = repo_id
+            payload["modelName"] = self._model_name.strip()
+        if self._repo_id.strip():
+            payload['repoId'] = self._model_name.strip()
+        if self._branch.strip():
+            payload['branch'] = self._branch.strip()
+        payload['disable_model_failover']='true'
 
         try:
             result = await self._post("SendCopilotTaskMessage", payload)

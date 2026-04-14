@@ -23,9 +23,16 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
+    llm_use_coco_as_llm: bool = False
+    llm_use_mira_as_llm: bool = False
     llm_timeout_seconds: float = 6000.0
     llm_temperature: float = 0.2
     llm_max_tokens: int = 50000
+    mira_api_base_url: str = ""
+    mira_jwt_token: str = ""
+    mira_cookie: str = ""
+    mira_client_version: str = "autochecklist/0.1.0"
+    mira_use_for_code_analysis: bool = False
 
     # ---- 迭代评估回路配置 ----
     max_iterations: int = 3
@@ -64,12 +71,29 @@ class CocoSettings(BaseSettings):
     函数定义查找、AST 分析等功能。
     """
 
-    coco_api_base_url: str = "https://coco.bytedance.net/api/v1"
+    coco_api_base_url: str = "https://codebase-api.byted.org/v2"
     coco_jwt_token: str = ""
-    coco_agent_name: str = "autochecklist"
+    coco_agent_name: str = "sandbox"
+    coco_model_name: str = ""
     coco_task_timeout: int = 120
     coco_poll_interval_start: float = 2.0
     coco_poll_interval_max: float = 10.0
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+
+class MiraSettings(BaseSettings):
+    """Mira API 配置。"""
+
+    mira_api_base_url: str = ""
+    mira_jwt_token: str = ""
+    mira_cookie: str = ""
+    mira_client_version: str = "autochecklist/0.1.0"
+    mira_use_for_code_analysis: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -86,3 +110,8 @@ def get_settings() -> Settings:
 @lru_cache(maxsize=1)
 def get_coco_settings() -> CocoSettings:
     return CocoSettings()
+
+
+@lru_cache(maxsize=1)
+def get_mira_settings() -> MiraSettings:
+    return MiraSettings()

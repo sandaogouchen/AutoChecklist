@@ -1,0 +1,4 @@
+interface:
+  display_name: "Requirement Brainstormer"
+  short_description: "Mine adjacent requirements from current functionality"
+  default_prompt: "Use $requirement-brainstormer to inspect the current functionality, surface adjacent improvement opportunities, and label each candidate as include now, defer, or open question."

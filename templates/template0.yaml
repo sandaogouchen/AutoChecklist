@@ -1,0 +1,41 @@
+# ============================================================
+# 项目级 Checklist 模版文件
+# 格式: YAML
+# 解析入口: app/services/template_loader.py → ProjectTemplateLoader.load()
+# ============================================================
+
+metadata:
+  name: "示例项目 Checklist 模版"
+  version: "1.0.0"
+  description: "用于演示模版强制归类的最小可用模版"
+
+nodes:
+  - id: "func"
+    title: "功能测试"
+    children:
+      - id: "func-core"
+        title: "核心流程"
+        children:
+          - id: "func-core-happy"       # ← 叶子节点（无 children）
+            title: "正向主流程"
+          - id: "func-core-branch"
+            title: "分支与条件流程"
+      - id: "func-input"
+        title: "输入校验"
+        # 直接作为叶子（无 children 键或 children 为空）
+
+  - id: "edge"
+    title: "边界与异常"
+    children:
+      - id: "edge-boundary"
+        title: "边界值"
+      - id: "edge-error"
+        title: "异常处理与容错"
+
+  - id: "perf"
+    title: "性能与安全"
+    children:
+      - id: "perf-load"
+        title: "负载与响应时间"
+      - id: "perf-security"
+        title: "安全与权限"

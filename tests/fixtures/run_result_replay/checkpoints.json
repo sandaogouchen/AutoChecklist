@@ -1,0 +1,28 @@
+[
+  {
+    "checkpoint_id": "CP-001",
+    "title": "验证登录成功",
+    "objective": "用户输入正确账号密码后可以登录",
+    "category": "functional",
+    "risk": "high",
+    "branch_hint": "",
+    "preconditions": [],
+    "fact_ids": [
+      "FACT-001"
+    ],
+    "evidence_refs": []
+  },
+  {
+    "checkpoint_id": "CP-002",
+    "title": "验证登录失败提示",
+    "objective": "用户输入错误密码后可以看到错误提示",
+    "category": "functional",
+    "risk": "medium",
+    "branch_hint": "",
+    "preconditions": [],
+    "fact_ids": [
+      "FACT-002"
+    ],
+    "evidence_refs": []
+  }
+]

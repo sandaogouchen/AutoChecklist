@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,7 @@ def mock_settings(tmp_path: Path):
     settings.llm_base_url = "http://localhost:8080/v1"
     settings.llm_api_key = "test-key"
     settings.llm_model = "test-model"
+    settings.llm_use_coco_as_llm = False
     settings.llm_timeout_seconds = 30
     settings.llm_temperature = 0.2
     settings.llm_max_tokens = 1600
@@ -53,8 +55,18 @@ class TestGraphRAGEngineInit:
         mock_settings.enable_knowledge_retrieval = False
         engine = GraphRAGEngine(mock_settings)
 
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(engine.initialize())
+        asyncio.run(engine.initialize())
+
+        assert engine.is_ready() is False
+
+    def test_not_ready_when_coco_llm_mode_enabled(self, mock_settings) -> None:
+        """启用 Coco 作为主 LLM 时，GraphRAG 不应初始化。"""
+        from app.knowledge.graphrag_engine import GraphRAGEngine
+
+        mock_settings.llm_use_coco_as_llm = True
+        engine = GraphRAGEngine(mock_settings)
+
+        asyncio.run(engine.initialize())
 
         assert engine.is_ready() is False
 
@@ -138,10 +150,7 @@ class TestGraphRAGEngineQuery:
 
         engine = GraphRAGEngine(mock_settings)
 
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(
-            engine.query("测试查询")
-        )
+        result = asyncio.run(engine.query("测试查询"))
 
         assert isinstance(result, RetrievalResult)
         assert result.success is False

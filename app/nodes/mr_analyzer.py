@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote
@@ -28,11 +29,14 @@ from app.domain.mr_models import (
     RelatedCodeSnippet,
 )
 from app.domain.research_models import ResearchFact, ResearchOutput
+from app.services.mira_analysis_service import MiraAnalysisService, mira_code_analysis_enabled
+from app.services.prompt_loader import get_prompt_loader
 from app.services.codebase_tools import CODEBASE_TOOLS, execute_tool
 from app.utils.filesystem import ensure_directory, write_json, write_text
 from app.utils.filesystem import read_json
 
 logger = logging.getLogger(__name__)
+_PROMPT_LOADER = get_prompt_loader()
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -53,6 +57,9 @@ _MAX_SNIPPET_LINES = 100
 _CONFIDENCE_THRESHOLD = 0.7
 """一致性校验置信度阈值，低于此值不生成 TODO。"""
 
+_MR_ANALYSIS_MAX_WORKERS = 2
+"""前后端 MR 分析最大并发数。"""
+
 
 # ---------------------------------------------------------------------------
 # maybe_wrap 兼容
@@ -67,125 +74,6 @@ try:
     from app.utils.timing import maybe_wrap  # type: ignore[import-untyped]
 except ImportError:
     maybe_wrap = _identity_wrap  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
-# Prompt 模板
-# ---------------------------------------------------------------------------
-
-_PHASE1_SUMMARY_PROMPT = """\
-你是一名资深 QA 工程师，请分析以下 MR diff 信息并生成变更摘要。
-
-[MR 信息]
-标题：{mr_title}
-描述：{mr_description}
-
-[变更文件列表]
-{diff_summary}
-
-请输出 JSON：
-{{
-  "mr_summary": "中文变更摘要（不超过 200 字）",
-  "changed_modules": ["涉及的模块名列表"]
-}}
-"""
-
-_PHASE2_SEARCH_SYSTEM = """\
-你是一名代码分析 Agent。你的任务是根据 MR diff 中的变更，在 codebase 中搜索关联的代码上下文。
-你可以使用以下工具进行搜索，每轮选择一个工具调用。当你认为已收集到足够的上下文时，回复 DONE。
-
-可用工具：
-{tools_desc}
-
-搜索策略：
-1. 从 MR diff 中提取变更的函数名、类名、import 路径
-2. 通过 find_references 找到直接引用
-3. 通过 get_file_content 获取关键代码的完整函数体
-4. 最大搜索深度 2 跳，防止搜索爆炸
-
-当前 MR 变更的关键符号：
-{key_symbols}
-"""
-
-_PHASE3_EXTRACT_PROMPT = """\
-你是一名资深 QA 工程师。请基于以下 MR diff 和关联代码上下文，完成两个任务。
-
-任务 A — 代码级 Fact 提取：
-从 MR 变更的代码逻辑中提取可测试的事实。重点关注：
-- 新增逻辑分支、错误处理路径、状态变更、边界条件、降级逻辑
-
-任务 B — PRD ↔ MR 一致性校验：
-逐条对比 PRD 中描述的预期行为与代码中的实际实现。
-置信度阈值：0.7，低于此值的不一致不输出。
-
-[MR Diff]
-{diff_content}
-
-[关联代码上下文]
-{related_context}
-
-[PRD 预期逻辑]
-{prd_facts}
-
-请严格按以下 JSON 格式输出：
-{{
-  "code_facts": [
-    {{
-      "fact_id": "MR-FACT-001",
-      "description": "代码级事实描述（中文）",
-      "source_file": "文件路径",
-      "code_snippet": "关键代码片段",
-      "fact_type": "code_logic | error_handling | boundary | state_change | side_effect",
-      "related_prd_fact_ids": []
-    }}
-  ],
-  "consistency_issues": [
-    {{
-      "issue_id": "CONSIST-001",
-      "severity": "critical | warning | info",
-      "prd_expectation": "PRD 中的预期",
-      "mr_implementation": "MR 中的实际实现",
-      "discrepancy": "差异描述",
-      "affected_file": "文件路径",
-      "recommendation": "建议操作",
-      "confidence": 0.85
-    }}
-  ]
-}}
-"""
-
-_COCO_TASK1_PROMPT = """\
-你是一名资深 QA 工程师，请分析以下仓库分支上的 MR 代码变更，并提炼可用于 checklist / checkpoint 设计的代码事实。
-
-[代码仓库]
-- MR URL: {mr_url}
-- Git URL: {git_url}
-- Branch: {branch}
-
-[候选变更模块 / 验证锚点]
-{changed_files_summary}
-
-[PRD / 场景摘要]
-{prd_summary}
-
-请严格按以下顺序执行：
-1. 先定位与场景相关的模块、入口函数、调用链和配置定义。
-2. 结合 MR 实现提炼补充测试线索，不要逐条判断 FACT 是否实现，也不要生成 fact 修订结论。
-3. 对每个结论给出明确的代码依据；若无法确认，说明缺失的代码上下文。
-4. 输出代码级 fact 时优先覆盖分支、边界、错误处理、状态变化、副作用。
-5. 只保留对后续生成 checklist / checkpoint 真正有帮助的信息，避免重复复述 PRD。
-6. 结果必须精简，总输出尽量控制在 1200 中文字符内。
-7. 不要返回大段代码；若必须引用代码，片段控制在 160 字以内。
-8. `changed_modules` 最多 3 个，`code_facts` 最多 5 条，`related_code_snippets` 最多 2 条。
-
-请严格按以下 JSON 格式输出：
-{{
-  "mr_summary": "不超过 80 字的 MR 变更摘要",
-  "changed_modules": ["最多 3 个直接相关模块"],
-  "code_facts": [{{"fact_id": "...", "description": "不超过 80 字", "source_file": "...", "code_snippet": "最多 160 字", "fact_type": "..."}}],
-  "related_code_snippets": [{{"file_path": "...", "code_content": "最多 200 字", "relation_type": "..."}}]
-}}
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +102,7 @@ def build_mr_analyzer_node(
         """MR 分析节点主逻辑。
 
         当 state 中无 MR 数据时直接 pass-through，不影响现有流程。
-        支持前后端 MR 串行分析，以及 Coco 委托路径。
+        支持前后端 MR 并发分析，以及 Coco / Mira 委托路径。
         """
         frontend_mr_config = _coerce_mr_source_config(state.get("frontend_mr_config"))
         backend_mr_config = _coerce_mr_source_config(state.get("backend_mr_config"))
@@ -238,41 +126,46 @@ def build_mr_analyzer_node(
         frontend_result: MRAnalysisResult | None = None
         backend_result: MRAnalysisResult | None = None
 
-        # ---- 前端 MR 分析 ----
+        analysis_jobs: list[tuple[str, MRSourceConfig, str]] = []
         if frontend_mr_config and frontend_mr_config.mr_url:
             logger.info("mr_analyzer: 开始分析前端 MR — %s", frontend_mr_config.mr_url)
-            frontend_result = _analyze_single_side(
-                side="frontend",
-                mr_config=frontend_mr_config,
-                state=state,
-                llm_client=llm_client,
-                codebase_root=codebase_root,
-                coco_settings=coco_settings,
-                prefix="FE-",
-            )
-            if frontend_result:
-                all_code_facts.extend(frontend_result.code_facts)
-                all_consistency_issues.extend(frontend_result.consistency_issues)
-                if frontend_result.mr_summary:
-                    summaries.append(f"[前端] {frontend_result.mr_summary}")
-
-        # ---- 后端 MR 分析 ----
+            analysis_jobs.append(("frontend", frontend_mr_config, "FE-"))
         if backend_mr_config and backend_mr_config.mr_url:
             logger.info("mr_analyzer: 开始分析后端 MR — %s", backend_mr_config.mr_url)
-            backend_result = _analyze_single_side(
-                side="backend",
-                mr_config=backend_mr_config,
-                state=state,
-                llm_client=llm_client,
-                codebase_root=codebase_root,
-                coco_settings=coco_settings,
-                prefix="BE-",
-            )
-            if backend_result:
-                all_code_facts.extend(backend_result.code_facts)
-                all_consistency_issues.extend(backend_result.consistency_issues)
-                if backend_result.mr_summary:
-                    summaries.append(f"[后端] {backend_result.mr_summary}")
+            analysis_jobs.append(("backend", backend_mr_config, "BE-"))
+
+        analysis_results: dict[str, MRAnalysisResult] = {}
+        if analysis_jobs:
+            with ThreadPoolExecutor(max_workers=min(len(analysis_jobs), _MR_ANALYSIS_MAX_WORKERS)) as pool:
+                futures = {
+                    pool.submit(
+                        _analyze_single_side,
+                        side=side,
+                        mr_config=mr_config,
+                        state=state,
+                        llm_client=llm_client,
+                        codebase_root=codebase_root,
+                        coco_settings=coco_settings,
+                        prefix=prefix,
+                    ): side
+                    for side, mr_config, prefix in analysis_jobs
+                }
+                for future, side in futures.items():
+                    analysis_results[side] = future.result()
+
+        frontend_result = analysis_results.get("frontend")
+        if frontend_result:
+            all_code_facts.extend(frontend_result.code_facts)
+            all_consistency_issues.extend(frontend_result.consistency_issues)
+            if frontend_result.mr_summary:
+                summaries.append(f"[前端] {frontend_result.mr_summary}")
+
+        backend_result = analysis_results.get("backend")
+        if backend_result:
+            all_code_facts.extend(backend_result.code_facts)
+            all_consistency_issues.extend(backend_result.consistency_issues)
+            if backend_result.mr_summary:
+                summaries.append(f"[后端] {backend_result.mr_summary}")
 
         combined_summary = "\n".join(summaries) if summaries else ""
 
@@ -281,6 +174,7 @@ def build_mr_analyzer_node(
             "mr_consistency_issues": all_consistency_issues,
             "mr_combined_summary": combined_summary,
             "coco_artifacts": state.get("coco_artifacts", {}),
+            "mira_artifacts": state.get("mira_artifacts", {}),
             "research_output": state.get("research_output"),
         }
 
@@ -324,14 +218,27 @@ def _coerce_mr_source_config(value: Any) -> MRSourceConfig | None:
 
 
 def _get_coco_dir(state: dict[str, Any]) -> Path | None:
+    return _get_artifact_dir(state, provider="coco")
+
+
+def _get_mira_dir(state: dict[str, Any]) -> Path | None:
+    return _get_artifact_dir(state, provider="mira")
+
+
+def _get_artifact_dir(state: dict[str, Any], *, provider: str) -> Path | None:
     run_output_dir = state.get("run_output_dir")
     if not run_output_dir:
         return None
-    return ensure_directory(Path(run_output_dir) / "coco")
+    return ensure_directory(Path(run_output_dir) / provider)
 
 
 def _record_coco_artifact(state: dict[str, Any], key: str, path: Path) -> None:
     artifacts = state.setdefault("coco_artifacts", {})
+    artifacts[key] = str(path)
+
+
+def _record_mira_artifact(state: dict[str, Any], key: str, path: Path) -> None:
+    artifacts = state.setdefault("mira_artifacts", {})
     artifacts[key] = str(path)
 
 
@@ -377,7 +284,8 @@ def _build_coco_task1_prompt(
     changed_files_summary: str,
 ) -> str:
     """构建 Coco Task 1 提示词。"""
-    return _COCO_TASK1_PROMPT.format(
+    return _PROMPT_LOADER.render(
+        "nodes/mr_analyzer/task1_user.md",
         mr_url=mr_url,
         git_url=git_url or "unknown",
         branch=branch or "unknown",
@@ -608,6 +516,14 @@ def _analyze_single_side(
     根据 ``use_coco`` 标志选择 Coco 委托路径或本地分析路径。
     """
     if mr_config.use_coco:
+        if mira_code_analysis_enabled(llm_client):
+            return _run_async(_analyze_via_mira(
+                mr_config=mr_config,
+                state=state,
+                llm_client=llm_client,
+                prefix=prefix,
+                side=side,
+            ))
         return _run_async(_analyze_via_coco(
             mr_config=mr_config,
             state=state,
@@ -630,6 +546,63 @@ def _analyze_single_side(
 # ---------------------------------------------------------------------------
 # Coco 委托路径
 # ---------------------------------------------------------------------------
+
+
+async def _analyze_via_mira(
+    mr_config: MRSourceConfig,
+    state: dict[str, Any],
+    llm_client: Any,
+    prefix: str,
+    side: str,
+) -> MRAnalysisResult:
+    """通过 Mira 执行远端代码分析。"""
+    cached_result = _load_cached_task1_result(
+        state,
+        side=side,
+        prefix=prefix,
+    )
+    if cached_result is not None:
+        return cached_result
+
+    service = MiraAnalysisService(llm_client)
+    git_url, branch = _normalize_codebase_context(
+        mr_url=mr_config.mr_url,
+        git_url=mr_config.codebase.git_url,
+        branch=mr_config.codebase.branch,
+    )
+    diff_files = getattr(state.get("mr_input"), "diff_files", []) or []
+    changed_files_summary = _build_candidate_module_summary(state, diff_files)[:2000]
+    prd_summary = _build_prd_summary(state)
+    mira_dir = _get_mira_dir(state)
+    artifacts_to_record: dict[str, Path] = {}
+
+    result, artifacts = await service.run_mr_analysis_task(
+        mr_context={
+            "mr_url": mr_config.mr_url,
+            "git_url": git_url,
+            "branch": branch,
+        },
+        prd_summary=prd_summary[:3000],
+        changed_files_summary=changed_files_summary,
+    )
+
+    if mira_dir is not None:
+        prompt_path = write_text(mira_dir / f"task1_{side}_prompt.txt", artifacts.get("prompt", ""))
+        task_path = write_json(mira_dir / f"task1_{side}_task.json", artifacts.get("task", {}))
+        result_path = write_json(mira_dir / f"task1_{side}_result.json", result)
+        artifacts_to_record[f"task1_{side}_prompt"] = prompt_path
+        artifacts_to_record[f"task1_{side}_task"] = task_path
+        artifacts_to_record[f"task1_{side}_result"] = result_path
+        for artifact_key, artifact_path in artifacts_to_record.items():
+            _record_mira_artifact(state, artifact_key, artifact_path)
+
+    result = _apply_prefix(result, prefix)
+    result.coco_task_status = CocoTaskStatus(
+        task_id=str(artifacts.get("task_id", "")),
+        status="completed",
+        elapsed_seconds=0.0,
+    )
+    return result
 
 
 async def _analyze_via_coco(
@@ -782,7 +755,8 @@ def _analyze_locally(
     mr_title = getattr(mr_input, "mr_title", "") if mr_input else ""
     mr_description = getattr(mr_input, "mr_description", "") if mr_input else ""
 
-    summary_prompt = _PHASE1_SUMMARY_PROMPT.format(
+    summary_prompt = _PROMPT_LOADER.render(
+        "nodes/mr_analyzer/phase1_summary_user.md",
         mr_title=mr_title,
         mr_description=mr_description,
         diff_summary=diff_summary[:4000],
@@ -828,7 +802,8 @@ def _analyze_locally(
         for s in related_snippets[:10]
     )[:4000]
 
-    extract_prompt = _PHASE3_EXTRACT_PROMPT.format(
+    extract_prompt = _PROMPT_LOADER.render(
+        "nodes/mr_analyzer/phase3_extract_user.md",
         diff_content=diff_content,
         related_context=related_context,
         prd_facts=prd_facts[:3000],
@@ -914,7 +889,8 @@ def _run_agentic_search(
         ensure_ascii=False,
     )
 
-    system_msg = _PHASE2_SEARCH_SYSTEM.format(
+    system_msg = _PROMPT_LOADER.render(
+        "nodes/mr_analyzer/phase2_search_system.md",
         tools_desc=tools_desc,
         key_symbols=", ".join(key_symbols[:20]),
     )

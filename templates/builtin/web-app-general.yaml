@@ -1,0 +1,161 @@
+id: "tpl-web-general"
+name: "Web 应用通用测试模板"
+version: "1.0.0"
+source: "builtin"
+metadata:
+  name: "AutoChecklist"
+  version: "0.0.1"
+  author: "AutoChecklist"
+  applicable_project_types: "web_app"
+  tags:
+    - "web"
+    - "general"
+    - "frontend"
+  project_type: "web"
+  description: "适用于 Web 前端应用的通用测试检查模板，覆盖功能、UI/UX、异常处理、安全、性能和兼容性六大维度。"
+categories:
+  - name: "功能正确性"
+    description: "验证核心业务功能是否按需求正确实现"
+    items:
+      - title: "核心业务流程验证"
+        description: "确保主要业务流程端到端可正常完成"
+        priority: "critical"
+        rules:
+          - "每个核心流程至少覆盖正常路径和一个异常路径"
+          - "验证流程中每个步骤的状态转换正确性"
+          - "验证流程完成后的数据持久化结果"
+      - title: "表单输入与校验"
+        description: "验证所有表单的输入校验和提交逻辑"
+        priority: "high"
+        rules:
+          - "覆盖必填字段为空的场景"
+          - "覆盖字段格式校验（邮箱、手机号、URL 等）"
+          - "覆盖字段长度边界值"
+      - title: "数据展示与列表"
+        description: "验证数据列表的展示、排序、筛选和分页"
+        priority: "high"
+        rules:
+          - "验证空数据状态的展示"
+          - "验证分页跳转和每页数量切换"
+          - "验证排序和筛选条件的组合"
+  - name: "UI/UX"
+    description: "验证用户界面和交互体验"
+    items:
+      - title: "页面布局与响应式"
+        description: "验证页面在不同屏幕尺寸下的布局正确性"
+        priority: "medium"
+        rules:
+          - "验证桌面端（≥1280px）布局"
+          - "验证平板端（768px-1279px）布局"
+          - "验证移动端（<768px）布局"
+      - title: "交互反馈"
+        description: "验证用户操作后的反馈是否及时且正确"
+        priority: "medium"
+        rules:
+          - "验证按钮点击后的 loading 状态"
+          - "验证操作成功/失败的 toast 提示"
+          - "验证表单提交后的状态恢复"
+      - title: "导航与路由"
+        description: "验证页面导航和路由跳转"
+        priority: "high"
+        rules:
+          - "验证面包屑导航的正确性"
+          - "验证浏览器前进/后退的状态保持"
+          - "验证直接访问 URL 的权限控制"
+  - name: "异常处理与容错"
+    description: "验证系统在异常情况下的处理能力"
+    items:
+      - title: "网络异常处理"
+        description: "验证网络断开、超时等场景的处理"
+        priority: "high"
+        rules:
+          - "验证网络断开时的用户提示"
+          - "验证请求超时的重试机制"
+          - "验证网络恢复后的自动重连"
+      - title: "接口错误处理"
+        description: "验证后端接口返回错误时的前端处理"
+        priority: "high"
+        rules:
+          - "验证 4xx 错误的用户友好提示"
+          - "验证 5xx 错误的兆底页面"
+          - "验证接口返回数据格式异常时的容错"
+      - title: "并发操作处理"
+        description: "验证用户快速重复操作时的处理"
+        priority: "medium"
+        rules:
+          - "验证按钮防重复点击"
+          - "验证表单防重复提交"
+  - name: "安全性"
+    description: "验证 Web 应用的安全防护"
+    items:
+      - title: "XSS 防护"
+        description: "验证跨站脚本攻击的防护措施"
+        priority: "critical"
+        rules:
+          - "验证用户输入内容的转义处理"
+          - "验证富文本编辑器的 XSS 过滤"
+          - "验证 URL 参数的注入防护"
+      - title: "认证与授权"
+        description: "验证用户认证和权限控制"
+        priority: "critical"
+        rules:
+          - "验证未登录用户的访问限制"
+          - "验证 Token 过期后的自动跳转"
+          - "验证不同角色的权限隔离"
+      - title: "敏感数据保护"
+        description: "验证敏感信息的前端保护措施"
+        priority: "high"
+        rules:
+          - "验证密码字段的掩码显示"
+          - "验证敏感数据不在 URL 中明文传输"
+  - name: "性能与稳定性"
+    description: "验证页面性能和运行稳定性"
+    items:
+      - title: "页面加载性能"
+        description: "验证页面首屏加载和交互响应速度"
+        priority: "high"
+        rules:
+          - "首屏加载时间不超过 3 秒"
+          - "交互响应时间不超过 200ms"
+          - "验证大数据量列表的渲染性能"
+      - title: "内存与资源管理"
+        description: "验证前端资源的合理使用"
+        priority: "medium"
+        rules:
+          - "验证长时间使用无内存泄漏"
+          - "验证图片和静态资源的懒加载"
+      - title: "接口请求优化"
+        description: "验证接口请求的优化策略"
+        priority: "medium"
+        rules:
+          - "验证重复请求的缓存和去重"
+          - "验证列表请求的分页加载"
+  - name: "兼容性"
+    description: "验证跨浏览器和跨设备的兼容性"
+    items:
+      - title: "浏览器兼容性"
+        description: "验证主流浏览器的功能和展示一致性"
+        priority: "medium"
+        rules:
+          - "验证 Chrome 最新两个版本"
+          - "验证 Firefox 最新版本"
+          - "验证 Safari 最新版本"
+      - title: "操作系统兼容性"
+        description: "验证不同操作系统下的表现"
+        priority: "low"
+        rules:
+          - "验证 Windows 10/11 下的表现"
+          - "验证 macOS 下的表现"
+exclusions:
+  - pattern: "第三方 SDK 内部逻辑"
+    reason: "第三方 SDK 由供应商保证质量"
+  - pattern: "浏览器原生 API 行为"
+    reason: "浏览器原生能力不在测试范围内"
+settings:
+  min_cases_per_category: 3
+  require_edge_cases: true
+  priority_weights:
+    critical: 1.0
+    high: 0.8
+    medium: 0.5
+    low: 0.3

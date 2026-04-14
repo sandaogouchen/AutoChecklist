@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo PRD Executor"
+  short_description: "Implement PRDs with PR flow, self-feedback review, and optional analysis sync"
+  default_prompt: "Implement the PRD against the target repository, run a self-feedback review after the first verified implementation, explain the real diff for reviewers, and sync the analysis branch when requested and feasible."

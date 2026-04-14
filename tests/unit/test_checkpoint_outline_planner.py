@@ -2,21 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from app.domain.checkpoint_models import Checkpoint
+from app.domain.checklist_models import ChecklistNode
 from app.domain.research_models import ResearchFact, ResearchOutput
+from app.domain.template_models import MandatorySkeletonNode
 from app.services.markdown_renderer import render_test_cases_markdown
+from app.services import checkpoint_outline_planner as planner_module
 from app.services.checkpoint_outline_planner import build_checkpoint_outline_planner_node
 
 
 class _AdGroupOutlineLLM:
     def generate_structured(self, **kwargs):
         response_model = kwargs["response_model"]
+        user_prompt = kwargs.get("user_prompt", "")
         checkpoint_ids = re.findall(
             r"Checkpoint ID:\s*(CP-[A-Za-z0-9_-]+)",
-            kwargs.get("user_prompt", ""),
+            user_prompt,
         )
+        if not checkpoint_ids:
+            try:
+                payload = json.loads(user_prompt)
+            except json.JSONDecodeError:
+                payload = {}
+            checkpoint_ids = [
+                item["checkpoint_id"]
+                for item in payload.get("checkpoints", [])
+                if item.get("checkpoint_id")
+            ]
 
         if response_model.__name__ == "CanonicalOutlineNodeCollection":
             return response_model.model_validate(
@@ -180,3 +195,87 @@ def test_outline_tree_renders_before_draft_cases_exist() -> None:
     assert "[TC-" not in markdown
     assert "Checkpoint" not in markdown
     assert "步骤" not in markdown
+
+
+def test_outline_planner_node_accepts_mapping_state(monkeypatch) -> None:
+    captured: dict = {}
+
+    def _fake_plan(self, **kwargs):
+        del self
+        captured.update(kwargs)
+        return planner_module.CheckpointOutlinePlan(
+            canonical_outline_nodes=[],
+            checkpoint_paths=[],
+            optimized_tree=[ChecklistNode(node_id="root", title="Root")],
+        )
+
+    monkeypatch.setattr(planner_module.CheckpointOutlinePlanner, "plan", _fake_plan)
+
+    state = {
+        "research_output": ResearchOutput(),
+        "checkpoints": [],
+        "coverage_result": "coverage",
+        "mandatory_skeleton": "mandatory",
+        "xmind_reference_summary": "xmind-summary",
+    }
+    node = build_checkpoint_outline_planner_node(object())
+
+    result = node(state)
+
+    assert result == {
+        "canonical_outline_nodes": [],
+        "checkpoint_paths": [],
+        "optimized_tree": [ChecklistNode(node_id="root", title="Root")],
+    }
+    assert captured["research_output"] is state["research_output"]
+    assert captured["checkpoints"] == []
+    assert captured["coverage_result"] == "coverage"
+    assert captured["mandatory_skeleton"] == "mandatory"
+    assert captured["xmind_reference"] == "xmind-summary"
+
+
+def test_outline_planner_serializes_and_enforces_mandatory_skeleton() -> None:
+    skeleton = MandatorySkeletonNode(
+        id="__mandatory_root__",
+        title="Mandatory Skeleton Root",
+        depth=0,
+        is_mandatory=True,
+        children=[
+            MandatorySkeletonNode(
+                id="campaign",
+                title="Campaign",
+                depth=1,
+                is_mandatory=True,
+                children=[
+                    MandatorySkeletonNode(
+                        id="ad-group",
+                        title="Ad group",
+                        depth=2,
+                        is_mandatory=False,
+                        children=[
+                            MandatorySkeletonNode(
+                                id="optimize-goal",
+                                title="Optimize goal",
+                                depth=3,
+                                is_mandatory=True,
+                            )
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    node = build_checkpoint_outline_planner_node(object())
+
+    result = node(
+        {
+            "research_output": ResearchOutput(),
+            "checkpoints": [],
+            "mandatory_skeleton": skeleton,
+        }
+    )
+
+    assert [item.title for item in result["optimized_tree"]] == ["Campaign"]
+    campaign = result["optimized_tree"][0]
+    assert [child.title for child in campaign.children] == ["Ad group"]
+    assert [child.title for child in campaign.children[0].children] == ["Optimize goal"]

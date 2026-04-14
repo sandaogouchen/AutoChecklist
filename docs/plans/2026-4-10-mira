@@ -1,0 +1,1044 @@
+文档信息
+项目
+内容
+文档名称
+AutoChecklist — Mira 集成技术方案设计
+版本
+v1.0
+关联 PRD
+AutoChecklist — Mira 集成 PRD v1.0
+作者
+马远力 (mayuanli.233)
+审核人
+待定
+创建日期
+2026-04-09
+状态
+Draft — Pending Review
+
+---
+1. 技术背景与约束
+1.1 现有架构分析
+AutoChecklist 基于 LangGraph 构建有向无环图（DAG）工作流，核心流程为：
+input_parser → template_loader → [xmind_reference_loader]
+→ [project_context_loader] → [knowledge_retrieval]
+→ context_research → case_generation(子图) → reflection
+其中 case_generation 子图包含 11 个节点：
+mr_analyzer → scenario_planner → checkpoint_generator
+→ checkpoint_evaluator → mr_checkpoint_injector
+→ coverage_detector → checkpoint_outline_planner
+→ evidence_mapper → draft_writer
+→ coco_consistency_validator → structure_assembler
+LLM 调用链路（现状）：
+所有需要 LLM 的节点通过 LLMClient 统一调用，LLMClient 底层支持两种模式：
+模式
+入口类
+底层实现
+触发条件
+OpenAI 直连
+OpenAICompatibleLLMClient
+openai.OpenAI SDK
+LLM_USE_COCO_AS_LLM=false
+Coco 代理
+OpenAICompatibleLLMClient
+CocoClient.send_task() → 轮询 → SSE 取结果
+LLM_USE_COCO_AS_LLM=true
+Coco Agent 调用链路（现状）：
+CocoClient 独立封装 codebase-api.byted.org/v2 的两个核心 Action：
+Action
+功能
+调用方
+SendCopilotTaskMessage
+发送代码分析任务
+mr_analyzer（Task 1）、coco_consistency_validator（Task 2）
+GetCopilotTask
+轮询任务状态
+同上
+SubscribeCopilotTaskEvents
+SSE 订阅结果消息
+poll_task 内部调用
+1.2 技术约束
+约束
+说明
+影响
+LangGraph 节点签名
+所有节点必须为 (state: TypedDict) -> dict 的纯函数签名
+Mira Client 的异步 SSE 需要在节点内部做 sync-async 桥接
+TypedDict total=False
+GlobalState / CaseGenState 所有字段可选，增量更新
+新增字段不影响现有节点
+response_format=json_object
+现有 LLMClient.chat() 默认强制 JSON 模式
+Mira SSE 无 response_format 参数，需通过 prompt 约束替代
+Coco 三层容错
+CocoResponseValidator 做 Layer 1（JSON 直解）→ Layer 2（围栏提取）→ Layer 3（LLM 推断）
+Mira 替代后需保留同等容错深度
+提示词硬编码
+所有 prompt 以模块级常量字符串定义在 .py 文件中
+需迁移到独立文件，不能破坏现有 .format() 占位符
+向后兼容
+LLM_USE_MIRA=false 时系统行为完全不变
+所有改造必须可选、可回退
+1.3 Mira API 能力匹配评估
+AutoChecklist 需求
+Mira API 能力
+匹配度
+备注
+单轮 LLM 对话（JSON 输出）
+POST /mira/api/v1/chat/completion (SSE)
+完全匹配
+需等待 SSE 流结束后拼接完整响应
+结构化输出（Pydantic 校验）
+通过 system prompt 注入 JSON Schema
+完全匹配
+复用现有 _build_schema_hint
+代码库语义搜索
+Mira tool_list 配置代码搜索工具
+部分匹配
+需确认 Mira 平台侧是否注册了代码搜索类工具
+MR Diff 分析
+通过 Mira 对话 + 上传 diff 文件
+完全匹配
+将 diff 内容作为 user prompt 传入
+一致性校验（Task 2）
+通过 Mira 多轮对话
+完全匹配
+需复用 build_task2_prompt 提示词
+文件上传（PRD 文档）
+POST /mira/api/v1/file/upload
+完全匹配
+返回 CDN URL + URI
+模型选择
+GET /api/v1/model/metadata
+完全匹配
+动态发现可用模型
+会话管理
+/mira/api/v1/chat/create / /delete
+完全匹配
+每个 run 一个会话
+
+---
+2. 整体架构设计
+2.1 目标架构
+┌──────────────────────────────────────────────────────────────────┐
+│                      AutoChecklist Application                    │
+│                                                                   │
+│  ┌─────────┐  ┌──────────────┐  ┌────────────┐  ┌─────────────┐ │
+│  │Settings  │  │ MiraSettings │  │CocoSettings│  │PromptLoader │ │
+│  │(existing)│  │   (新增)      │  │ (existing) │  │  (新增)      │ │
+│  └────┬─────┘  └──────┬───────┘  └─────┬──────┘  └──────┬──────┘ │
+│       │               │               │                │         │
+│       ▼               ▼               ▼                ▼         │
+│  ┌────────────────────────────────────────────────────────────┐   │
+│  │              LLMClient (统一接口层 — 保持不变)                │   │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐  │   │
+│  │  │OpenAIBackend│  │ MiraBackend  │  │  CocoLLMBackend  │  │   │
+│  │  │ (existing)  │  │   (新增)      │  │   (existing)     │  │   │
+│  │  └──────┬──────┘  └──────┬───────┘  └────────┬─────────┘  │   │
+│  └─────────┼────────────────┼───────────────────┼────────────┘   │
+│            │                │                   │                │
+│            ▼                ▼                   ▼                │
+│       ┌─────────┐   ┌────────────┐      ┌────────────┐          │
+│       │OpenAI   │   │ MiraClient │      │ CocoClient │          │
+│       │   SDK   │   │  (新增)     │      │ (existing) │          │
+│       └────┬────┘   └─────┬──────┘      └─────┬──────┘          │
+└────────────┼──────────────┼────────────────────┼────────────────┘
+             │              │                    │
+             ▼              ▼                    ▼
+        OpenAI API      Mira API         Coco codebase-api
+2.2 核心设计决策
+D1：策略模式，保持 LLMClient 接口不变
+LLMClient 的 chat() / generate_structured() 签名不变，内部通过 Backend 策略对象分发到不同的后端实现。对 18 个业务节点完全透明——节点代码零修改。
+D2：MiraClient 作为独立基础设施层
+MiraClient 封装所有 Mira HTTP API 细节（认证、SSE 解析、重试、超时），不与 LangGraph 状态耦合。LLMClient 的 MiraBackend 调用 MiraClient 完成实际请求。
+D3：SSE 流式响应同步化
+Mira 的 /chat/completion 返回 SSE 流。在 LangGraph 的同步节点中，采用 httpx 异步 SSE 迭代 + asyncio.run() / 线程桥接（复用现有 _run_sync 模式）将流式响应收集为完整文本。
+D4：会话生命周期与 run_id 绑定
+每个 AutoChecklist run_id 对应一个 Mira Session。会话在 build_workflow() 时创建，工作流结束（正常或异常）时自动删除。多节点复用同一会话，保持上下文连续性。
+D5：提示词外部化，运行时加载
+所有硬编码在 Python 模块中的 prompt 常量字符串迁移到 prompts/ 目录下的 .md 文件中。运行时由 PromptLoader 加载，支持 {variable} 占位符替换。
+D6：Coco 能力 Mira 化为 Phase 2 交付
+Phase 1 保持 Coco 直连路径不变。Phase 2 新增 MiraCodeAnalysisBackend，通过 Mira 对话 + 工具调用替代 CocoClient.send_task()。
+
+---
+3. 核心模块详设
+3.1 MiraClient — Mira API 客户端
+文件位置：app/clients/mira_client.py（新建）
+类图：
+MiraClient
+├── __init__(config: MiraClientConfig)
+├── create_session(topic, model, data_sources) → str [session_id]
+├── send_message_sync(session_id, content, config?) → MiraMessageResponse
+├── send_message_stream(session_id, content, config?) → AsyncIterator[SSEEvent]
+├── get_messages(session_id, start_round?, end_round?) → list[MiraMessage]
+├── upload_files(files: list[Path]) → list[MiraFileInfo]
+├── get_models() → list[MiraModelMetadata]
+├── delete_session(session_id) → bool
+└── _request(method, path, **kwargs) → httpx.Response
+
+MiraClientConfig (dataclass)
+├── base_url: str
+├── jwt_token: str
+├── timezone: str = "Asia/Shanghai"
+├── timeout_seconds: float = 300.0
+├── max_retries: int = 3
+├── client_version: str = "autochecklist/0.1.0"
+
+MiraMessageResponse (dataclass)
+├── message_id: str
+├── content: str
+├── content_type: str
+├── round_index: int
+├── tasks: list[dict]
+└── raw_extra: dict
+
+MiraFileInfo (dataclass)
+├── file_name: str
+├── url: str
+├── uri: str
+├── mime_type: str
+└── is_sensitive: bool
+核心方法实现思路：
+send_message_sync（最关键方法）：
+async def _send_message_async(self, session_id, content, config=None):
+    """通过 SSE 发送消息并收集完整响应。"""
+    url = f"{self._config.base_url}/mira/api/v1/chat/completion"
+    body = {
+        "sessionId": session_id,
+        "content": content,
+        "messageType": 1,                    # Text
+        "summaryAgent": self._config.model or "",
+        "dataSources": [],
+        "comprehensive": 0,
+    }
+    if config:
+        body["config"] = config              # tool_list, model, mode 等
+
+    chunks = []
+    async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with client.stream("POST", url, json=body, headers=self._headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = json.loads(line[5:].strip())
+                # 根据 SSE event 类型累积内容
+                chunks.append(payload)
+
+    return self._assemble_response(chunks)
+
+def send_message_sync(self, session_id, content, config=None):
+    """同步包装，复用现有 _run_sync 桥接模式。"""
+    return _run_sync(self._send_message_async(session_id, content, config))
+请求头构建：
+@property
+def _headers(self):
+    return {
+        "Authorization": f"Bearer {self._config.jwt_token}",
+        "x-mira-client": self._config.client_version,
+        "x-mira-timezone": self._config.timezone,
+        "Content-Type": "application/json",
+    }
+重试策略：
+场景
+策略
+HTTP 429 / 503
+指数退避重试，最多 3 次，初始等待 2s
+HTTP 401
+不重试，立即抛出 MiraAuthError
+SSE 连接中断
+调用 /chat/completion/resume 恢复
+网络超时
+重试 1 次后降级到 fallback
+
+---
+3.2 LLMClient 改造 — Backend 策略模式
+文件位置：app/clients/llm.py（改造）
+变更范围：仅修改 LLMClient.__init__ 和 chat() 方法的内部分发逻辑，不改变任何外部调用签名。
+改造前后对比：
+方面
+改造前
+改造后
+模式切换
+_use_coco_as_llm 布尔标志
+_backend: LLMBackend 策略对象
+后端数量
+2（OpenAI / Coco）
+3（OpenAI / Coco / Mira）
+选择逻辑
+if self._use_coco_as_llm
+self._backend.chat(...)
+Fallback
+无
+Mira 失败 → OpenAI fallback
+Backend 接口定义：
+class LLMBackend(Protocol):
+    """LLM 后端协议。"""
+
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str: ...
+
+    @property
+    def backend_name(self) -> str: ...
+MiraLLMBackend 实现：
+class MiraLLMBackend:
+    """Mira SSE 后端。"""
+
+    def __init__(self, mira_client: MiraClient, session_id: str):
+        self._client = mira_client
+        self._session_id = session_id
+
+    @property
+    def backend_name(self) -> str:
+        return "mira"
+
+    def chat(self, system_prompt, user_prompt, **kwargs) -> str:
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+        response = self._client.send_message_sync(
+            session_id=self._session_id,
+            content=combined_prompt,
+            config={"model": kwargs.get("model")},
+        )
+        return response.content
+OpenAILLMBackend 实现（从现有代码抽取）：
+class OpenAILLMBackend:
+    """OpenAI SDK 直连后端。"""
+
+    def __init__(self, client: OpenAI, model: str, temperature: float, max_tokens: int):
+        self._client = client
+        self._model = model
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+
+    @property
+    def backend_name(self) -> str:
+        return "openai"
+
+    def chat(self, system_prompt, user_prompt, **kwargs) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            temperature=kwargs.get("temperature", self._temperature),
+            max_tokens=kwargs.get("max_tokens", self._max_tokens),
+            response_format={"type": "json_object"},
+        )
+        return response.choices[0].message.content or ""
+Backend 选择与 Fallback 逻辑：
+class LLMClient:
+    def __init__(self, ...):
+        # 优先级：MIRA > COCO > OPENAI
+        if mira_enabled:
+            self._primary = MiraLLMBackend(...)
+            self._fallback = OpenAILLMBackend(...) if api_key else None
+        elif use_coco_as_llm:
+            self._primary = CocoLLMBackend(...)
+            self._fallback = None
+        else:
+            self._primary = OpenAILLMBackend(...)
+            self._fallback = None
+
+    def chat(self, system_prompt, user_prompt, **kwargs) -> str:
+        try:
+            return self._primary.chat(system_prompt, user_prompt, **kwargs)
+        except MiraUnavailableError:
+            if self._fallback:
+                logger.warning("Mira 不可用，降级到 %s", self._fallback.backend_name)
+                return self._fallback.chat(system_prompt, user_prompt, **kwargs)
+            raise
+关键约束：generate_structured() 的兼容性
+现有 generate_structured() 在 OpenAI 后端依赖 response_format={"type": "json_object"} 来保证 JSON 输出。Mira 后端无此参数，替代方案：
+1. _build_schema_hint(response_model) 已将 JSON Schema 注入 system prompt（现有逻辑，无需修改）
+2. Mira Backend 的 chat() 在 system prompt 末尾追加 JSON 输出强制指令：
+_MIRA_JSON_SUFFIX = (
+    "\n\n[OUTPUT FORMAT]\n"
+    "You MUST respond with valid JSON only. "
+    "Do NOT wrap in markdown fences. "
+    "Do NOT add any text outside the JSON."
+)
+3. parse_json_response() 和 _repair_structured_output() 不变，继续作为容错层
+
+---
+3.3 MiraSettings — 配置模块
+文件位置：app/config/settings.py（扩展）
+class MiraSettings(BaseSettings):
+    """Mira AI 平台配置。"""
+
+    mira_enabled: bool = False
+    mira_base_url: str = ""
+    mira_jwt_token: str = ""
+    mira_model: str = ""
+    mira_timezone: str = "Asia/Shanghai"
+    mira_timeout_seconds: float = 300.0
+    mira_max_retries: int = 3
+    mira_tools: str = ""                    # 逗号分隔的工具名列表
+    mira_fallback_to_openai: bool = True    # Mira 失败时是否回退 OpenAI
+    mira_session_auto_cleanup: bool = True  # 是否自动清理会话
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @property
+    def tools_list(self) -> list[dict]:
+        """将逗号分隔的工具名转为 Mira API 格式。"""
+        if not self.mira_tools.strip():
+            return []
+        return [{"name": t.strip()} for t in self.mira_tools.split(",") if t.strip()]
+
+
+@lru_cache(maxsize=1)
+def get_mira_settings() -> MiraSettings:
+    return MiraSettings()
+.env 示例：
+# ---- Mira 配置（与 LLM/Coco 互斥） ----
+MIRA_ENABLED=true
+MIRA_BASE_URL=https://mira.bytedance.com
+MIRA_JWT_TOKEN=eyJhbGciOiJFUzI1NiIs...
+MIRA_MODEL=re-o-46
+MIRA_TOOLS=Web,KnowledgeQASearch
+MIRA_TIMEOUT_SECONDS=300
+MIRA_FALLBACK_TO_OPENAI=true
+
+---
+3.4 PromptLoader — 提示词管理
+文件位置：app/services/prompt_loader.py（新建）
+设计要点：
+class PromptLoader:
+    """提示词文件加载器。
+
+    按约定优于配置的方式，从 prompts/ 目录中加载提示词文件。
+    支持 {variable} 占位符替换和 _shared/ 目录下的共享片段引用。
+    """
+
+    def __init__(self, prompts_dir: str = "prompts"):
+        self._base_dir = Path(prompts_dir)
+        self._cache: dict[str, str] = {}
+
+    def load(self, node_name: str, prompt_name: str, **variables) -> str:
+        """加载并渲染提示词。
+
+        查找路径：prompts/{node_name}/{prompt_name}.md
+        若不存在则返回空字符串（向后兼容——代码中仍保留 fallback 常量）。
+
+        Args:
+            node_name: 节点名称（如 "context_research"）
+            prompt_name: 提示词名称（如 "lead_researcher_system"）
+            **variables: 占位符变量
+
+        Returns:
+            渲染后的提示词文本
+        """
+        cache_key = f"{node_name}/{prompt_name}"
+        if cache_key not in self._cache:
+            path = self._base_dir / node_name / f"{prompt_name}.md"
+            if path.exists():
+                self._cache[cache_key] = path.read_text(encoding="utf-8")
+            else:
+                self._cache[cache_key] = ""
+        template = self._cache[cache_key]
+        if not template:
+            return ""
+        # 处理 _shared 引用：{{include:_shared/json_constraint.md}}
+        template = self._resolve_includes(template)
+        # 变量替换：{mr_title} → actual value
+        return template.format_map(defaultdict(str, **variables))
+
+    def _resolve_includes(self, template: str) -> str:
+        """解析 {{include:path}} 指令。"""
+        pattern = re.compile(r"\{\{include:([^}]+)\}\}")
+        def replacer(match):
+            include_path = self._base_dir / match.group(1).strip()
+            if include_path.exists():
+                return include_path.read_text(encoding="utf-8")
+            return ""
+        return pattern.sub(replacer, template)
+迁移策略（不改变行为）：
+每个节点的迁移模式统一为：
+# 改造前
+_SYSTEM_PROMPT = "You are a senior QA engineer..."
+
+# 改造后
+_SYSTEM_PROMPT = "You are a senior QA engineer..."  # 保留作为 fallback
+
+def context_research_node(state):
+    prompt = prompt_loader.load("context_research", "system")
+    system_prompt = prompt or _SYSTEM_PROMPT    # 文件优先，代码兜底
+    ...
+涉及节点清单（18 个提示词迁移点）：
+节点
+文件
+Prompt 常量
+目标文件
+context_research
+nodes/context_research.py
+_SYSTEM_PROMPT
+prompts/context_research/system.md
+scenario_planner
+nodes/scenario_planner.py
+_SYSTEM_PROMPT
+prompts/scenario_planner/system.md
+checkpoint_generator
+nodes/checkpoint_generator.py
+_SYSTEM_PROMPT
+prompts/checkpoint_generator/system.md
+checkpoint_evaluator
+nodes/checkpoint_evaluator.py
+_SYSTEM_PROMPT
+prompts/checkpoint_evaluator/system.md
+evidence_mapper
+nodes/evidence_mapper.py
+_SYSTEM_PROMPT
+prompts/evidence_mapper/system.md
+draft_writer
+nodes/draft_writer.py
+_SYSTEM_PROMPT
+prompts/draft_writer/system.md
+structure_assembler
+nodes/structure_assembler.py
+_SYSTEM_PROMPT
+prompts/structure_assembler/system.md
+checklist_optimizer
+nodes/checklist_optimizer.py
+_SYSTEM_PROMPT
+prompts/checklist_optimizer/system.md
+reflection
+nodes/reflection.py
+prompt 片段
+prompts/reflection/quality_optimizer.md
+mr_analyzer
+nodes/mr_analyzer.py
+_PHASE1_SUMMARY_PROMPT
+prompts/mr_analysis/phase1_summary.md
+mr_analyzer
+nodes/mr_analyzer.py
+_PHASE2_SEARCH_SYSTEM
+prompts/mr_analysis/phase2_search_system.md
+mr_analyzer
+nodes/mr_analyzer.py
+_PHASE3_EXTRACT_PROMPT
+prompts/mr_analysis/phase3_extract.md
+mr_analyzer
+nodes/mr_analyzer.py
+_COCO_TASK1_PROMPT
+prompts/mr_analysis/coco_task1.md
+coco_client
+services/coco_client.py
+build_task2_prompt()
+prompts/mr_analysis/coco_task2.md
+
+---
+3.5 Coco 适配层 — MiraCodeAnalysisBackend（Phase 2）
+文件位置：app/services/mira_code_analysis.py（新建，Phase 2）
+设计思路：保持 CocoClient 的 run_mr_analysis_task / run_validation_task 接口签名不变，新增一个 Mira 实现类作为替代。
+class MiraCodeAnalysisBackend:
+    """通过 Mira 对话 + 工具调用替代 Coco Agent 的代码分析。
+
+    实现与 CocoClient 相同的 run_mr_analysis_task / run_validation_task
+    方法签名，使 mr_analyzer / coco_consistency_validator 节点无感切换。
+    """
+
+    def __init__(self, mira_client: MiraClient, mira_settings: MiraSettings):
+        self._client = mira_client
+        self._settings = mira_settings
+
+    async def run_mr_analysis_task(
+        self,
+        *,
+        mr_context: dict[str, str],
+        prd_summary: str,
+        changed_files_summary: str,
+    ) -> tuple[MRAnalysisResult, dict[str, Any]]:
+        """Task 1 替代：通过 Mira 对话完成 MR 代码分析。"""
+        session_id = self._client.create_session(
+            topic=f"MR Analysis: {mr_context.get('mr_url', '')}",
+            model=self._settings.mira_model,
+        )
+        try:
+            prompt = _build_coco_task1_prompt(
+                mr_url=mr_context.get("mr_url", ""),
+                git_url=mr_context.get("git_url", ""),
+                branch=mr_context.get("branch", ""),
+                prd_summary=prd_summary,
+                changed_files_summary=changed_files_summary,
+            )
+            response = self._client.send_message_sync(
+                session_id=session_id,
+                content=prompt,
+                config={"tool_list": self._settings.tools_list},
+            )
+            # 复用现有 CocoResponseValidator 解析逻辑
+            ...
+        finally:
+            self._client.delete_session(session_id)
+
+    async def run_validation_task(
+        self,
+        checkpoint: Any,
+        mr_context: dict[str, str],
+        timeout_s: int = 120,
+    ) -> tuple[CodeConsistencyResult, dict[str, Any]]:
+        """Task 2 替代：通过 Mira 对话完成一致性校验。"""
+        ...
+mr_analyzer 节点的切换逻辑：
+def _analyze_single_side(side, mr_config, state, llm_client, ...):
+    if mr_config.use_coco:
+        if mira_enabled:
+            return _run_async(_analyze_via_mira(...))    # 新增路径
+        return _run_async(_analyze_via_coco(...))        # 保留路径
+    return _analyze_locally(...)
+
+---
+4. 接口定义
+4.1 MiraClient 公共接口
+class MiraClient:
+
+    def create_session(
+        self,
+        topic: str,
+        model: str = "",
+        data_sources: list[dict] | None = None,
+    ) -> str:
+        """创建 Mira 会话。
+
+        Args:
+            topic: 会话标题
+            model: 模型标识（空则使用配置默认值）
+            data_sources: 数据源配置列表
+
+        Returns:
+            session_id: 会话唯一标识
+
+        Raises:
+            MiraAuthError: JWT Token 无效
+            MiraAPIError: API 调用失败
+        """
+
+    def send_message_sync(
+        self,
+        session_id: str,
+        content: str,
+        config: dict | None = None,
+        attachments: list[dict] | None = None,
+    ) -> MiraMessageResponse:
+        """发送消息并等待完整响应（SSE 流收集）。
+
+        Args:
+            session_id: 会话 ID
+            content: 消息内容
+            config: 可选配置（model, tool_list, mode 等）
+            attachments: 文件附件列表
+
+        Returns:
+            MiraMessageResponse: 完整的消息响应
+
+        Raises:
+            MiraTimeoutError: SSE 流超时
+            MiraSSEError: SSE 连接异常
+        """
+
+    def upload_files(
+        self,
+        files: list[Path | str],
+        sensitive_detection: bool = True,
+    ) -> list[MiraFileInfo]:
+        """上传文件到 Mira CDN。
+
+        Args:
+            files: 文件路径列表
+            sensitive_detection: 是否开启敏感内容检测
+
+        Returns:
+            MiraFileInfo 列表（含 CDN URL）
+
+        Raises:
+            MiraUploadError: 上传失败
+        """
+
+    def delete_session(self, session_id: str) -> bool:
+        """删除会话，释放资源。"""
+
+    def get_models(self) -> list[MiraModelMetadata]:
+        """获取可用模型列表。"""
+4.2 异常体系
+class MiraError(Exception):
+    """Mira API 基础异常。"""
+    def __init__(self, message: str, code: int = -1, log_id: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.log_id = log_id
+
+class MiraAuthError(MiraError):
+    """认证失败（401）。"""
+
+class MiraAPIError(MiraError):
+    """API 业务错误（code != 0）。"""
+
+class MiraTimeoutError(MiraError):
+    """请求或 SSE 流超时。"""
+
+class MiraSSEError(MiraError):
+    """SSE 连接或解析异常。"""
+
+class MiraUploadError(MiraError):
+    """文件上传失败。"""
+
+class MiraUnavailableError(MiraError):
+    """Mira 服务不可用（用于触发 fallback）。"""
+4.3 LLMBackend Protocol
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    """LLM 后端协议——所有后端必须实现。"""
+
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """发送对话请求，返回纯文本响应。"""
+        ...
+
+    @property
+    def backend_name(self) -> str:
+        """后端标识名。"""
+        ...
+
+---
+5. 数据模型变更
+5.1 GlobalState / CaseGenState — 无变更
+本次改造不新增任何 TypedDict 字段。所有变更封装在 LLMClient 内部和配置层，对工作流状态完全透明。
+5.2 新增配置数据类
+类名
+文件
+说明
+MiraClientConfig
+app/clients/mira_client.py
+Mira HTTP 客户端配置
+MiraSettings
+app/config/settings.py
+Mira 环境变量配置
+MiraMessageResponse
+app/clients/mira_client.py
+SSE 响应聚合模型
+MiraFileInfo
+app/clients/mira_client.py
+文件上传结果
+MiraModelMetadata
+app/clients/mira_client.py
+模型元数据
+5.3 LLMClientConfig — 扩展
+@dataclass
+class LLMClientConfig:
+    # ---- 现有字段（不变）----
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o"
+    use_coco_as_llm: bool = False
+    coco_api_base_url: str = ""
+    coco_jwt_token: str = ""
+    coco_agent_name: str = "sandbox"
+    temperature: float = 0.2
+    max_tokens: int = 4096
+    timeout_seconds: float = 120.0
+    extra_params: dict[str, Any] = field(default_factory=dict)
+
+    # ---- 新增字段 ----
+    use_mira: bool = False                # Mira 模式开关
+    mira_base_url: str = ""
+    mira_jwt_token: str = ""
+    mira_model: str = ""
+    mira_timeout_seconds: float = 300.0
+    mira_fallback_to_openai: bool = True
+5.4 文件变更矩阵
+文件
+变更类型
+说明
+app/clients/mira_client.py
+新建
+Mira API 客户端封装
+app/clients/llm.py
+改造
+新增 Backend Protocol + MiraLLMBackend + Fallback 逻辑
+app/config/settings.py
+扩展
+新增 MiraSettings 类
+app/services/prompt_loader.py
+新建
+提示词文件加载器
+app/services/mira_code_analysis.py
+新建（Phase 2）
+Mira 代码分析后端
+app/main.py
+微调
+MiraSettings 初始化 + MiraClient 注入
+prompts/ 目录
+新建
+14 个提示词文件
+.env.example
+扩展
+新增 MIRA_* 配置项
+tests/test_mira_client.py
+新建
+MiraClient 单元测试
+tests/test_llm_backend.py
+新建
+Backend 切换与 Fallback 测试
+
+---
+6. 风险评估与降级策略
+6.1 风险矩阵
+风险
+概率
+影响
+缓解措施
+R1: Mira SSE 响应格式与预期不符
+中
+高 — 全部 LLM 调用失败
+Phase 1 第一周先搭建 SSE 解析并用真实 API 验证；保留 OpenAI fallback
+R2: Mira 无 response_format=json_object
+确定
+中 — JSON 解析失败率可能上升
+通过 prompt 强制指令 + 现有 _repair_structured_output 三层容错兜底
+R3: Mira JWT Token 过期频率不明
+中
+中 — 运行中途认证失败
+实现 Token 刷新拦截器；Token 过期时自动调用 /api/refreshToken
+R4: Mira 平台侧代码搜索工具不可用
+高
+中 — Phase 2 Coco 替代方案受阻
+Phase 1 不依赖 Mira 工具；Phase 2 先验证工具可用性再决定替代范围
+R5: SSE 长连接在企业网络环境断线
+中
+中 — 单次请求失败
+实现 /chat/completion/resume 断线恢复；最多重试 3 次
+R6: 会话泄漏（异常退出未清理）
+中
+低 — Mira 平台资源浪费
+atexit 注册 + try/finally 双重保障 + 定期巡检脚本
+R7: Mira 响应延迟高于 OpenAI 直连
+中
+低 — 端到端耗时增加
+监控 P95 延迟；若差距 > 50% 则保持 OpenAI 作为默认后端
+6.2 三级降级链路
+Level 0: Mira Backend 正常
+    │
+    ▼ (Mira 超时/错误)
+Level 1: 指数退避重试（最多 3 次）
+    │
+    ▼ (仍然失败)
+Level 2: OpenAI Backend Fallback（mira_fallback_to_openai=true 时）
+    │
+    ▼ (OpenAI 也不可用)
+Level 3: 抛出异常，终止当前节点
+降级时的行为差异：
+特性
+Mira Backend
+OpenAI Fallback
+JSON 模式
+Prompt 强制 + 三层容错
+response_format=json_object
+工具调用
+支持 tool_list
+不支持
+上下文连续性
+会话级多轮
+无状态单轮
+模型选择
+Mira 配置模型
+LLM 配置模型
+6.3 回滚方案
+一键回滚：将 .env 中 MIRA_ENABLED=false，系统完全回退到改造前的行为，无需任何代码变更。
+代码级回滚：所有新增代码位于独立文件（mira_client.py、prompt_loader.py、mira_code_analysis.py），llm.py 的改造通过 if mira_enabled 守卫，删除守卫分支即可恢复。
+
+---
+7. 排期估算
+Phase 1: 基础集成（第 1-2 周）
+任务
+预估工时
+输出
+依赖
+MiraClient 封装 + 单元测试
+3d
+mira_client.py + tests
+Mira API 文档（已有）
+MiraSettings 配置
+0.5d
+settings.py 扩展
+无
+LLMBackend Protocol 定义
+0.5d
+llm.py Backend 接口
+无
+MiraLLMBackend 实现
+2d
+MiraBackend + SSE 解析
+MiraClient
+OpenAILLMBackend 抽取
+1d
+从现有 chat() 抽取
+无
+LLMClient 改造（策略分发 + Fallback）
+1d
+llm.py 改造
+上述 3 项
+冒烟测试 + 联调
+2d
+端到端验证
+全部 Phase 1
+Phase 1 合计
+10d（2 周）
+
+
+Phase 2: 能力替换（第 3-4 周）
+任务
+预估工时
+输出
+依赖
+PromptLoader 实现
+1d
+prompt_loader.py
+无
+提示词文件迁移（14 个）
+2d
+prompts/ 目录
+PromptLoader
+MiraCodeAnalysisBackend（Task 1）
+2d
+mira_code_analysis.py
+MiraClient
+MiraCodeAnalysisBackend（Task 2）
+1d
+同上
+同上
+mr_analyzer 适配
+1d
+节点切换逻辑
+MiraCodeAnalysisBackend
+质量对比测试
+2d
+测试报告
+全部 Phase 2 代码
+Bug 修复 + 调优
+1d
+—
+质量对比测试
+Phase 2 合计
+10d（2 周）
+
+
+Phase 3: 增强与收尾（第 5-6 周）
+任务
+预估工时
+输出
+依赖
+Mira 工具链集成（Web/Knowledge）
+2d
+context_research 增强
+MiraClient
+埋点实现
+1.5d
+日志 + 指标
+无
+监控看板搭建
+1d
+Grafana Dashboard
+埋点
+性能对比与优化
+2d
+优化报告
+全部代码
+技术文档 + 使用指南
+1.5d
+文档
+无
+Code Review + 合并
+2d
+—
+全部
+Phase 3 合计
+10d（2 周）
+
+
+整体时间线
+周次
+交付物
+里程碑
+W1
+MiraClient + MiraSettings
+SSE 通路可用
+W2
+LLMClient 改造 + 冒烟测试
+M1: 基础通路打通
+W3
+PromptLoader + 提示词迁移
+提示词独立化完成
+W4
+MiraCodeAnalysis + 质量对比
+M2: 功能完整
+W5
+工具链 + 埋点 + 监控
+可观测性就绪
+W6
+性能优化 + 文档 + 合并
+M3: 生产就绪
+
+---
+附录 A：SSE 事件流解析规范
+Mira /chat/completion 接口返回标准 SSE 格式。基于 @microsoft/fetch-event-source 的行为推断，事件流结构为：
+data: {"event": "message_start", "message_id": "xxx", ...}
+
+data: {"event": "content_delta", "delta": {"text": "部分文本..."}}
+
+data: {"event": "content_delta", "delta": {"text": "继续..."}}
+
+data: {"event": "message_end", "message_id": "xxx", "usage": {...}}
+
+data: [DONE]
+MiraClient 的解析逻辑：
+1. 逐行读取 SSE 流，过滤非 data: 前缀行
+2. 解析 JSON payload，按 event 类型分发处理
+3. content_delta 事件累积 delta.text 到 buffer
+4. message_end 事件触发响应组装
+5. [DONE] 或连接关闭时返回最终结果
+6. 超时未收到 message_end 时抛出 MiraTimeoutError
+附录 B：向后兼容验证清单
+验证项
+条件
+预期结果
+MIRA_ENABLED 未设置
+.env 无 MIRA 相关配置
+系统行为与改造前完全一致
+MIRA_ENABLED=false
+显式关闭
+走 OpenAI 或 Coco 路径
+MIRA_ENABLED=true + OpenAI 配置
+双后端配置
+Mira 主 → OpenAI 备
+MIRA_ENABLED=true + 无 OpenAI
+仅 Mira 配置
+Mira 失败直接报错
+LLM_USE_COCO_AS_LLM=true + MIRA_ENABLED=false
+Coco 模式不变
+走 Coco LLM 代理路径
+prompts/ 目录不存在
+未迁移提示词
+fallback 到代码内常量
+prompts/ 存在但缺少某个文件
+部分迁移
+缺失文件 fallback 到代码内常量

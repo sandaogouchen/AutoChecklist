@@ -18,6 +18,7 @@ from app.domain.mr_models import (
     MRSourceConfig,
 )
 from app.domain.research_models import ResearchFact, ResearchOutput
+from app.nodes import mr_analyzer as mr_analyzer_module
 from app.nodes.mr_analyzer import build_mr_analyzer_node
 
 
@@ -233,6 +234,61 @@ def test_mr_analyzer_runs_single_coco_task_and_keeps_research_output_unchanged(m
     assert result["research_output"].facts[1].code_consistency_status == ""
 
 
+def test_mr_analyzer_runs_frontend_and_backend_in_parallel(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _fake_analyze_single_side(
+        *,
+        side,
+        mr_config,
+        state,
+        llm_client,
+        codebase_root,
+        coco_settings,
+        prefix,
+    ):
+        del mr_config, state, llm_client, codebase_root, coco_settings, prefix
+        calls.append(side)
+        time.sleep(0.05)
+        return MRAnalysisResult(
+            mr_summary=f"{side} summary",
+            changed_modules=[side],
+            code_facts=[
+                MRCodeFact(
+                    fact_id=f"{side}-fact",
+                    description=f"{side} fact",
+                    source_file=f"{side}.py",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("app.nodes.mr_analyzer._analyze_single_side", _fake_analyze_single_side)
+
+    node = build_mr_analyzer_node(llm_client=object())
+    state = {
+        "frontend_mr_config": MRSourceConfig(
+            mr_url="https://example.com/mr/frontend",
+            codebase=CodebaseSource(local_path=""),
+            use_coco=False,
+        ),
+        "backend_mr_config": MRSourceConfig(
+            mr_url="https://example.com/mr/backend",
+            codebase=CodebaseSource(local_path=""),
+            use_coco=False,
+        ),
+    }
+
+    started = time.monotonic()
+    result = node(state)
+    elapsed = time.monotonic() - started
+
+    assert set(calls) == {"frontend", "backend"}
+    assert elapsed < 0.09
+    assert len(result["mr_code_facts"]) == 2
+    assert "[前端] frontend summary" in result["mr_combined_summary"]
+    assert "[后端] backend summary" in result["mr_combined_summary"]
+
+
 def test_mr_analyzer_reuses_cached_coco_task1_result(monkeypatch, tmp_path: Path) -> None:
     from app.services import coco_client as coco_client_module
 
@@ -296,3 +352,146 @@ def test_mr_analyzer_reuses_cached_coco_task1_result(monkeypatch, tmp_path: Path
 
     assert result["mr_code_facts"][0].fact_id == "FE-MR-FACT-001"
     assert result["mr_code_facts"][0].description == "缓存的代码事实"
+
+
+def test_mr_analyzer_routes_remote_analysis_to_mira_when_enabled(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    async def _fake_analyze_via_mira(
+        mr_config,
+        state,
+        llm_client,
+        prefix,
+        side,
+    ):
+        del state, llm_client
+        calls.append(
+            {
+                "mr_url": mr_config.mr_url,
+                "prefix": prefix,
+                "side": side,
+            }
+        )
+        return MRAnalysisResult(
+            mr_summary="Mira 代码分析摘要",
+            code_facts=[
+                MRCodeFact(
+                    fact_id="MR-FACT-001",
+                    description="Mira 发现的代码事实",
+                    source_file="app/mira.py",
+                )
+            ],
+        )
+
+    async def _fail_analyze_via_coco(
+        mr_config,
+        state,
+        llm_client,
+        coco_settings,
+        prefix,
+        side,
+    ):
+        del mr_config, state, llm_client, coco_settings, prefix, side
+        raise AssertionError("should not call Coco when Mira code analysis is enabled")
+
+    monkeypatch.setattr("app.nodes.mr_analyzer._analyze_via_mira", _fake_analyze_via_mira)
+    monkeypatch.setattr("app.nodes.mr_analyzer._analyze_via_coco", _fail_analyze_via_coco)
+
+    llm_client = type(
+        "FakeLLM",
+        (),
+        {
+            "config": type(
+                "Config",
+                (),
+                {"mira_use_for_code_analysis": True},
+            )()
+        },
+    )()
+
+    node = build_mr_analyzer_node(llm_client=llm_client)
+    result = node(
+        {
+            "frontend_mr_config": MRSourceConfig(
+                mr_url="https://example.com/mr/456",
+                codebase=CodebaseSource(git_url="https://example.com/repo.git"),
+                use_coco=True,
+            ),
+            "mr_input": MRInput(diff_files=[]),
+            "research_output": ResearchOutput(),
+        }
+    )
+
+    assert calls == [
+        {
+            "mr_url": "https://example.com/mr/456",
+            "prefix": "FE-",
+            "side": "frontend",
+        }
+    ]
+    assert result["mr_combined_summary"] == "[前端] Mira 代码分析摘要"
+    assert result["mr_code_facts"][0].description == "Mira 发现的代码事实"
+
+
+def test_analyze_via_mira_persists_artifacts_under_mira_dir(monkeypatch, tmp_path: Path) -> None:
+    class _FakeMiraAnalysisService:
+        def __init__(self, llm_client) -> None:
+            del llm_client
+
+        async def run_mr_analysis_task(self, *, mr_context, prd_summary, changed_files_summary):
+            del mr_context, prd_summary, changed_files_summary
+            return (
+                MRAnalysisResult(
+                    mr_summary="Mira 分析结果",
+                    code_facts=[
+                        MRCodeFact(
+                            fact_id="MR-FACT-001",
+                            description="Mira fact",
+                            source_file="app/mira.py",
+                        )
+                    ],
+                ),
+                {
+                    "prompt": "prompt body",
+                    "task": {"session_id": "mira-session"},
+                },
+            )
+
+    monkeypatch.setattr(
+        mr_analyzer_module,
+        "MiraAnalysisService",
+        _FakeMiraAnalysisService,
+    )
+
+    state = {
+        "run_output_dir": str(tmp_path),
+        "mr_input": MRInput(diff_files=[]),
+        "research_output": ResearchOutput(),
+    }
+    result = asyncio.run(
+        mr_analyzer_module._analyze_via_mira(
+            MRSourceConfig(
+                mr_url="https://example.com/mr/456",
+                codebase=CodebaseSource(
+                    git_url="https://example.com/repo.git",
+                    branch="feat/mira-artifacts",
+                ),
+                use_coco=True,
+            ),
+            state,
+            object(),
+            "FE-",
+            "frontend",
+        )
+    )
+
+    prompt_path = tmp_path / "mira" / "task1_frontend_prompt.txt"
+    task_path = tmp_path / "mira" / "task1_frontend_task.json"
+    result_path = tmp_path / "mira" / "task1_frontend_result.json"
+
+    assert result.mr_summary == "Mira 分析结果"
+    assert prompt_path.exists()
+    assert task_path.exists()
+    assert result_path.exists()
+    assert not (tmp_path / "coco" / "task1_frontend_result.json").exists()
+    assert state["mira_artifacts"]["task1_frontend_result"] == str(result_path)

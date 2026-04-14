@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 _DOC_REGISTRY_FILE = "indexed_documents.json"
 
 
+def _ensure_openai_compatible_knowledge_provider(settings: Settings) -> None:
+    """GraphRAG 仅支持带 embeddings 的 OpenAI-compatible 提供方。"""
+    if getattr(settings, "llm_use_coco_as_llm", False):
+        raise RuntimeError(
+            "知识检索暂不支持启用 LLM_USE_COCO_AS_LLM：Coco OpenAPI 不提供 embeddings 接口"
+        )
+
+
 async def _openai_compatible_llm(
     prompt: str,
     system_prompt: Optional[str] = None,
@@ -42,6 +50,7 @@ async def _openai_compatible_llm(
     import httpx
 
     settings = Settings()
+    _ensure_openai_compatible_knowledge_provider(settings)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -80,6 +89,7 @@ async def _openai_compatible_embedding(texts: list[str]) -> np.ndarray:
     import httpx
 
     settings = Settings()
+    _ensure_openai_compatible_knowledge_provider(settings)
     model = settings.knowledge_embedding_model or settings.llm_model
 
     async with httpx.AsyncClient(
@@ -125,6 +135,7 @@ class GraphRAGEngine:
         Path(working_dir).mkdir(parents=True, exist_ok=True)
 
         try:
+            _ensure_openai_compatible_knowledge_provider(self._settings)
             embedding_dim = 1536  # OpenAI 默认维度，可后续配置化
 
             self._rag = LightRAG(

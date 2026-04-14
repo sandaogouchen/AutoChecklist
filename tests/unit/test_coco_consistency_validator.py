@@ -234,3 +234,196 @@ def test_coco_consistency_validator_reuses_cached_task2_results(monkeypatch, tmp
         "unverified": 0,
     }
     assert result["checkpoints"][0].code_consistency["verified_by"] == "coco-cache"
+
+
+def test_coco_consistency_validator_routes_remote_validation_to_mira_when_enabled(
+    monkeypatch,
+) -> None:
+    async def _fake_validate_checkpoint_via_mira(
+        checkpoint,
+        mr_context,
+        llm_client,
+        artifact_context=None,
+    ):
+        del mr_context, llm_client, artifact_context
+        return (
+            validator_module.CodeConsistencyResult(
+                status="mismatch",
+                confidence=0.88,
+                actual_implementation="Mira 识别到实际实现与预期不同",
+                inconsistency_reason="缺少错误提示",
+                verified_by="mira",
+            ),
+            {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "checkpoint_title": checkpoint.title,
+            },
+        )
+
+    async def _fail_validate_checkpoint_via_coco(
+        checkpoint,
+        mr_context,
+        coco_settings,
+        llm_client,
+        artifact_context=None,
+    ):
+        del checkpoint, mr_context, coco_settings, llm_client, artifact_context
+        raise AssertionError("should not call Coco validator when Mira code analysis is enabled")
+
+    monkeypatch.setattr(
+        validator_module,
+        "_validate_checkpoint_via_mira",
+        _fake_validate_checkpoint_via_mira,
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "_validate_checkpoint_via_coco",
+        _fail_validate_checkpoint_via_coco,
+    )
+
+    llm_client = type(
+        "FakeLLM",
+        (),
+        {
+            "config": type(
+                "Config",
+                (),
+                {"mira_use_for_code_analysis": True},
+            )()
+        },
+    )()
+
+    node = build_coco_consistency_validator_node(
+        llm_client=llm_client,
+        coco_settings=CocoSettings(coco_jwt_token="dummy-token"),
+    )
+
+    result = node(
+        {
+            "checkpoints": [Checkpoint(checkpoint_id="CP-9", title="验证错误提示")],
+            "frontend_mr_config": {
+                "mr_url": "https://example.com/mr/123",
+                "use_coco": True,
+                "codebase": {"git_url": "https://example.com/repo.git"},
+            },
+        }
+    )
+
+    assert result["coco_validation_summary"] == {
+        "total": 1,
+        "confirmed": 0,
+        "mismatch": 1,
+        "unverified": 0,
+    }
+    assert result["checkpoints"][0].code_consistency["verified_by"] == "mira"
+
+
+def test_validate_checkpoint_via_mira_persists_detail_under_mira_dir(monkeypatch, tmp_path) -> None:
+    class _FakeMiraAnalysisService:
+        def __init__(self, llm_client) -> None:
+            del llm_client
+
+        async def run_validation_task(self, checkpoint, mr_context):
+            del checkpoint, mr_context
+            return (
+                validator_module.CodeConsistencyResult(
+                    status="confirmed",
+                    confidence=0.93,
+                    actual_implementation="Mira 详情记录",
+                    verified_by="mira",
+                ),
+                {
+                    "prompt": "validation prompt",
+                    "response": "{\"ok\":true}",
+                },
+            )
+
+    monkeypatch.setattr(
+        validator_module,
+        "MiraAnalysisService",
+        _FakeMiraAnalysisService,
+    )
+
+    result, record = asyncio.run(
+        validator_module._validate_checkpoint_via_mira(
+            checkpoint=Checkpoint(checkpoint_id="CP-3", title="检查点 3"),
+            mr_context={
+                "mr_url": "https://example.com/mr/123",
+                "git_url": "https://example.com/repo.git",
+            },
+            llm_client=object(),
+            artifact_context={
+                "run_output_dir": str(tmp_path),
+                "checkpoint_index": 3,
+            },
+        )
+    )
+
+    detail_path = tmp_path / "mira" / "task2_checkpoint_003.json"
+    assert result.status == "confirmed"
+    assert detail_path.exists()
+    assert record["artifact_file"] == str(detail_path)
+
+
+def test_coco_consistency_validator_persists_mira_summary_under_mira_dir(monkeypatch, tmp_path) -> None:
+    async def _fake_validate_checkpoint_via_mira(
+        checkpoint,
+        mr_context,
+        llm_client,
+        artifact_context=None,
+    ):
+        del mr_context, llm_client, artifact_context
+        return (
+            validator_module.CodeConsistencyResult(
+                status="confirmed",
+                confidence=0.91,
+                actual_implementation="Mira 汇总落盘",
+                verified_by="mira",
+            ),
+            {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "checkpoint_title": checkpoint.title,
+            },
+        )
+
+    monkeypatch.setattr(
+        validator_module,
+        "_validate_checkpoint_via_mira",
+        _fake_validate_checkpoint_via_mira,
+    )
+
+    llm_client = type(
+        "FakeLLM",
+        (),
+        {
+            "config": type(
+                "Config",
+                (),
+                {"mira_use_for_code_analysis": True},
+            )()
+        },
+    )()
+
+    node = build_coco_consistency_validator_node(
+        llm_client=llm_client,
+        coco_settings=CocoSettings(coco_jwt_token="dummy-token"),
+    )
+
+    result = node(
+        {
+            "run_output_dir": str(tmp_path),
+            "checkpoints": [Checkpoint(checkpoint_id="CP-9", title="验证错误提示")],
+            "frontend_mr_config": {
+                "mr_url": "https://example.com/mr/123",
+                "use_coco": True,
+                "codebase": {"git_url": "https://example.com/repo.git"},
+            },
+        }
+    )
+
+    summary_path = tmp_path / "mira" / "task2_summary.json"
+    results_path = tmp_path / "mira" / "task2_results.json"
+    assert summary_path.exists()
+    assert results_path.exists()
+    assert not (tmp_path / "coco" / "task2_summary.json").exists()
+    assert result["mira_artifacts"]["task2_summary"] == str(summary_path)

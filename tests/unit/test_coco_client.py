@@ -34,12 +34,6 @@ def test_send_task_uses_supported_agent_and_omits_repo_id(monkeypatch) -> None:
         return {"Task": {"Id": "task-123"}}
 
     monkeypatch.setattr(client, "_post", _fake_post)
-    monkeypatch.setattr(
-        client,
-        "_resolve_repo_id",
-        lambda mr_url, git_url: "",
-        raising=False,
-    )
 
     task_id = asyncio.run(
         client.send_task(
@@ -53,6 +47,7 @@ def test_send_task_uses_supported_agent_and_omits_repo_id(monkeypatch) -> None:
     assert captured["action"] == "SendCopilotTaskMessage"
     assert captured["payload"] == {
         "AgentName": "sandbox",
+        "disable_model_failover": "true",
         "Message": {
             "Id": "",
             "Role": "user",
@@ -82,43 +77,7 @@ def test_send_task_preserves_explicit_supported_agent(monkeypatch) -> None:
     assert task_id == "task-456"
     assert captured["payload"] == {
         "AgentName": "copilot",
-        "Message": {
-            "Id": "",
-            "Role": "user",
-            "Parts": [{"Text": {"Text": "review this MR"}}],
-        },
-    }
-
-
-def test_send_task_includes_resolved_repo_id_for_internal_repo(monkeypatch) -> None:
-    client = CocoClient(CocoSettings(_env_file=None, coco_jwt_token="token"))
-    captured: dict[str, object] = {}
-
-    async def _fake_post(action: str, payload: dict[str, object]) -> dict[str, object]:
-        captured["action"] = action
-        captured["payload"] = payload
-        return {"Task": {"Id": "task-789"}}
-
-    monkeypatch.setattr(client, "_post", _fake_post)
-    monkeypatch.setattr(
-        client,
-        "_resolve_repo_id",
-        lambda mr_url, git_url: "436797",
-        raising=False,
-    )
-
-    task_id = asyncio.run(
-        client.send_task(
-            prompt="review this MR",
-            mr_url="https://bits.bytedance.net/code/ad/ttam_brand_mono/merge_requests/2142",
-            git_url="https://code.byted.org/ad/ttam_brand_mono.git",
-        )
-    )
-
-    assert task_id == "task-789"
-    assert captured["payload"] == {
-        "AgentName": "sandbox",
-        "RepoId": "436797",
+        "disable_model_failover": "true",
         "Message": {
             "Id": "",
             "Role": "user",
@@ -143,25 +102,76 @@ def test_send_task_includes_configured_model_name(monkeypatch) -> None:
         return {"Task": {"Id": "task-model"}}
 
     monkeypatch.setattr(client, "_post", _fake_post)
-    monkeypatch.setattr(
-        client,
-        "_resolve_repo_id",
-        lambda mr_url, git_url: "",
-        raising=False,
-    )
 
     task_id = asyncio.run(client.send_task(prompt="review this MR"))
 
     assert task_id == "task-model"
     assert captured["payload"] == {
         "AgentName": "sandbox",
-        "ModelName": "kimi-k2-250711",
+        "disable_model_failover": "true",
         "Message": {
             "Id": "",
             "Role": "user",
             "Parts": [{"Text": {"Text": "review this MR"}}],
         },
+        "modelName": "kimi-k2-250711",
     }
+
+
+def test_coco_client_builds_action_url_matching_openapi_contract() -> None:
+    client = CocoClient(
+        CocoSettings(
+            _env_file=None,
+            coco_api_base_url="https://codebase-api.byted.org/v2",
+            coco_jwt_token="token",
+        )
+    )
+
+    assert client._build_action_url("SendCopilotTaskMessage") == (
+        "https://codebase-api.byted.org/v2/?Action=SendCopilotTaskMessage"
+    )
+
+
+def test_coco_client_post_enables_follow_redirects(monkeypatch) -> None:
+    client = CocoClient(
+        CocoSettings(
+            _env_file=None,
+            coco_api_base_url="http://localhost:8317/v1",
+            coco_jwt_token="token",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"Result": {"Task": {"Id": "task-1"}}}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> _FakeResponse:
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return _FakeResponse()
+
+    monkeypatch.setattr("app.services.coco_client.httpx.AsyncClient", _FakeAsyncClient)
+
+    result = asyncio.run(client._post("SendCopilotTaskMessage", {"foo": "bar"}))
+
+    assert result == {"Task": {"Id": "task-1"}}
+    assert captured["kwargs"] == {"timeout": 30.0, "follow_redirects": True}
+    assert captured["url"] == "http://localhost:8317/v1/?Action=SendCopilotTaskMessage"
 
 
 def test_poll_task_returns_completed_task(monkeypatch) -> None:

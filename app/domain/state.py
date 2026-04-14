@@ -124,6 +124,7 @@ class GlobalState(TypedDict, total=False):
     mr_combined_summary: str
     coco_validation_summary: dict
     coco_artifacts: dict[str, str]
+    mira_artifacts: dict[str, str]
     coco_cache_dir: str
     coco_cache_run_id: str
 
@@ -191,5 +192,6 @@ class CaseGenState(TypedDict, total=False):
     mr_combined_summary: str
     coco_validation_summary: dict
     coco_artifacts: dict[str, str]
+    mira_artifacts: dict[str, str]
     coco_cache_dir: str
     coco_cache_run_id: str

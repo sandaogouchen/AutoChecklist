@@ -32,8 +32,10 @@ from app.domain.checklist_models import (
 )
 from app.domain.checkpoint_models import Checkpoint
 from app.domain.state import CaseGenState
+from app.services.prompt_loader import get_prompt_loader
 
 logger = logging.getLogger(__name__)
+_PROMPT_LOADER = get_prompt_loader()
 
 # ---------------------------------------------------------------------------
 # 可调常量
@@ -45,37 +47,7 @@ _MAX_WORKERS: int = 12
 """ThreadPoolExecutor 并发线程数。控制同时发出的 LLM 请求数量。"""
 
 # LLM 系统提示词：指导模型基于 checkpoint 生成结构化的手动 QA 测试用例
-_SYSTEM_PROMPT = (
-    "You write concise manual QA test cases as structured JSON. "
-    "Each test case MUST include an id, title, steps, expected_results, evidence_refs, "
-    "and a checkpoint_id field that references the checkpoint it was generated from. "
-    "Always include ids, steps, expected_results, and evidence_refs.\n"
-    "Fixed hierarchy paths are supplied by the system.\n"
-    "Do not restate or merge that hierarchy into testcase titles, preconditions, "
-    "or summary headings.\n"
-    "Do not restate merged parent phrases such as `处于 CBO 的 Ad group 配置场景`.\n"
-    "Generate only the leaf testcase title, concrete steps, and expected_results "
-    "under the supplied path.\n\n"
-    "【语言要求】\n"
-    "- title 字段使用中文书写，简要概括测试目标。\n"
-    "- steps 字段使用中文书写操作步骤，其中 UI 元素、按钮文案、字段名等"
-    "专有名词保留英文原文并用反引号包裹，例如：点击 `Submit` 按钮。\n"
-    "- expected_results 字段使用中文书写预期结果。\n"
-    "- preconditions 字段使用中文书写前置条件。\n"
-    "- id、priority、category、checkpoint_id 等标识字段保留英文。\n"
-    "- evidence_refs 中的 section_title 和 excerpt 保留原文不翻译。\n\n"
-    "【前置条件编写规范】\n"
-    "preconditions 字段是后续自动分组的关键依据，请严格遵守以下规则：\n"
-    "1. 表述规范化：使用统一的句式结构，同一含义只用一种表达方式。"
-    "例如：始终使用「用户已登录系统」而非混用「登录状态下」「已完成登录」。\n"
-    "2. 层级化描述：前置条件按逻辑顺序排列，从环境/系统状态 → 用户状态 → 数据准备 → 页面/入口。"
-    "例如：[\"系统已部署 v2.0 版本\", \"用户已登录管理后台\", \"已创建至少一条测试数据\"]\u3002\n"
-    "3. 原子性：每条前置条件仅描述一个独立的准备动作或状态，不要合并多个条件到一句话中。"
-    "错误示例：「用户已登录且进入设置页面」→ 应拆分为两条。\n"
-    "4. 充分性：列出执行测试步骤前所需的全部准备条件，不遗漏隐含的前置状态。\n"
-    "5. 复用意识：当多个测试用例共享相同的前置环境时，确保它们的 preconditions 完全一致"
-    "（字面相同），以便自动归组。不要因措辞差异导致相同含义的条件被拆分到不同组。"
-)
+_SYSTEM_PROMPT = _PROMPT_LOADER.load("nodes/draft_writer/system.md")
 
 
 class DraftCaseCollection(BaseModel):
@@ -106,13 +78,9 @@ def _build_ref_leaf_prompt(batch: list[ChecklistNode]) -> str:
         f"- 【{leaf.title}】(node_id={leaf.node_id})"
         for leaf in batch
     )
-    return (
-        "以下是已有 Checklist 中的测试用例标题，请为每个标题补充具体的：\n"
-        "1. 前置条件（preconditions）\n"
-        "2. 执行步骤（steps）\n"
-        "3. 预期结果（expected_results）\n\n"
-        "【重要】请保留原始标题不做任何修改。\n\n"
-        f"用例列表：\n{leaf_descriptions}\n"
+    return _PROMPT_LOADER.render(
+        "nodes/draft_writer/reference_leaf_user.md",
+        leaf_descriptions=leaf_descriptions,
     )
 
 

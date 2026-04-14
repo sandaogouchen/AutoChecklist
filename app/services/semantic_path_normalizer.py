@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
+from app.services.prompt_loader import get_prompt_loader
 
 if TYPE_CHECKING:
     from app.clients.llm import LLMClient
@@ -71,75 +72,9 @@ class NormalizedChecklistPath:
     checkpoint_id: str
 
 
-_VOCAB_SYSTEM_PROMPT = """
-You are building a shared checklist logic tree for manual QA test cases.
-
-Your job in this stage:
-1. read all test cases together
-2. identify canonical reusable precondition/action nodes
-3. create semantic anchors that maximize path sharing
-
-Target output shape:
-- only canonical nodes
-- no case summary nodes
-- no fact summary nodes
-- no testcase title abstractions like "[TC-027] ..."
-
-Canonicalization rules:
-- merge semantically equivalent steps even when wording differs a lot
-- prefer business-object anchors such as adgroup, campaign, creative, TTMS account,
-  optimize goal, secondary goal, CTA, CBO
-- hidden anchors are encouraged when they help multiple paths share a logical prefix
-- include unique nodes too when needed, so every case can later be fully mapped
-- display_text should be concise and suitable for a checklist/XMind node
-- aliases should be short source snippets proving the mapping
-
-Critical example:
-Source A: "用户已进入 `Create Ad Group` 页面"
-Source B: "已准备一个 `secondary goal` 非 `conversion` 的 campaign/ad group"
-Good normalization:
-- hidden semantic anchor: adgroup
-- visible node examples can stay separate
-Bad normalization:
-- creating testcase summary nodes
-- treating these as unrelated because surface wording differs
-
-Think in terms of a reusable operation tree:
-environment -> user state -> page/context -> focused operation -> expected result
-""".strip()
-
-
-_PATH_SYSTEM_PROMPT = """
-You are mapping each test case into an ordered reusable logic path using ONLY the
-provided canonical nodes.
-
-Hard constraints:
-- output only shared precondition/action path segments
-- do NOT include testcase titles
-- do NOT include fact summaries
-- do NOT generate "[TC-xxx]" or similar summary layers
-- expected_results must stay as terminal leaves only
-
-Path rules:
-- order path_node_ids from broad/shared context to specific operation
-- use hidden anchors when they improve structural sharing
-- prefer the deepest logically complete path, not a shallow keyword list
-- every meaningful precondition/step should be represented by canonical nodes
-- do not invent new node ids
-
-Checklist goal:
-The final rendered tree should look like:
-系统已部署测试版本
-  用户已登录系统
-    进入 `Create Ad Group` 页面
-      定位 `optimize goal` 区域
-        预期结果...
-
-It should NOT look like:
-[TC-001] optimize goal visible
-  前置条件...
-  步骤...
-""".strip()
+_PROMPT_LOADER = get_prompt_loader()
+_VOCAB_SYSTEM_PROMPT = _PROMPT_LOADER.load("services/semantic_path_normalizer/vocab_system.md")
+_PATH_SYSTEM_PROMPT = _PROMPT_LOADER.load("services/semantic_path_normalizer/path_system.md")
 
 
 class SemanticPathNormalizer:

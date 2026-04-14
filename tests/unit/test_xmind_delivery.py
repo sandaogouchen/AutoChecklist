@@ -17,9 +17,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.domain.case_models import TestCase
-from app.domain.checklist_models import ChecklistNode
+from app.domain.checklist_models import (
+    CanonicalOutlineNode,
+    ChecklistNode,
+    CheckpointPathMapping,
+)
 from app.domain.checkpoint_models import Checkpoint
-from app.domain.research_models import ResearchOutput
+from app.domain.research_models import EvidenceRef, PlannedScenario, ResearchOutput
 from app.domain.xmind_models import (
     XMindDeliveryResult,
     XMindNode,
@@ -627,6 +631,102 @@ class TestPlatformDispatcher:
 
         # 本地产物应正常存在
         assert "run_json" in artifacts or "run_markdown" in artifacts or isinstance(artifacts, dict)
+
+    def test_dispatch_persists_resume_artifacts(self, tmp_path: Path) -> None:
+        """dispatch 应持久化 draft writer 续跑所需的关键中间态。"""
+        from app.domain.api_models import CaseGenerationRequest, CaseGenerationRun
+        from app.domain.case_models import QualityReport
+        from app.repositories.run_repository import FileRunRepository
+        from app.services.platform_dispatcher import PlatformDispatcher
+
+        repository = FileRunRepository(tmp_path)
+        dispatcher = PlatformDispatcher(repository=repository)
+
+        run = CaseGenerationRun(
+            run_id="resume-artifacts",
+            status="succeeded",
+            input=CaseGenerationRequest(file_path="test.md"),
+            test_cases=[_make_test_case()],
+            quality_report=QualityReport(),
+        )
+
+        draft_case = _make_test_case(
+            tc_id="TC-DRAFT-001",
+            title="中间态用例",
+            checkpoint_id="CP-RESUME-001",
+        )
+        planned_scenario = PlannedScenario(
+            title="短信登录主流程",
+            fact_id="FACT-001",
+            category="functional",
+            risk="high",
+        )
+        checkpoint_paths = [
+            CheckpointPathMapping(
+                checkpoint_id="CP-RESUME-001",
+                path_node_ids=["node-login", "node-submit"],
+            )
+        ]
+        canonical_outline_nodes = [
+            CanonicalOutlineNode(
+                node_id="node-login",
+                semantic_key="login",
+                display_text="登录",
+                kind="business_object",
+                visibility="visible",
+            ),
+            CanonicalOutlineNode(
+                node_id="node-submit",
+                semantic_key="submit",
+                display_text="提交登录",
+                kind="action",
+                visibility="visible",
+            ),
+        ]
+        mapped_evidence = {
+            "中间态用例": [
+                EvidenceRef(
+                    section_title="Acceptance Criteria",
+                    excerpt="Successful login redirects to the dashboard.",
+                    line_start=7,
+                    line_end=10,
+                    confidence=0.9,
+                )
+            ]
+        }
+        optimized_tree = _make_optimized_tree()
+
+        artifacts = dispatcher.dispatch(
+            run_id="resume-artifacts",
+            run=run,
+            workflow_result={
+                "checkpoints": [_make_checkpoint(checkpoint_id="CP-RESUME-001")],
+                "draft_cases": [draft_case],
+                "planned_scenarios": [planned_scenario],
+                "checkpoint_paths": checkpoint_paths,
+                "canonical_outline_nodes": canonical_outline_nodes,
+                "mapped_evidence": mapped_evidence,
+                "optimized_tree": optimized_tree,
+            },
+        )
+
+        for key in (
+            "draft_cases",
+            "planned_scenarios",
+            "checkpoint_paths",
+            "canonical_outline_nodes",
+            "mapped_evidence",
+            "optimized_tree",
+        ):
+            assert key in artifacts
+            assert Path(artifacts[key]).exists()
+
+        assert json.loads(Path(artifacts["draft_cases"]).read_text(encoding="utf-8"))[0]["title"] == "中间态用例"
+        assert json.loads(Path(artifacts["planned_scenarios"]).read_text(encoding="utf-8"))[0]["title"] == "短信登录主流程"
+        assert json.loads(Path(artifacts["checkpoint_paths"]).read_text(encoding="utf-8"))[0]["checkpoint_id"] == "CP-RESUME-001"
+        assert json.loads(Path(artifacts["canonical_outline_nodes"]).read_text(encoding="utf-8"))[0]["node_id"] == "node-login"
+        assert json.loads(Path(artifacts["mapped_evidence"]).read_text(encoding="utf-8"))["中间态用例"][0]["section_title"] == "Acceptance Criteria"
+        assert json.loads(Path(artifacts["optimized_tree"]).read_text(encoding="utf-8"))[0]["node_id"] == "GRP-001"
 
 
 # =========================================================================

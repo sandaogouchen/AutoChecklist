@@ -460,7 +460,11 @@ class WorkflowService:
         if backend_mr is not None:
             workflow_input["backend_mr_config"] = backend_mr
 
-        if any(config and config.get("use_coco") for config in (frontend_mr, backend_mr)):
+        should_use_coco_cache = (
+            any(config and config.get("use_coco") for config in (frontend_mr, backend_mr))
+            and not getattr(self.settings, "mira_use_for_code_analysis", False)
+        )
+        if should_use_coco_cache:
             cache_hit = self._find_matching_coco_cache_run(run_id, request)
             if cache_hit is not None:
                 workflow_input["coco_cache_run_id"] = cache_hit["run_id"]
@@ -585,9 +589,28 @@ class WorkflowService:
                 api_key=self.settings.llm_api_key,
                 base_url=self.settings.llm_base_url,
                 model=self.settings.llm_model,
+                use_coco_as_llm=self.settings.llm_use_coco_as_llm,
+                use_mira_as_llm=self.settings.llm_use_mira_as_llm,
+                coco_api_base_url=getattr(self._coco_settings, "coco_api_base_url", ""),
+                coco_jwt_token=getattr(self._coco_settings, "coco_jwt_token", ""),
+                coco_agent_name=getattr(self._coco_settings, "coco_agent_name", "sandbox"),
+                mira_api_base_url=getattr(self.settings, "mira_api_base_url", ""),
+                mira_jwt_token=getattr(self.settings, "mira_jwt_token", ""),
+                mira_cookie=getattr(self.settings, "mira_cookie", ""),
+                mira_client_version=getattr(self.settings, "mira_client_version", "autochecklist/0.1.0"),
+                mira_use_for_code_analysis=getattr(self.settings, "mira_use_for_code_analysis", False),
+                timezone=getattr(self.settings, "timezone", "Asia/Shanghai"),
                 timeout_seconds=self.settings.llm_timeout_seconds,
                 temperature=self.settings.llm_temperature,
                 max_tokens=self.settings.llm_max_tokens,
+            )
+            logger.info(
+                "Initializing LLM client: backend=%s model=%s timeout=%.1fs timezone=%s mira_analysis=%s",
+                "mira" if config.use_mira_as_llm else "coco" if config.use_coco_as_llm else "openai-compatible",
+                config.model or "<default>",
+                config.timeout_seconds,
+                config.timezone,
+                config.mira_use_for_code_analysis,
             )
             self._llm_client = OpenAICompatibleLLMClient(config)
         return self._llm_client
@@ -637,11 +660,14 @@ class WorkflowService:
         except Exception:
             pass
 
-        coco_dir = Path(self.repository._run_dir(run_id)) / "coco"
-        if coco_dir.exists():
-            for path in sorted(coco_dir.rglob("*")):
+        run_dir = Path(self.repository._run_dir(run_id))
+        for provider in ("coco", "mira"):
+            artifact_dir = run_dir / provider
+            if not artifact_dir.exists():
+                continue
+            for path in sorted(artifact_dir.rglob("*")):
                 if path.is_file():
-                    artifacts[f"coco::{path.relative_to(coco_dir).as_posix()}"] = str(path)
+                    artifacts[f"{provider}::{path.relative_to(artifact_dir).as_posix()}"] = str(path)
 
         run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
         run_result_path = self.repository.save(

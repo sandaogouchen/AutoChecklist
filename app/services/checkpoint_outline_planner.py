@@ -44,65 +44,14 @@ from app.domain.state import CaseGenState
 from app.domain.template_models import MandatorySkeletonNode
 from app.domain.xmind_reference_models import XMindReferenceSummary
 from app.services.coverage_detector import CoverageResult
+from app.services.prompt_loader import get_prompt_loader
 
 logger = logging.getLogger(__name__)
+_PROMPT_LOADER = get_prompt_loader()
 
 _WHITESPACE_RE = re.compile(r"\s+")
-
-_OUTLINE_SYSTEM_PROMPT = """
-You are planning a stable manual-QA checklist hierarchy before testcase drafting.
-
-Stage A responsibilities:
-- build canonical reusable outline nodes for the checkpoints below
-- hierarchy must be business-object-first
-- visible parents are required for core business objects such as Campaign, Ad group,
-  Creative, Reporting, TTMS account
-- mixed object+state phrases must be split into separate nodes
-- no testcase summary nodes
-- no "[TC-xxx]" layers
-- display_text should be concise and renderable in Markdown/XMind
-
-Allowed node kinds:
-- business_object
-- context
-- page
-- action
-
-Visibility rules:
-- visible: rendered directly
-- required: rendered directly and should not be skipped
-- hidden: merge-only anchor, never rendered
-""".strip()
-
-_PATH_SYSTEM_PROMPT = """
-You are mapping each checkpoint onto a fixed outline path using ONLY the provided
-canonical nodes.
-
-Hard constraints:
-- every path must include the nearest visible business object
-- lifecycle, state, page, and action nodes must sit under that object
-- reuse only provided node ids
-- do not invent testcase summary layers
-- do not generate expected results in this stage
-
-The output must be an ordered path from broad business object to specific operation.
-""".strip()
-
-_MANDATORY_CONSTRAINT_TEMPLATE = """
-## 强制模版约束
-
-以下是本次生成必须严格遵循的模版骨架结构。标记为 [MANDATORY] 的节点是强制节点，
-你不可以增加、删除、修改或重命名这些节点。
-
-强制骨架：
-{skeleton_text}
-
-约束规则：
-1. 强制层级的节点必须与上述骨架完全一致
-2. 所有 checkpoint 必须被分配到上述骨架节点的某个子路径下
-3. 在非强制层级，你可以自由创建子节点来进一步组织 checkpoint
-4. 输出的 JSON 中，强制节点必须保留原始 id 和 title，不可更改
-""".strip()
+_OUTLINE_SYSTEM_PROMPT = _PROMPT_LOADER.load("services/checkpoint_outline_planner/outline_system.md")
+_PATH_SYSTEM_PROMPT = _PROMPT_LOADER.load("services/checkpoint_outline_planner/path_system.md")
 
 
 def _normalize_text(text: str) -> str:
@@ -150,43 +99,31 @@ def _build_xmind_reference_prompt_section(
     if coverage_result and hasattr(coverage_result, "covered_checkpoint_ids"):
         covered = coverage_result.covered_checkpoint_ids
         if covered:
-            coverage_note = (
-                "\n\n## 已覆盖说明\n"
-                f"以下 {len(covered)} 个检查点已被参考 Checklist 覆盖，"
-                "无需为它们生成 outline 节点：\n"
-                + "\n".join(f"- {cid}" for cid in covered[:20])
-                + "\n\n请只为未覆盖的检查点生成分类路径。\n"
+            coverage_note = _PROMPT_LOADER.render(
+                "services/checkpoint_outline_planner/coverage_note.md",
+                covered_count=len(covered),
+                covered_lines="\n".join(f"- {cid}" for cid in covered[:20]),
             )
 
     if not has_mandatory_skeleton:
-        return (
-            "\n\n## 参考 Checklist 结构（主结构锚点）\n"
-            f"{formatted}\n"
-            "【重要指令】你生成的 outline 必须尽量遵循此参考结构的覆盖维度和组织方式。\n"
-            "- 参考结构中的一级分支应作为你输出的主要分类维度\n"
-            "- 参考结构中的二级分支应作为子分类的参考\n"
-            "- 命名风格和路径组织方式应与参考保持一致\n"
-            "- 仅在参考结构明显未覆盖的领域，可自行补充新的分支\n"
-            + coverage_note
+        return _PROMPT_LOADER.render(
+            "services/checkpoint_outline_planner/xmind_reference_no_mandatory.md",
+            formatted=formatted,
+            coverage_note=coverage_note,
         )
 
-    section = (
-        "\n\n## 参考 Checklist 结构（路由辅助 + 补充锚点）\n"
-        f"{formatted}\n"
-        '【重要指令】强制模版骨架中标记为"必须保留"的节点是硬约束，不可更改。\n'
-        "参考结构用于以下用途：\n"
-        "- **路由辅助**：根据参考结构判断每个 checkpoint 最适合归属到哪个强制节点下\n"
-        "- **补充锚点**：强制模版未覆盖的区域，按参考结构的组织方式补充分支\n"
-        "- **风格对齐**：命名风格和层级深度参考已有结构\n"
-    )
+    routing_hints_section = ""
     if routing_hints:
-        section += (
-            "\n## Checkpoint 归属建议\n"
-            "以下是基于参考结构的 checkpoint 路由建议：\n"
-            f"{routing_hints}\n"
+        routing_hints_section = _PROMPT_LOADER.render(
+            "services/checkpoint_outline_planner/routing_hints_section.md",
+            routing_hints=routing_hints,
         )
-    section += coverage_note
-    return section
+    return _PROMPT_LOADER.render(
+        "services/checkpoint_outline_planner/xmind_reference_with_mandatory.md",
+        formatted=formatted,
+        routing_hints_section=routing_hints_section,
+        coverage_note=coverage_note,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +171,18 @@ class CheckpointOutlinePlanner:
         research_output: ResearchOutput,
         checkpoints: list[Checkpoint],
         mandatory_skeleton: MandatorySkeletonNode | None = None,
+        xmind_reference=None,
         xmind_reference_summary=None,
         coverage_result: CoverageResult | None = None,
     ) -> CheckpointOutlinePlan:
+        if xmind_reference_summary is None:
+            xmind_reference_summary = xmind_reference
+
         if not checkpoints:
-            return CheckpointOutlinePlan([], [], [])
+            optimized_tree: list[ChecklistNode] = []
+            if mandatory_skeleton:
+                optimized_tree = self._enforce_mandatory_skeleton([], mandatory_skeleton)
+            return CheckpointOutlinePlan([], [], optimized_tree)
 
         facts_payload = [
             {
@@ -371,7 +315,13 @@ class CheckpointOutlinePlanner:
     ) -> str:
         """将强制骨架序列化为约束 prompt 文本。"""
         skeleton_text = self._serialize_skeleton(skeleton, indent=0)
-        return _MANDATORY_CONSTRAINT_TEMPLATE.format(skeleton_text=skeleton_text)
+        return _PROMPT_LOADER.render(
+            "services/checkpoint_outline_planner/mandatory_constraint.md",
+            skeleton_text=skeleton_text,
+        )
+
+    def _is_virtual_mandatory_root(self, node: MandatorySkeletonNode) -> bool:
+        return node.id == "__mandatory_root__" or node.depth == 0
 
     def _serialize_skeleton(
         self, node: MandatorySkeletonNode, indent: int
@@ -744,10 +694,10 @@ def build_checkpoint_outline_planner_node(llm_client: LLMClient):
         checkpoints = state.get("checkpoints", [])
 
         plan = planner.plan(
-            state.get("research_output", ResearchOutput()),
-            checkpoints,
+            research_output=state.get("research_output", ResearchOutput()),
+            checkpoints=checkpoints,
             mandatory_skeleton=mandatory_skeleton,
-            xmind_reference_summary=xmind_reference_summary,
+            xmind_reference=xmind_reference_summary,
             coverage_result=coverage_result,
         )
 
