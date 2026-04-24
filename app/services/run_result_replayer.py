@@ -31,9 +31,20 @@ def replay_delivery_from_run_result(
     output_dir: str | Path | None = None,
 ) -> ReplayDeliveryResult:
     run_result_file = Path(run_result_path)
-    run = CaseGenerationRun.model_validate(
-        json.loads(run_result_file.read_text(encoding="utf-8"))
-    )
+    raw = json.loads(run_result_file.read_text(encoding="utf-8"))
+    # 兼容历史 run_result：input.file_path 可能是本地路径而非 32 位 file_id
+    legacy_title = ""
+    try:
+        input_payload = raw.get("input") or {}
+        legacy_title = input_payload.get("file_path", "") if isinstance(input_payload, dict) else ""
+        # 若 file_path 不是 32 位 file_id，则用占位 file_id 让模型校验通过
+        if isinstance(input_payload, dict) and legacy_title and not re.fullmatch(r"^[0-9a-fA-F]{32}$", str(legacy_title)):
+            input_payload["file_path"] = "0" * 32
+            raw["input"] = input_payload
+    except Exception:
+        legacy_title = ""
+
+    run = CaseGenerationRun.model_validate(raw)
 
     run_dir = run_result_file.parent
     checkpoints = _load_checkpoints_from_artifacts(run_dir, run.artifacts)
@@ -47,7 +58,7 @@ def replay_delivery_from_run_result(
         checkpoints=checkpoints,
         research_output=run.research_summary,
         output_dir=output_dir or run_dir,
-        title=run.input.file_id if run.input else run_result_file.stem,
+        title=(legacy_title or (run.input.file_id if run.input else run_result_file.stem)),
         run_id=run.run_id,
     )
 

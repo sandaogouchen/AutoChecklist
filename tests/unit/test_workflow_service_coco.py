@@ -145,21 +145,25 @@ def test_build_workflow_input_includes_mr_configs_and_run_output_dir(tmp_path) -
         coco_settings=CocoSettings(coco_jwt_token="token"),
     )
     request = CaseGenerationRequest(
-        file_path=str(Path("tests/fixtures/sample_prd.md").resolve()),
-        frontend_mr=MRRequestConfig(
-            mr_url="https://example.com/fe/merge_requests/1",
-            git_url="https://example.com/fe.git",
-            local_path="/tmp/frontend",
-            branch="feat/frontend-coco",
-            use_coco=True,
-        ),
-        backend_mr=MRRequestConfig(
-            mr_url="https://example.com/be/merge_requests/2",
-            git_url="https://example.com/be.git",
-            local_path="/tmp/backend",
-            branch="feat/backend-coco",
-            use_coco=True,
-        ),
+        file_id="0" * 32,
+        frontend_mr=[
+            MRRequestConfig(
+                mr_url="https://example.com/fe/merge_requests/1",
+                git_url="https://example.com/fe.git",
+                local_path="/tmp/frontend",
+                branch="feat/frontend-coco",
+                use_coco=True,
+            )
+        ],
+        backend_mr=[
+            MRRequestConfig(
+                mr_url="https://example.com/be/merge_requests/2",
+                git_url="https://example.com/be.git",
+                local_path="/tmp/backend",
+                branch="feat/backend-coco",
+                use_coco=True,
+            )
+        ],
     )
 
     workflow_input = service._build_workflow_input(
@@ -169,8 +173,8 @@ def test_build_workflow_input_includes_mr_configs_and_run_output_dir(tmp_path) -
     )
 
     assert workflow_input["run_output_dir"] == str(tmp_path / "run-001")
-    assert workflow_input["frontend_mr_config"]["codebase"]["branch"] == "feat/frontend-coco"
-    assert workflow_input["backend_mr_config"]["codebase"]["branch"] == "feat/backend-coco"
+    assert workflow_input["frontend_mr_config"][0]["codebase"]["branch"] == "feat/frontend-coco"
+    assert workflow_input["backend_mr_config"][0]["codebase"]["branch"] == "feat/backend-coco"
 
 
 def test_build_workflow_input_normalizes_bits_tree_url_for_coco(tmp_path) -> None:
@@ -181,13 +185,15 @@ def test_build_workflow_input_normalizes_bits_tree_url_for_coco(tmp_path) -> Non
         coco_settings=CocoSettings(coco_jwt_token="token"),
     )
     request = CaseGenerationRequest(
-        file_path=str(Path("tests/fixtures/sample_prd.md").resolve()),
-        frontend_mr=MRRequestConfig(
-            mr_url="https://bits.bytedance.net/code/ad/ttam_brand_mono/merge_requests/2142",
-            git_url="https://bits.bytedance.net/code/ad/ttam_brand_mono/tree/feat-pulse-lineup",
-            branch="",
-            use_coco=True,
-        ),
+        file_id="0" * 32,
+        frontend_mr=[
+            MRRequestConfig(
+                mr_url="https://bits.bytedance.net/code/ad/ttam_brand_mono/merge_requests/2142",
+                git_url="https://bits.bytedance.net/code/ad/ttam_brand_mono/tree/feat-pulse-lineup",
+                branch="",
+                use_coco=True,
+            )
+        ],
     )
 
     workflow_input = service._build_workflow_input(
@@ -196,10 +202,10 @@ def test_build_workflow_input_normalizes_bits_tree_url_for_coco(tmp_path) -> Non
         iteration_index=0,
     )
 
-    assert workflow_input["frontend_mr_config"]["codebase"]["git_url"] == (
+    assert workflow_input["frontend_mr_config"][0]["codebase"]["git_url"] == (
         "https://code.byted.org/ad/ttam_brand_mono.git"
     )
-    assert workflow_input["frontend_mr_config"]["codebase"]["branch"] == "feat-pulse-lineup"
+    assert workflow_input["frontend_mr_config"][0]["codebase"]["branch"] == "feat-pulse-lineup"
 
 
 def test_build_workflow_input_reuses_matching_historical_coco_cache(tmp_path) -> None:
@@ -213,13 +219,15 @@ def test_build_workflow_input_reuses_matching_historical_coco_cache(tmp_path) ->
         coco_settings=CocoSettings(coco_jwt_token="token"),
     )
     request = CaseGenerationRequest(
-        file_path=str(Path("tests/fixtures/sample_prd.md").resolve()),
-        frontend_mr=MRRequestConfig(
-            mr_url="https://example.com/fe/merge_requests/1",
-            git_url="https://example.com/fe.git",
-            branch="feat/frontend-coco",
-            use_coco=True,
-        ),
+        file_id="0" * 32,
+        frontend_mr=[
+            MRRequestConfig(
+                mr_url="https://example.com/fe/merge_requests/1",
+                git_url="https://example.com/fe.git",
+                branch="feat/frontend-coco",
+                use_coco=True,
+            )
+        ],
     )
 
     historical_run_dir = tmp_path / "2026-04-03_13-01-59"
@@ -252,13 +260,15 @@ def test_build_workflow_input_skips_coco_cache_for_mira_code_analysis(tmp_path) 
         coco_settings=CocoSettings(coco_jwt_token="token"),
     )
     request = CaseGenerationRequest(
-        file_path=str(Path("tests/fixtures/sample_prd.md").resolve()),
-        frontend_mr=MRRequestConfig(
-            mr_url="https://example.com/fe/merge_requests/1",
-            git_url="https://example.com/fe.git",
-            branch="feat/frontend-coco",
-            use_coco=True,
-        ),
+        file_id="0" * 32,
+        frontend_mr=[
+            MRRequestConfig(
+                mr_url="https://example.com/fe/merge_requests/1",
+                git_url="https://example.com/fe.git",
+                branch="feat/frontend-coco",
+                use_coco=True,
+            )
+        ],
     )
 
     historical_run_dir = tmp_path / "2026-04-03_13-01-59"
@@ -298,7 +308,7 @@ def test_persist_run_artifacts_includes_mira_directory(tmp_path) -> None:
     run = CaseGenerationRun(
         run_id=run_id,
         status="succeeded",
-        input=CaseGenerationRequest(file_path=str(Path("tests/fixtures/sample_prd.md").resolve())),
+        input=CaseGenerationRequest(file_id="0" * 32),
         quality_report=QualityReport(),
     )
 

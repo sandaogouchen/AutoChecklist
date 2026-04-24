@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.research_models import EvidenceRef
 
@@ -63,6 +63,21 @@ class TestCase(BaseModel):
     # ---- MR 分析字段 ----
     tags: list[str] = Field(default_factory=list)
     code_consistency: dict[str, Any] | None = None
+
+    @field_validator("preconditions", "steps", "expected_results", mode="before")
+    @classmethod
+    def _coerce_text_fields_to_list(cls, value):
+        """兼容旧输入：允许使用字符串（按行拆分）提供列表字段。"""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            return [line.strip() for line in stripped.splitlines() if line.strip()]
+        return value
 
 
 class QualityReport(BaseModel):

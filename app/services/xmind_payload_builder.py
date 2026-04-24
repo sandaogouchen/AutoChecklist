@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from app.domain.checklist_models import ChecklistNode
@@ -167,7 +168,13 @@ class XMindPayloadBuilder:
                 XMindNode(
                     title="步骤",
                     children=[
-                        XMindNode(title=f"{i}. {step}")
+                        XMindNode(
+                            title=(
+                                step.strip()
+                                if re.match(r"^\d+[\.|\)]\s+", (step or "").strip())
+                                else f"{i}. {(step or '').strip()}"
+                            )
+                        )
                         for i, step in enumerate(node.steps, start=1)
                     ],
                 )

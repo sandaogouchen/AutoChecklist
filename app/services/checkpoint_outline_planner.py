@@ -739,14 +739,197 @@ def _attach_expected_results_by_path(
 ) -> list[ChecklistNode]:
     tree = [node.model_copy(deep=True) for node in optimized_tree]
     node_lookup = {node.node_id: node for node in canonical_outline_nodes}
-    path_lookup = {path.checkpoint_id: path for path in checkpoint_paths}
+    # checkpoint_id 在不同来源中可能大小写不一致，统一用 casefold 做匹配
+    path_lookup = {path.checkpoint_id.casefold(): path for path in checkpoint_paths}
+
+    backtick_re = re.compile(r"`([^`]+)`")
+    word_re = re.compile(r"[A-Za-z0-9]+")
+    han_re = re.compile(r"[\u4e00-\u9fff]")
+
+    def _signature(text: str) -> tuple[str, str, set[str], set[str]]:
+        raw = (text or "").strip()
+        norm = _normalize_text(raw)
+        base = backtick_re.sub(" ", raw)
+        backticks = {t.strip().casefold() for t in backtick_re.findall(raw) if t.strip()}
+        words = {w.strip().casefold() for w in word_re.findall(raw) if w.strip()}
+        return norm, base, backticks, words
+
+    def _han_bigrams(text: str) -> set[str]:
+        chars = "".join(han_re.findall(text or ""))
+        return {chars[i : i + 2] for i in range(len(chars) - 1)}
+
+    def _leading_han_verb(text: str) -> str:
+        value = (text or "").strip()
+        # strip common subject/location prefixes
+        value = re.sub(r"^用户已\s*", "", value)
+        value = re.sub(r"^用户已经\s*", "", value)
+        value = re.sub(r"^在页面(?:中|内)?\s*", "", value)
+        value = re.sub(r"^在页面中", "", value)
+        value = re.sub(r"^在页面内", "", value)
+        value = re.sub(r"^在页面", "", value)
+        chars = "".join(han_re.findall(value))
+        return chars[:2]
+
+    def _equivalent(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        an, abase, ab, aw = _signature(a)
+        bn, bbase, bb, bw = _signature(b)
+        if not an or not bn:
+            return False
+        if an == bn:
+            return True
+        # Only allow substring equivalence for sufficiently specific phrases.
+        if len(an) >= 12 and len(bn) >= 12 and (an in bn or bn in an):
+            return True
+
+        # For Chinese (and mixed) texts: require shared Chinese bigrams.
+        shared_han = bool(_han_bigrams(abase) & _han_bigrams(bbase))
+        if shared_han:
+            # If backticks exist on both sides, also require overlap.
+            if ab and bb:
+                if not (ab & bb):
+                    return False
+                # Avoid matching different actions that reference the same token.
+                # e.g. "定位 `optimize goal` 区域" != "检查 `optimize goal` ..."
+                va = _leading_han_verb(abase)
+                vb = _leading_han_verb(bbase)
+                if va and vb and va != vb:
+                    return False
+                return True
+            return True
+
+        # For English-only texts: avoid overly broad matches.
+        if ab and bb and (ab & bb):
+            # Backtick overlap alone is not enough unless we also share >=2 keywords.
+            overlap_words = {w for w in (aw & bw) if len(w) >= 3}
+            if len(overlap_words) >= 2:
+                # If either side contains Chinese, ensure action verb matches.
+                if han_re.search(abase) or han_re.search(bbase):
+                    va = _leading_han_verb(abase)
+                    vb = _leading_han_verb(bbase)
+                    if va and vb and va != vb:
+                        return False
+                return True
+        # Avoid false positives like "Ad group" ~= "campaign ... ad group".
+        # Require >=2 overlapping non-trivial words.
+        if aw and bw:
+            overlap = {w for w in (aw & bw) if len(w) >= 3}
+            if len(overlap) >= 2:
+                return True
+        return False
+
+    def _normalize_segment_title(text: str) -> str:
+        value = (text or "").strip()
+        if not value:
+            return value
+        value = re.sub(r"^用户已\s*", "", value)
+        value = re.sub(r"^用户已经\s*", "", value)
+        value = re.sub(r"^在页面(?:中|内)?\s*", "", value)
+        value = re.sub(r"^在页面中", "", value)
+        value = re.sub(r"^在页面内", "", value)
+        value = re.sub(r"^在页面", "", value)
+        return value.strip()
+
+    def _ensure_group_child(parent: ChecklistNode, title: str) -> ChecklistNode:
+        normalized_title = _normalize_segment_title(title)
+        existing = next(
+            (
+                child
+                for child in parent.children
+                if child.node_type in {"group", "precondition_group"}
+                and _equivalent(child.title, normalized_title)
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+
+        child = ChecklistNode(
+            node_id=_stable_id("SEG", f"{parent.node_id}||{normalized_title}"),
+            title=normalized_title,
+            node_type="group",
+            children=[],
+        )
+        parent.children.append(child)
+        return child
+
+    def _find_node_by_id(nodes: list[ChecklistNode], node_id: str) -> ChecklistNode | None:
+        for node in nodes:
+            if node.node_id == node_id:
+                return node
+            if node.children:
+                found = _find_node_by_id(node.children, node_id)
+                if found is not None:
+                    return found
+        return None
+
+    def _attach_expected_result_leaves(
+        parent: ChecklistNode,
+        *,
+        expected_results: list[str],
+        test_case_id: str,
+        visible_path_ids: list[str],
+    ) -> None:
+        for expected_result in expected_results:
+            normalized_result = _normalize_text(expected_result)
+            if not normalized_result:
+                continue
+
+            existing_leaf = next(
+                (
+                    child
+                    for child in parent.children
+                    if child.node_type == "expected_result"
+                    and _normalize_text(child.title) == normalized_result
+                ),
+                None,
+            )
+
+            if existing_leaf is not None:
+                existing_leaf.source_test_case_refs = sorted(
+                    set(existing_leaf.source_test_case_refs).union({test_case_id})
+                )
+                continue
+
+            parent.children.append(
+                ChecklistNode(
+                    node_id=_stable_id(
+                        "EXP",
+                        f"{'|'.join(visible_path_ids)}||{expected_result.strip()}",
+                    ),
+                    title=expected_result.strip(),
+                    node_type="expected_result",
+                    source_test_case_refs=[test_case_id],
+                )
+            )
+
+
+    def _attach_expected_results_to_checkpoint_node(
+        nodes: list[ChecklistNode],
+        checkpoint_id: str,
+        test_case: TestCase,
+    ) -> bool:
+        """兜底：当 path 映射缺失/无法定位节点时，直接挂到带 checkpoint_id 的节点下。"""
+        target_id = (checkpoint_id or "").casefold()
+        for node in nodes:
+            if (getattr(node, "checkpoint_id", "") or "").casefold() == target_id:
+                if test_case.expected_results:
+                    _attach_expected_result_leaves(
+                        node,
+                        expected_results=list(test_case.expected_results),
+                        test_case_id=test_case.id,
+                        visible_path_ids=[node.node_id or checkpoint_id],
+                    )
+                return True
+            if node.children and _attach_expected_results_to_checkpoint_node(node.children, checkpoint_id, test_case):
+                return True
+        return False
 
     for test_case in test_cases:
-        if not test_case.expected_results:
-            continue
-
-        mapping = path_lookup.get(test_case.checkpoint_id)
+        mapping = path_lookup.get((test_case.checkpoint_id or "").casefold())
         if mapping is None:
+            _attach_expected_results_to_checkpoint_node(tree, test_case.checkpoint_id, test_case)
             continue
 
         visible_path_ids = [
@@ -758,40 +941,79 @@ def _attach_expected_results_by_path(
         if not visible_path_ids:
             continue
 
+        # 找到目标路径节点（末尾 group），用于挂载 steps / expected_results
         target = _find_group_node(tree, visible_path_ids)
+        if target is None and visible_path_ids:
+            # 兼容：路径中间可能被插入了额外前置条件节点，导致严格路径匹配失败
+            target = _find_node_by_id(tree, visible_path_ids[-1])
         if target is None:
+            _attach_expected_results_to_checkpoint_node(tree, test_case.checkpoint_id, test_case)
             continue
 
-        for expected_result in test_case.expected_results:
-            normalized_result = _normalize_text(expected_result)
-            if not normalized_result:
-                continue
+        # ---- 1) 在路径起点与下一级之间插入“额外前置条件”链（需要重挂子节点） ----
+        # 约定：前置条件中与路径节点标题等价的条目不重复插入
+        path_titles = [
+            node_lookup[node_id].display_text
+            for node_id in visible_path_ids
+            if node_lookup.get(node_id) is not None
+        ]
+        extra_preconditions = [
+            pc
+            for pc in (test_case.preconditions or [])
+            if pc and not any(_equivalent(pc, title) for title in path_titles)
+        ]
 
-            existing_leaf = next(
-                (
-                    child
-                    for child in target.children
-                    if child.node_type == "expected_result"
-                    and _normalize_text(child.title) == normalized_result
-                ),
-                None,
-            )
-            if existing_leaf is not None:
-                existing_leaf.source_test_case_refs = sorted(
-                    set(existing_leaf.source_test_case_refs).union({test_case.id})
-                )
-                continue
+        allow_precondition_insertion = True
+        if len(visible_path_ids) > 1:
+            first_child = node_lookup.get(visible_path_ids[1])
+            if first_child is not None and getattr(first_child, "kind", "") == "action":
+                # For action-first paths, keep the action node as the direct child
+                # and do not inject extra precondition nodes (tests rely on this).
+                allow_precondition_insertion = False
 
-            target.children.append(
-                ChecklistNode(
-                    node_id=_stable_id(
-                        "EXP",
-                        f"{'|'.join(visible_path_ids)}||{expected_result.strip()}",
-                    ),
-                    title=expected_result.strip(),
-                    node_type="expected_result",
-                    source_test_case_refs=[test_case.id],
-                )
+        deepest_precondition_node: ChecklistNode | None = None
+        if extra_preconditions and allow_precondition_insertion:
+            root = _find_group_node(tree, [visible_path_ids[0]])
+            if root is not None:
+                path_child = None
+                if len(visible_path_ids) > 1:
+                    # 目标：将原本的第二级路径节点挂到新增前置条件链最末端
+                    path_child = _find_group_node(root.children, [visible_path_ids[1]])
+
+                current_parent = root
+                for pc in extra_preconditions:
+                    pc_node = _ensure_group_child(current_parent, pc)
+                    if path_child is not None and path_child in current_parent.children:
+                        current_parent.children.remove(path_child)
+                        if path_child not in pc_node.children:
+                            pc_node.children.append(path_child)
+                    current_parent = pc_node
+                deepest_precondition_node = current_parent
+
+        # ---- 2) 将 steps 中与路径节点等价的步骤视为已覆盖，剩余步骤挂到 target 下 ----
+        remaining_steps: list[str] = []
+        for step in (test_case.steps or []):
+            if not step:
+                continue
+            if any(_equivalent(step, title) for title in path_titles):
+                continue
+            remaining_steps.append(step)
+
+        # For single-node paths (only root exists), steps should follow the injected
+        # preconditions chain when present.
+        current_step_parent = target
+        if len(visible_path_ids) == 1 and deepest_precondition_node is not None:
+            current_step_parent = deepest_precondition_node
+        for step in remaining_steps:
+            current_step_parent = _ensure_group_child(current_step_parent, step)
+
+        # ---- 3) 在最后一个步骤节点（或 target）下挂 expected_result 叶子 ----
+        if test_case.expected_results:
+            _attach_expected_result_leaves(
+                current_step_parent,
+                expected_results=list(test_case.expected_results),
+                test_case_id=test_case.id,
+                visible_path_ids=visible_path_ids,
             )
 
     return tree
@@ -806,6 +1028,27 @@ def _attach_case_fields_in_place(
         for tc in test_cases:
             if tc.checkpoint_id:
                 cp_to_cases[tc.checkpoint_id].append(tc)
+
+        def _attach_expected_result_children(node: ChecklistNode, cases: list[TestCase]) -> None:
+            existing_titles = {
+                child.title
+                for child in (node.children or [])
+                if getattr(child, "node_type", "") == "expected_result"
+            }
+            for tc in cases:
+                for item in (tc.expected_results or []):
+                    title = (item or "").strip()
+                    if not title or title in existing_titles:
+                        continue
+                    node.children.append(
+                        ChecklistNode(
+                            node_id=_stable_id("EXP", f"{node.node_id}||{title}"),
+                            title=title,
+                            node_type="expected_result",
+                            source_test_case_refs=[tc.id],
+                        )
+                    )
+                    existing_titles.add(title)
 
         def _enrich_children(children: list[ChecklistNode]) -> list[ChecklistNode]:
             new_children: list[ChecklistNode] = []
@@ -832,6 +1075,12 @@ def _attach_case_fields_in_place(
                         )
                         _fill_node_from_testcase(sibling, extra_tc)
                         new_children.append(sibling)
+                elif node.node_type == "group" and node.checkpoint_id:
+                    # 兼容旧数据：group 节点可能直接绑定 checkpoint_id，需要挂载 expected_result 子节点
+                    matching = cp_to_cases.get(node.checkpoint_id, [])
+                    if matching:
+                        _attach_expected_result_children(node, matching)
+                    new_children.append(node)
                 else:
                     new_children.append(node)
 

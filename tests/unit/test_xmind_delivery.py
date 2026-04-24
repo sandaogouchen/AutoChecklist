@@ -488,7 +488,7 @@ class TestPlatformDispatcher:
             xmind_agent=mock_agent,
         )
 
-        request = CaseGenerationRequest(file_path="test.md")
+        request = CaseGenerationRequest(file_id="0" * 32)
         run = CaseGenerationRun(
             run_id="dispatch-tree",
             status="succeeded",
@@ -533,7 +533,7 @@ class TestPlatformDispatcher:
             xmind_agent_factory=xmind_factory,
         )
 
-        request = CaseGenerationRequest(file_path="test.md")
+        request = CaseGenerationRequest(file_id="0" * 32)
         run = CaseGenerationRun(
             run_id="dispatch-test",
             status="succeeded",
@@ -579,7 +579,7 @@ class TestPlatformDispatcher:
             xmind_agent=xmind_agent,
         )
 
-        request = CaseGenerationRequest(file_path="test.md")
+        request = CaseGenerationRequest(file_id="0" * 32)
         run = CaseGenerationRun(
             run_id="compat-test",
             status="succeeded",
@@ -613,7 +613,7 @@ class TestPlatformDispatcher:
             xmind_agent=mock_agent,
         )
 
-        request = CaseGenerationRequest(file_path="test.md")
+        request = CaseGenerationRequest(file_id="0" * 32)
         run = CaseGenerationRun(
             run_id="xmind-fail",
             status="succeeded",
@@ -645,7 +645,7 @@ class TestPlatformDispatcher:
         run = CaseGenerationRun(
             run_id="resume-artifacts",
             status="succeeded",
-            input=CaseGenerationRequest(file_path="test.md"),
+            input=CaseGenerationRequest(file_id="0" * 32),
             test_cases=[_make_test_case()],
             quality_report=QualityReport(),
         )

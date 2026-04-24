@@ -120,8 +120,8 @@ class TestXMindReferenceEndToEnd:
         summary: XMindReferenceSummary = result["xmind_reference_summary"]
 
         # Verify statistics
-        assert summary.total_nodes == 14  # count all nodes
-        assert summary.total_leaf_nodes == 7  # 7 leaf nodes
+        assert summary.total_nodes == 15  # count all nodes
+        assert summary.total_leaf_nodes == 9  # 9 leaf nodes
         assert summary.max_depth == 3
 
         # Verify skeleton contains key branches

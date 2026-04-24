@@ -15,6 +15,7 @@ import pytest
 
 from app.domain.case_models import TestCase
 from app.domain.checklist_models import ChecklistNode
+from app.domain.research_models import EvidenceRef
 from app.services.checkpoint_outline_planner import attach_expected_results_to_outline
 
 
@@ -106,13 +107,13 @@ class TestSingleMatch:
 
         assert len(result) == 1
         node = result[0]
-        assert node.steps == "1. Step A\n2. Step B"
-        assert node.preconditions == "Pre-cond X"
-        assert node.expected_results == "Result Y"
+        assert node.steps == ["1. Step A", "2. Step B"]
+        assert node.preconditions == ["Pre-cond X"]
+        assert node.expected_results == ["Result Y"]
         assert node.priority == "P1"
         assert node.category == "边界测试"
         assert node.test_case_ref == "tc_100"
-        assert node.evidence_refs == ["ref_a", "ref_b"]
+        assert [ref.section_title for ref in node.evidence_refs] == ["ref_a", "ref_b"]
 
     def test_original_node_identity_preserved(self):
         """The returned node should be the *same* object, mutated in place."""
@@ -153,7 +154,7 @@ class TestEmptyTestCases:
         assert result is tree
         assert len(result) == 1
         # Fields should remain at their defaults
-        assert result[0].steps == ""
+        assert result[0].steps == []
         assert result[0].test_case_ref == ""
 
 
@@ -172,10 +173,10 @@ class TestNoMatchingCheckpoint:
         assert len(result) == 1
         node = result[0]
         # No TestCase matched, so fields stay default
-        assert node.steps == ""
-        assert node.preconditions == ""
-        assert node.expected_results == ""
-        assert node.priority == ""
+        assert node.steps == []
+        assert node.preconditions == []
+        assert node.expected_results == []
+        assert node.priority == "P2"
         assert node.test_case_ref == ""
 
 
@@ -195,7 +196,7 @@ class TestMultipleTestCasesSameCheckpoint:
         assert len(result) == 2
         # First node is the original, enriched with tc1
         assert result[0] is case_node
-        assert result[0].steps == "Step from tc1"
+        assert result[0].steps == ["Step from tc1"]
         assert result[0].test_case_ref == "tc_1"
 
     def test_extra_tc_creates_sibling_nodes(self):
@@ -222,7 +223,7 @@ class TestMultipleTestCasesSameCheckpoint:
         assert result[1].test_case_ref == "tc_2"
         assert result[1].priority == "P2"
         assert result[1].display_text == "Extra Case Title"
-        assert result[1].steps == "Extra steps"
+        assert result[1].steps == ["Extra steps"]
         assert result[1].checkpoint_id == "cp_1"
 
         # Third sibling has tc3 data
@@ -267,7 +268,7 @@ class TestNestedTree:
         assert result[0].children[0].id == "mid"
         leaf = result[0].children[0].children[0]
         assert leaf.id == "leaf"
-        assert leaf.steps == "1. Deep step"
+        assert leaf.steps == ["1. Deep step"]
         assert leaf.priority == "P1"
         assert leaf.test_case_ref == "tc_deep"
 
@@ -283,10 +284,10 @@ class TestNestedTree:
 
         result = attach_expected_results_to_outline(tree, [tc_s, tc_d])
 
-        assert result[0].steps == "Shallow step"
+        assert result[0].steps == ["Shallow step"]
         assert result[0].test_case_ref == "tc_s"
         deep_node = result[1].children[0]
-        assert deep_node.steps == "Deep step"
+        assert deep_node.steps == ["Deep step"]
         assert deep_node.test_case_ref == "tc_d"
 
     def test_multi_tc_inside_nested_group(self):
@@ -304,9 +305,9 @@ class TestNestedTree:
         group_node = result[0]
         assert len(group_node.children) == 2
         assert group_node.children[0].test_case_ref == "t1"
-        assert group_node.children[0].steps == "S1"
+        assert group_node.children[0].steps == ["S1"]
         assert group_node.children[1].test_case_ref == "t2"
-        assert group_node.children[1].steps == "S2"
+        assert group_node.children[1].steps == ["S2"]
 
 
 # ---------------------------------------------------------------------------

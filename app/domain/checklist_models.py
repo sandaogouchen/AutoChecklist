@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.domain.research_models import EvidenceRef
 
@@ -54,7 +54,22 @@ class ChecklistNode(BaseModel):
     priority: str = "P2"
     category: str = "functional"
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    checkpoint_id: str = ""
+    checkpoint_id: str | None = None
+
+    @field_validator("preconditions", "steps", "expected_results", mode="before")
+    @classmethod
+    def _coerce_case_fields_to_list(cls, value):
+        """兼容旧输入：允许 steps/expected_results/preconditions 传字符串。"""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            return [line.strip() for line in stripped.splitlines() if line.strip()]
+        return value
 
     @property
     def id(self) -> str:

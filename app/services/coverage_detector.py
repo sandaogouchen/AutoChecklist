@@ -133,8 +133,8 @@ class CoverageDetector:
     def _get_id(checkpoint) -> str:
         """兼容 dict 和 Pydantic model 获取 id。"""
         if isinstance(checkpoint, dict):
-            return checkpoint.get("id", "")
-        return getattr(checkpoint, "id", "")
+            return checkpoint.get("checkpoint_id") or checkpoint.get("id", "")
+        return getattr(checkpoint, "checkpoint_id", "") or getattr(checkpoint, "id", "")
 
     @staticmethod
     def _get_title(checkpoint) -> str:

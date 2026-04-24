@@ -22,6 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -94,6 +97,8 @@ class WorkflowService:
         self._llm_client = llm_client
         self._workflow = None
         self._run_registry: dict[str, CaseGenerationRun] = {}
+        self._run_registry_lock = threading.Lock()
+        self._background_threads: dict[str, threading.Thread] = {}
         self._graphrag_engine = graphrag_engine
         self._coco_settings = coco_settings or get_coco_settings()
 
@@ -111,80 +116,225 @@ class WorkflowService:
             FileRepository(db_path=Path(settings.output_dir) / "files.sqlite3")
         )
 
-    def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
-        """创建并执行一次带迭代评估回路的用例生成任务。"""
+    def submit_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
+        """异步提交一次用例生成任务。
+
+        设计目标：
+        - API 层可在提交后立即返回 run_id（不阻塞长耗时工作流）
+        - 后台线程执行原有同步 create_run 逻辑并持久化 run_result.json
+        """
         run_id = generate_run_id(
             output_dir=Path(self.settings.output_dir),
             timezone=self.settings.timezone,
         )
 
-        project_id = getattr(request, 'project_id', None)
-        resolved_files = self._resolve_request_files(run_id, request)
+        # 提交阶段做轻量校验：确保引用的 file_id 均存在，保持原 422 行为。
+        self._validate_request_files_exist(request)
 
+        # 提交阶段即写入 request.json，便于异步执行期间可查询 input。
         self.repository.save(
             run_id, request.model_dump(mode="json", by_alias=True), "request.json"
         )
 
+        # 初始化 run_state（此处先标记为 pending；后台实际开始执行时会更新为 running）。
         run_state = self.iteration_controller.initialize_state(run_id)
+        try:
+            run_state.status = RunStatus.PENDING
+        except Exception:
+            pass
         self.state_repository.save_run_state(run_state)
 
-        result: dict = {}
+        submitted = CaseGenerationRun(
+            run_id=run_id,
+            status=run_state.status.value,
+            input=request,
+            iteration_summary=self._build_iteration_summary(run_state),
+        )
+        with self._run_registry_lock:
+            self._run_registry[run_id] = submitted
+
+        t = threading.Thread(
+            target=self._run_in_background,
+            args=(run_id, request),
+            daemon=True,
+            name=f"workflow-run-{run_id}",
+        )
+        with self._run_registry_lock:
+            self._background_threads[run_id] = t
+        t.start()
+        return submitted
+
+    def create_run(self, request: CaseGenerationRequest) -> CaseGenerationRun:
+        """创建并执行一次带迭代评估回路的用例生成任务（同步执行）。"""
+        run_id = generate_run_id(
+            output_dir=Path(self.settings.output_dir),
+            timezone=self.settings.timezone,
+        )
+
+        return self._execute_run_with_id(run_id, request)
+
+    def _run_in_background(self, run_id: str, request: CaseGenerationRequest) -> None:
         try:
-            result = self._execute_with_iteration(run_id, request, run_state, resolved_files)
+            final_run = self._execute_run_with_id(run_id, request)
+            with self._run_registry_lock:
+                self._run_registry[run_id] = final_run
+        except Exception as exc:  # pragma: no cover
+            # 理论上 _execute_run_with_id 内部已兜底并转为 failed，这里仅做最后保障。
+            logger.exception("后台执行 run 失败: run_id=%s, error=%s", run_id, exc)
+        finally:
+            # 避免后台线程登记表无限增长
+            with self._run_registry_lock:
+                self._background_threads.pop(run_id, None)
 
-            run_state = self.state_repository.load_run_state(run_id)
+    def _execute_run_with_id(self, run_id: str, request: CaseGenerationRequest) -> CaseGenerationRun:
+        """使用指定 run_id 执行一次完整 run（供同步/异步两种入口复用）。"""
 
-            checkpoints = result.get("checkpoints", [])
-            checkpoint_count = len(checkpoints)
-
-            run = CaseGenerationRun(
-                run_id=run_id,
-                status=run_state.status.value,
-                input=request,
-                parsed_document=result.get("parsed_document"),
-                research_summary=result.get("research_output"),
-                test_cases=result.get("test_cases", []),
-                quality_report=result.get("quality_report", QualityReport()),
-                checkpoint_count=checkpoint_count,
-                iteration_summary=self._build_iteration_summary(run_state),
+        # 注意：runs 请求中引用的上传文件内容保存在 SQLite。
+        # 这里仅在运行期将其 materialize 到临时目录，避免写入 output/runs/<run_id>/ 下。
+        temp_input_dir: Path | None = None
+        try:
+            temp_input_dir = Path(tempfile.mkdtemp(prefix=f"autochecklist_input_{run_id}_"))
+            resolved_files = self._resolve_request_files(
+                run_id,
+                request,
+                input_dir=temp_input_dir,
             )
-        except Exception as exc:
-            run_state = self.iteration_controller.mark_error(run_state, exc)
+
+            self.repository.save(
+                run_id, request.model_dump(mode="json", by_alias=True), "request.json"
+            )
+
+            run_state = self.iteration_controller.initialize_state(run_id)
             self.state_repository.save_run_state(run_state)
-            self.state_repository.save_iteration_log(run_state)
 
-            run = CaseGenerationRun(
-                run_id=run_id,
-                status="failed",
-                input=request,
-                error=ErrorInfo(code=exc.__class__.__name__, message=str(exc)),
-                iteration_summary=self._build_iteration_summary(run_state),
-            )
+            result: dict = {}
+            try:
+                result = self._execute_with_iteration(run_id, request, run_state, resolved_files)
 
-        run = self._persist_run_artifacts(run, result)
-        self._run_registry[run_id] = run
-        return run
+                run_state = self.state_repository.load_run_state(run_id)
+
+                checkpoints = result.get("checkpoints", [])
+                checkpoint_count = len(checkpoints)
+
+                run = CaseGenerationRun(
+                    run_id=run_id,
+                    status=run_state.status.value,
+                    input=request,
+                    parsed_document=result.get("parsed_document"),
+                    research_summary=result.get("research_output"),
+                    test_cases=result.get("test_cases", []),
+                    quality_report=result.get("quality_report", QualityReport()),
+                    checkpoint_count=checkpoint_count,
+                    iteration_summary=self._build_iteration_summary(run_state),
+                )
+            except Exception as exc:
+                run_state = self.iteration_controller.mark_error(run_state, exc)
+                self.state_repository.save_run_state(run_state)
+                self.state_repository.save_iteration_log(run_state)
+
+                run = CaseGenerationRun(
+                    run_id=run_id,
+                    status="failed",
+                    input=request,
+                    error=ErrorInfo(code=exc.__class__.__name__, message=str(exc)),
+                    iteration_summary=self._build_iteration_summary(run_state),
+                )
+
+            run = self._persist_run_artifacts(run, result)
+            with self._run_registry_lock:
+                self._run_registry[run_id] = run
+            return run
+        finally:
+            if temp_input_dir is not None:
+                shutil.rmtree(temp_input_dir, ignore_errors=True)
 
     def get_run(self, run_id: str) -> CaseGenerationRun:
-        """根据 run_id 查询运行结果。"""
-        cached_run = self._run_registry.get(run_id)
+        """根据 run_id 查询运行结果。
+
+        - 若 run_result.json 已生成，返回完整结果。
+        - 若仍在执行中（只有 request.json/run_state.json），返回当前状态快照。
+        """
+        with self._run_registry_lock:
+            cached_run = self._run_registry.get(run_id)
         if cached_run is not None:
             return cached_run
 
-        run_payload = self.repository.load(run_id, "run_result.json")
-        run = CaseGenerationRun.model_validate(run_payload)
+        try:
+            run_payload = self.repository.load(run_id, "run_result.json")
+            run = CaseGenerationRun.model_validate(run_payload)
+        except FileNotFoundError:
+            # 运行尚未完成：尝试用 request.json + run_state.json 拼装状态快照
+            request_payload = self.repository.load(run_id, "request.json")
+            req = CaseGenerationRequest.model_validate(request_payload)
 
-        if self.state_repository.run_state_exists(run_id):
-            try:
-                run_state = self.state_repository.load_run_state(run_id)
-                run = run.model_copy(
-                    update={"iteration_summary": self._build_iteration_summary(run_state)}
-                )
-            except Exception:
-                pass
+            status = RunStatus.PENDING.value
+            artifacts: dict[str, str] = {}
+            summary = IterationSummary()
+            if self.state_repository.run_state_exists(run_id):
+                try:
+                    run_state = self.state_repository.load_run_state(run_id)
+                    status = run_state.status.value
+                    summary = self._build_iteration_summary(run_state)
+                except Exception:
+                    pass
 
-        self._run_registry[run_id] = run
+                # 仅在文件存在时回填 artifacts
+                try:
+                    run_state_path = self.state_repository._run_dir(run_id) / "run_state.json"
+                    if run_state_path.exists():
+                        artifacts["run_state"] = str(run_state_path)
+                except Exception:
+                    pass
+
+            run = CaseGenerationRun(
+                run_id=run_id,
+                status=status,
+                input=req,
+                artifacts=artifacts,
+                iteration_summary=summary,
+            )
+        else:
+            if self.state_repository.run_state_exists(run_id):
+                try:
+                    run_state = self.state_repository.load_run_state(run_id)
+                    run = run.model_copy(
+                        update={"iteration_summary": self._build_iteration_summary(run_state)}
+                    )
+                except Exception:
+                    pass
+
+        with self._run_registry_lock:
+            self._run_registry[run_id] = run
         return run
+
+    def _validate_request_files_exist(self, request: CaseGenerationRequest) -> None:
+        """校验请求中引用的 file_id 是否存在。
+
+        仅用于 API 异步提交阶段做快速失败（422）。
+        """
+        if self.file_service is None:
+            return
+
+        # 主输入（兼容 file_ids）
+        prd_ids = list(getattr(request, "file_ids", None) or [])
+        if not prd_ids:
+            prd_ids = [request.file_id]
+        for fid in prd_ids:
+            if self.file_service.get_file_content(fid) is None:
+                raise FileNotFoundError(f"File not found: {fid}")
+
+        for optional_fid in [
+            getattr(request, "reference_xmind_file_id", None),
+        ]:
+            if optional_fid and self.file_service.get_file_content(optional_fid) is None:
+                raise FileNotFoundError(f"File not found: {optional_fid}")
+
+        template_file_id = getattr(request, "template_file_id", None)
+        if template_file_id:
+            if self.file_service.get_file_content(template_file_id) is None:
+                raise FileNotFoundError(f"File not found: {template_file_id}")
+            if not self.file_service.is_template_file(template_file_id):
+                raise ValueError(f"Template file expected: {template_file_id}")
 
     def _execute_with_iteration(
         self,
@@ -447,8 +597,14 @@ class WorkflowService:
     ) -> dict:
         """构建工作流输入，包含 MR/Coco 配置与运行目录。"""
         if resolved_files is None:
+            prd_file_ids = list(getattr(request, "file_ids", None) or [])
+            if not prd_file_ids:
+                prd_file_ids = [request.file_id]
             resolved_files = {
-                "file_path": request.file_id,
+                # 兼容：历史逻辑使用 file_path 单值
+                "file_path": prd_file_ids[0],
+                # 新增：支持多个 PRD（file_id 列表）
+                "file_ids": prd_file_ids,
                 "template_file_path": getattr(request, "template_file_id", None),
                 "reference_xmind_path": getattr(request, "reference_xmind_file_id", None),
             }
@@ -457,6 +613,7 @@ class WorkflowService:
             "run_id": run_id,
             "run_output_dir": str(self.repository._run_dir(run_id)),
             "file_path": resolved_files["file_path"],
+            "file_ids": resolved_files.get("file_ids") or [],
             "language": request.language,
             "request": request,
             "model_config": request.llm_config,
@@ -472,16 +629,20 @@ class WorkflowService:
         if reference_xmind_path:
             workflow_input["reference_xmind_path"] = reference_xmind_path
 
-        frontend_mr = self._build_mr_source_config(getattr(request, "frontend_mr", None))
+        frontend_mr = self._build_mr_source_configs(getattr(request, "frontend_mr", None))
         if frontend_mr is not None:
             workflow_input["frontend_mr_config"] = frontend_mr
 
-        backend_mr = self._build_mr_source_config(getattr(request, "backend_mr", None))
+        backend_mr = self._build_mr_source_configs(getattr(request, "backend_mr", None))
         if backend_mr is not None:
             workflow_input["backend_mr_config"] = backend_mr
 
         should_use_coco_cache = (
-            any(config and config.get("use_coco") for config in (frontend_mr, backend_mr))
+            any(
+                (item and item.get("use_coco"))
+                for config in (frontend_mr, backend_mr)
+                for item in ((config if isinstance(config, list) else [config]) if config else [])
+            )
             and not getattr(self.settings, "mira_use_for_code_analysis", False)
         )
         if should_use_coco_cache:
@@ -498,19 +659,49 @@ class WorkflowService:
         self,
         run_id: str,
         request: CaseGenerationRequest,
+        *,
+        input_dir: Path | None = None,
     ) -> dict[str, str | None]:
         if self.file_service is None:
             raise RuntimeError("FileService 未配置，无法解析文件 ID")
 
-        input_dir = self.repository._run_dir(run_id) / "input_files"
-        return {
-            "file_path": str(
-                self.file_service.materialize_to_path(
-                    request.file_id,
-                    target_dir=input_dir,
-                    file_name_prefix="source",
+        # 默认行为：不将请求附件写入 run 输出目录。
+        # 若调用方未显式传入，则回退为系统临时目录。
+        if input_dir is None:
+            input_dir = Path(tempfile.mkdtemp(prefix=f"autochecklist_input_{run_id}_"))
+
+        prd_file_ids = list(getattr(request, "file_ids", None) or [])
+        if not prd_file_ids:
+            prd_file_ids = [request.file_id]
+
+        prd_paths: list[Path] = []
+        for idx, prd_file_id in enumerate(prd_file_ids, start=1):
+            prd_paths.append(
+                Path(
+                    self.file_service.materialize_to_path(
+                        prd_file_id,
+                        target_dir=input_dir,
+                        file_name_prefix=f"source_{idx}",
+                    )
                 )
-            ),
+            )
+
+        # 将多个 PRD 按顺序拼接为一个输入文件，供后续解析节点使用
+        merged_path = prd_paths[0]
+        if len(prd_paths) > 1:
+            separator = "\n\n---\n\n"
+            merged_path = input_dir / "source_merged.md"
+            merged_text = separator.join(
+                p.read_text(encoding="utf-8", errors="ignore") for p in prd_paths
+            )
+            merged_path.write_text(merged_text, encoding="utf-8")
+
+        return {
+            # 兼容：历史逻辑使用 file_path 单值（解析节点只消费该字段）
+            "file_path": str(merged_path),
+            # 新增：支持多个 PRD（供后续调试/溯源）
+            "file_paths": [str(p) for p in prd_paths],
+            "file_ids": prd_file_ids,
             "template_file_path": str(
                 self.file_service.materialize_to_path(
                     request.template_file_id,
@@ -605,7 +796,7 @@ class WorkflowService:
 
     @staticmethod
     def _build_mr_source_config(mr_request) -> dict | None:
-        """将 API 层 MRRequestConfig 映射为子图可消费的 MRSourceConfig 字典。"""
+        """将单个 API 层 MRRequestConfig 映射为子图可消费的 MRSourceConfig 字典。"""
         if mr_request is None:
             return None
 
@@ -635,6 +826,23 @@ class WorkflowService:
                 "commit_sha": commit_sha,
             },
         }
+
+    @staticmethod
+    def _build_mr_source_configs(mr_request_list) -> list[dict] | None:
+        """将 API 层 MRRequestConfig（可为列表/单值）映射为 MRSourceConfig 字典列表。"""
+        if mr_request_list is None:
+            return None
+
+        # 兼容旧版：单个对象
+        if not isinstance(mr_request_list, list):
+            mr_request_list = [mr_request_list]
+
+        configs: list[dict] = []
+        for item in mr_request_list:
+            cfg = WorkflowService._build_mr_source_config(item)
+            if cfg is not None:
+                configs.append(cfg)
+        return configs or None
 
     def _get_llm_client(self) -> LLMClient:
         if self._llm_client is None:
@@ -693,6 +901,25 @@ class WorkflowService:
             workflow_result=wf,
         )
 
+        # ---- 将最终 checklist.xmind 写入 SQLite 文件存储，并回填 file_id ----
+        # 说明：XMind 文件仍会先落盘到 run 目录（由 XMindDeliveryAgent/FileXMindConnector 生成），
+        # 这里将其作为“生成产物”写入 files.sqlite3 以便前端通过 file_id 下载。
+        xmind_path = artifacts.get("xmind_file")
+        xmind_file_id: str | None = None
+        if xmind_path and self.file_service is not None:
+            try:
+                xmind_bytes = Path(xmind_path).read_bytes()
+                stored = self.file_service.create_file(
+                    file_name=f"{run_id}.xmind",
+                    content=xmind_bytes,
+                    content_type="application/vnd.xmind.workbook",
+                    tags=["generated_artifact", f"run:{run_id}", "type:xmind"],
+                )
+                xmind_file_id = stored.file_id
+                artifacts["xmind_file_id"] = xmind_file_id
+            except Exception:
+                logger.exception("写入 XMind 生成产物到 SQLite 失败: run_id=%s", run_id)
+
         run_state_path = self.state_repository._run_dir(run_id) / "run_state.json"
         if run_state_path.exists():
             artifacts["run_state"] = str(run_state_path)
@@ -722,7 +949,10 @@ class WorkflowService:
                 if path.is_file():
                     artifacts[f"{provider}::{path.relative_to(artifact_dir).as_posix()}"] = str(path)
 
-        run_with_artifacts = run.model_copy(update={"artifacts": artifacts})
+        run_update: dict = {"artifacts": artifacts}
+        if xmind_file_id:
+            run_update["checklist_xmind_file_id"] = xmind_file_id
+        run_with_artifacts = run.model_copy(update=run_update)
         run_result_path = self.repository.save(
             run_id,
             run_with_artifacts.model_dump(mode="json", by_alias=True),

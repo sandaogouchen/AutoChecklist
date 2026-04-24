@@ -46,7 +46,7 @@ def _resolve_file_path(state: GlobalState) -> Path:
     if not raw_path:
         raise ValueError("Workflow state is missing file_path")
 
-    path = Path(raw_path).expanduser()
+    path = Path(str(raw_path)).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
     if not path.exists():

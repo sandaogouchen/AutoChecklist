@@ -49,11 +49,10 @@ class TestCaseNodeWithSteps:
         )
 
         builder = XMindPayloadBuilder()
-        result = builder.build([case_node])
-
-        assert len(result) == 1
-        xnode = result[0]
-        assert xnode.title == "验证登录功能"
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        assert len(root.children) == 1
+        xnode = root.children[0]
+        assert xnode.title == "[c1] 验证登录功能"
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is not None, (
@@ -69,14 +68,15 @@ class TestCaseNodeWithSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is not None
         assert len(steps_child.children) == 3
-        assert steps_child.children[0].title == "打开登录页面"
-        assert steps_child.children[1].title == "输入用户名"
-        assert steps_child.children[2].title == "点击登录"
+        assert steps_child.children[0].title == "1. 打开登录页面"
+        assert steps_child.children[1].title == "2. 输入用户名"
+        assert steps_child.children[2].title == "3. 点击登录"
 
     def test_single_step_line(self):
         case_node = ChecklistNode(
@@ -87,12 +87,13 @@ class TestCaseNodeWithSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is not None
         assert len(steps_child.children) == 1
-        assert steps_child.children[0].title == "点击确认按钮"
+        assert steps_child.children[0].title == "1. 点击确认按钮"
 
     def test_blank_lines_in_steps_are_ignored(self):
         case_node = ChecklistNode(
@@ -103,13 +104,14 @@ class TestCaseNodeWithSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is not None
         assert len(steps_child.children) == 2
-        assert steps_child.children[0].title == "步骤A"
-        assert steps_child.children[1].title == "步骤B"
+        assert steps_child.children[0].title == "1. 步骤A"
+        assert steps_child.children[1].title == "2. 步骤B"
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +132,8 @@ class TestCaseNodeWithoutSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is None, (
@@ -146,7 +149,8 @@ class TestCaseNodeWithoutSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is None
@@ -160,7 +164,8 @@ class TestCaseNodeWithoutSteps:
         )
 
         builder = XMindPayloadBuilder()
-        xnode = builder.build([case_node])[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[case_node])
+        xnode = root.children[0]
 
         steps_child = _find_child(xnode, "步骤")
         assert steps_child is None
@@ -194,23 +199,21 @@ class TestTreeModeRendering:
         )
 
         builder = XMindPayloadBuilder()
-        result = builder.build([group_node])
-
-        assert len(result) == 1
-        xgroup = result[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[group_node])
+        assert len(root.children) == 1
+        xgroup = root.children[0]
         assert xgroup.title == "进入 `Submit` 页面"
 
         # Group should have exactly one child: the case
         assert len(xgroup.children) == 1
         xcase = xgroup.children[0]
-        assert xcase.title == "验证提交功能"
+        assert xcase.title == "[case_1] 验证提交功能"
 
         # Case should have detail children
         child_titles = _child_titles(xcase)
         assert "步骤" in child_titles
         assert "预期结果" in child_titles
-        assert "优先级: P0" in child_titles
-        assert "类型: 功能测试" in child_titles
+        assert "P0" in (xcase.labels or [])
 
         # Verify steps content
         steps_child = _find_child(xcase, "步骤")
@@ -241,10 +244,10 @@ class TestTreeModeRendering:
         )
 
         builder = XMindPayloadBuilder()
-        result = builder.build([outer_group])
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[outer_group])
 
         # Navigate: outer -> inner -> case
-        xouter = result[0]
+        xouter = root.children[0]
         assert xouter.title == "进入 `Dashboard` 页面"
         assert len(xouter.children) == 1
 
@@ -253,7 +256,7 @@ class TestTreeModeRendering:
         assert len(xinner.children) == 1
 
         xcase = xinner.children[0]
-        assert xcase.title == "验证深层用例"
+        assert xcase.title == "[deep_case] 验证深层用例"
 
         steps_child = _find_child(xcase, "步骤")
         assert steps_child is not None
@@ -269,9 +272,8 @@ class TestTreeModeRendering:
         )
 
         builder = XMindPayloadBuilder()
-        result = builder.build([group_node])
-
-        xgroup = result[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[group_node])
+        xgroup = root.children[0]
         assert xgroup.title == "空分组"
         steps_child = _find_child(xgroup, "步骤")
         assert steps_child is None
@@ -298,9 +300,8 @@ class TestTreeModeRendering:
         )
 
         builder = XMindPayloadBuilder()
-        result = builder.build([group])
-
-        xgroup = result[0]
+        root = builder.build(test_cases=[], checkpoints=[], optimized_tree=[group])
+        xgroup = root.children[0]
         assert len(xgroup.children) == 2
 
         # First case has steps

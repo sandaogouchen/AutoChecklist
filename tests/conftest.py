@@ -324,6 +324,8 @@ class FakeLLMClientLowQuality:
     def generate_structured(self, **kwargs):
         self._call_count += 1
         response_model = kwargs["response_model"]
+        user_prompt = kwargs.get("user_prompt", "")
+        checkpoint_ids = re.findall(r"Checkpoint ID:\s*(CP-[A-Za-z0-9_-]+)", user_prompt)
 
         if response_model.__name__ == "ResearchOutput":
             return response_model(

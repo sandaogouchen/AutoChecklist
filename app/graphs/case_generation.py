@@ -46,9 +46,14 @@ def _coverage_detector_node(state: dict) -> dict:
     detector = CoverageDetector()
     result = detector.detect(checkpoints, xmind_summary.all_leaf_titles)
 
+    covered = set(result.covered_checkpoint_ids)
     uncovered = [
-        cp for cp in checkpoints
-        if getattr(cp, "id", "") not in set(result.covered_checkpoint_ids)
+        cp
+        for cp in checkpoints
+        if (
+            getattr(cp, "checkpoint_id", "")
+            or getattr(cp, "id", "")
+        ) not in covered
     ]
 
     return {

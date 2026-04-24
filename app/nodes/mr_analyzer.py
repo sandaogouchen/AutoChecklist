@@ -104,14 +104,14 @@ def build_mr_analyzer_node(
         当 state 中无 MR 数据时直接 pass-through，不影响现有流程。
         支持前后端 MR 并发分析，以及 Coco / Mira 委托路径。
         """
-        frontend_mr_config = _coerce_mr_source_config(state.get("frontend_mr_config"))
-        backend_mr_config = _coerce_mr_source_config(state.get("backend_mr_config"))
+        frontend_mr_configs = _coerce_mr_source_configs(state.get("frontend_mr_config"))
+        backend_mr_configs = _coerce_mr_source_configs(state.get("backend_mr_config"))
 
         # 同时检查旧版 mr_input 字段做兼容
         mr_input = state.get("mr_input")
         has_any_mr = (
-            (frontend_mr_config and frontend_mr_config.mr_url)
-            or (backend_mr_config and backend_mr_config.mr_url)
+            any(cfg and cfg.mr_url for cfg in (frontend_mr_configs or []))
+            or any(cfg and cfg.mr_url for cfg in (backend_mr_configs or []))
             or (mr_input and getattr(mr_input, "diff_files", None))
         )
 
@@ -123,16 +123,28 @@ def build_mr_analyzer_node(
         all_consistency_issues: list[ConsistencyIssue] = []
         summaries: list[str] = []
 
-        frontend_result: MRAnalysisResult | None = None
-        backend_result: MRAnalysisResult | None = None
+        frontend_results: list[MRAnalysisResult] = []
+        backend_results: list[MRAnalysisResult] = []
 
-        analysis_jobs: list[tuple[str, MRSourceConfig, str]] = []
-        if frontend_mr_config and frontend_mr_config.mr_url:
-            logger.info("mr_analyzer: 开始分析前端 MR — %s", frontend_mr_config.mr_url)
-            analysis_jobs.append(("frontend", frontend_mr_config, "FE-"))
-        if backend_mr_config and backend_mr_config.mr_url:
-            logger.info("mr_analyzer: 开始分析后端 MR — %s", backend_mr_config.mr_url)
-            analysis_jobs.append(("backend", backend_mr_config, "BE-"))
+        analysis_jobs: list[tuple[str, MRSourceConfig, str, str]] = []
+
+        for idx, cfg in enumerate(frontend_mr_configs or [], start=1):
+            if not cfg or not cfg.mr_url:
+                continue
+            side = "frontend" if idx == 1 else f"frontend_{idx}"
+            prefix = "FE-" if idx == 1 else f"FE{idx}-"
+            label = "前端" if idx == 1 else f"前端{idx}"
+            logger.info("mr_analyzer: 开始分析%s MR — %s", label, cfg.mr_url)
+            analysis_jobs.append((side, cfg, prefix, label))
+
+        for idx, cfg in enumerate(backend_mr_configs or [], start=1):
+            if not cfg or not cfg.mr_url:
+                continue
+            side = "backend" if idx == 1 else f"backend_{idx}"
+            prefix = "BE-" if idx == 1 else f"BE{idx}-"
+            label = "后端" if idx == 1 else f"后端{idx}"
+            logger.info("mr_analyzer: 开始分析%s MR — %s", label, cfg.mr_url)
+            analysis_jobs.append((side, cfg, prefix, label))
 
         analysis_results: dict[str, MRAnalysisResult] = {}
         if analysis_jobs:
@@ -148,24 +160,23 @@ def build_mr_analyzer_node(
                         coco_settings=coco_settings,
                         prefix=prefix,
                     ): side
-                    for side, mr_config, prefix in analysis_jobs
+                    for side, mr_config, prefix, _label in analysis_jobs
                 }
                 for future, side in futures.items():
                     analysis_results[side] = future.result()
 
-        frontend_result = analysis_results.get("frontend")
-        if frontend_result:
-            all_code_facts.extend(frontend_result.code_facts)
-            all_consistency_issues.extend(frontend_result.consistency_issues)
-            if frontend_result.mr_summary:
-                summaries.append(f"[前端] {frontend_result.mr_summary}")
-
-        backend_result = analysis_results.get("backend")
-        if backend_result:
-            all_code_facts.extend(backend_result.code_facts)
-            all_consistency_issues.extend(backend_result.consistency_issues)
-            if backend_result.mr_summary:
-                summaries.append(f"[后端] {backend_result.mr_summary}")
+        for side, _mr_config, _prefix, label in analysis_jobs:
+            analysis = analysis_results.get(side)
+            if not analysis:
+                continue
+            all_code_facts.extend(analysis.code_facts)
+            all_consistency_issues.extend(analysis.consistency_issues)
+            if analysis.mr_summary:
+                summaries.append(f"[{label}] {analysis.mr_summary}")
+            if side.startswith("frontend"):
+                frontend_results.append(analysis)
+            if side.startswith("backend"):
+                backend_results.append(analysis)
 
         combined_summary = "\n".join(summaries) if summaries else ""
 
@@ -178,13 +189,15 @@ def build_mr_analyzer_node(
             "research_output": state.get("research_output"),
         }
 
-        if frontend_result:
-            result["frontend_mr_result"] = frontend_result
-            result["mr_analysis_result"] = frontend_result
-        if backend_result:
-            result["backend_mr_result"] = backend_result
+        if frontend_results:
+            result["frontend_mr_results"] = frontend_results
+            result["frontend_mr_result"] = frontend_results[0]
+            result["mr_analysis_result"] = frontend_results[0]
+        if backend_results:
+            result["backend_mr_results"] = backend_results
+            result["backend_mr_result"] = backend_results[0]
             if "mr_analysis_result" not in result:
-                result["mr_analysis_result"] = backend_result
+                result["mr_analysis_result"] = backend_results[0]
 
         logger.info(
             "mr_analyzer 完成: code_facts=%d, consistency_issues=%d",
@@ -215,6 +228,17 @@ def _coerce_mr_source_config(value: Any) -> MRSourceConfig | None:
     if isinstance(value, dict):
         return MRSourceConfig.model_validate(value)
     return value
+
+
+def _coerce_mr_source_configs(value: Any) -> list[MRSourceConfig] | None:
+    """将 MR 配置统一转换为 MRSourceConfig 列表（兼容单值/列表）。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, list):
+        coerced = [_coerce_mr_source_config(v) for v in value]
+        return [c for c in coerced if c is not None] or None
+    single = _coerce_mr_source_config(value)
+    return [single] if single is not None else None
 
 
 def _get_coco_dir(state: dict[str, Any]) -> Path | None:

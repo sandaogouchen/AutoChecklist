@@ -76,9 +76,13 @@ def test_resume_run_from_saved_draft_cases_continues_main_flow(
         repository=FileRunRepository(tmp_path),
         llm_client=fake_llm_client,
     )
-    request = CaseGenerationRequest(
-        file_path=str(Path("tests/fixtures/sample_prd.md").resolve())
+    fixture_path = Path("tests/fixtures/sample_prd.md").resolve()
+    stored = service.file_service.create_file(
+        file_name=fixture_path.name,
+        content=fixture_path.read_bytes(),
+        content_type="text/markdown",
     )
+    request = CaseGenerationRequest(file_id=stored.file_id)
 
     run = resume_run_from_saved_draft_cases(
         service=service,

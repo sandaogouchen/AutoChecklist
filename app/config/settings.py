@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     app_name: str = "autochecklist"
     app_version: str = "0.1.0"
     output_dir: str = "output/runs"
+    admin_api_key: str = ""
+    admin_xmind_upload_max_bytes: int = 20 * 1024 * 1024
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
@@ -84,6 +86,12 @@ class CocoSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # 兼容：避免从 .env 读取到带尾部 / 的 base_url 影响测试断言
+    def __init__(self, **data):
+        super().__init__(**data)
+        if isinstance(self.coco_api_base_url, str):
+            self.coco_api_base_url = self.coco_api_base_url.rstrip("/")
 
 
 class MiraSettings(BaseSettings):

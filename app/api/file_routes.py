@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
-from app.domain.file_models import StoredFile
+from app.domain.file_models import StoredFile, UploadFileTag
 from app.services.file_service import FileService
 
 router = APIRouter(prefix="/api/v1/files", tags=["files"])
@@ -17,9 +18,14 @@ def _get_file_service(request: Request) -> FileService:
     return request.app.state.file_service
 
 
+class RenameFileRequest(BaseModel):
+    file_name: str = Field(..., min_length=1)
+
+
 @router.post("", status_code=201, response_model=StoredFile)
 async def upload_file(
     file: UploadFile = File(...),
+    tag: UploadFileTag = Form(...),
     file_service: FileService = Depends(_get_file_service),
 ) -> StoredFile:
     content = await file.read()
@@ -27,6 +33,7 @@ async def upload_file(
         file_name=file.filename or "upload.bin",
         content=content,
         content_type=file.content_type,
+        tags=[tag.value],
     )
     await file.close()
     return stored
@@ -48,6 +55,38 @@ def get_file(
     if stored is None:
         raise HTTPException(status_code=404, detail=f"文件未找到: {file_id}")
     return stored
+
+
+@router.put("/{file_id}", response_model=StoredFile)
+async def update_file_content(
+    file_id: str,
+    file: UploadFile = File(...),
+    file_service: FileService = Depends(_get_file_service),
+) -> StoredFile:
+    content = await file.read()
+    updated = file_service.update_file_content(
+        file_id,
+        file_name=file.filename or "upload.bin",
+        content=content,
+        content_type=file.content_type,
+    )
+    await file.close()
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"文件未找到: {file_id}")
+    return updated
+
+
+@router.patch("/{file_id}", response_model=StoredFile)
+def rename_file(
+    file_id: str,
+    payload: RenameFileRequest,
+    file_service: FileService = Depends(_get_file_service),
+) -> StoredFile:
+    updated = file_service.rename_generic_file(file_id, payload.file_name)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"文件未找到: {file_id}")
+    return updated
 
 
 @router.get("/{file_id}/content")

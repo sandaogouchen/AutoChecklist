@@ -19,6 +19,8 @@ def test_coco_settings_defaults_match_openapi_contract() -> None:
 
 
 def test_send_task_uses_supported_agent_and_omits_repo_id(monkeypatch) -> None:
+    # 避免环境变量污染：这些测试只关心显式传入的配置。
+    monkeypatch.delenv("COCO_MODEL_NAME", raising=False)
     client = CocoClient(
         CocoSettings(
             _env_file=None,
@@ -57,6 +59,8 @@ def test_send_task_uses_supported_agent_and_omits_repo_id(monkeypatch) -> None:
 
 
 def test_send_task_preserves_explicit_supported_agent(monkeypatch) -> None:
+    # 避免环境变量污染：这些测试只关心显式传入的配置。
+    monkeypatch.delenv("COCO_MODEL_NAME", raising=False)
     client = CocoClient(CocoSettings(_env_file=None, coco_jwt_token="token"))
     captured: dict[str, object] = {}
 
@@ -118,6 +122,62 @@ def test_send_task_includes_configured_model_name(monkeypatch) -> None:
     }
 
 
+def test_send_task_defaults_model_name_when_missing_in_settings(monkeypatch) -> None:
+    # 模拟 settings 不包含 coco_model_name 字段（last_coco_client.py 的典型行为）。
+    client = CocoClient(
+        SimpleNamespace(
+            coco_api_base_url="https://codebase-api.byted.org/v2",
+            coco_jwt_token="token",
+            coco_agent_name="sandbox",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_post(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["action"] = action
+        captured["payload"] = payload
+        return {"Task": {"Id": "task-default-model"}}
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+
+    task_id = asyncio.run(client.send_task(prompt="review this MR"))
+
+    assert task_id == "task-default-model"
+    assert captured["action"] == "SendCopilotTaskMessage"
+    assert captured["payload"] == {
+        "AgentName": "sandbox",
+        "disable_model_failover": "true",
+        "Message": {
+            "Id": "",
+            "Role": "user",
+            "Parts": [{"Text": {"Text": "review this MR"}}],
+        },
+        "modelName": "GPT-5.4",
+    }
+
+
+def test_send_task_normalizes_lowercase_gpt54_model_name(monkeypatch) -> None:
+    client = CocoClient(
+        CocoSettings(
+            _env_file=None,
+            coco_jwt_token="token",
+            coco_model_name="gpt-5.4",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_post(action: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"Task": {"Id": "task-normalized"}}
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+
+    task_id = asyncio.run(client.send_task(prompt="review this MR"))
+
+    assert task_id == "task-normalized"
+    assert captured["payload"]["modelName"] == "GPT-5.4"
+
+
 def test_coco_client_builds_action_url_matching_openapi_contract() -> None:
     client = CocoClient(
         CocoSettings(
@@ -174,6 +234,69 @@ def test_coco_client_post_enables_follow_redirects(monkeypatch) -> None:
     assert captured["url"] == "http://localhost:8317/v1/?Action=SendCopilotTaskMessage"
 
 
+def test_coco_client_post_no_longer_logs_request_details(monkeypatch, caplog) -> None:
+    client = CocoClient(
+        CocoSettings(
+            _env_file=None,
+            coco_api_base_url="http://localhost:8317/v1",
+            coco_jwt_token="token",
+        )
+    )
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"Result": {"Task": {"Id": "task-1"}}}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, object]) -> _FakeResponse:
+            return _FakeResponse()
+
+    monkeypatch.setattr("app.services.coco_client.httpx.AsyncClient", _FakeAsyncClient)
+
+    with caplog.at_level("INFO"):
+        result = asyncio.run(client._post("SendCopilotTaskMessage", {"foo": "bar"}))
+
+    assert result == {"Task": {"Id": "task-1"}}
+    assert "Coco API 请求详情" not in caplog.text
+
+
+def test_send_task_logs_payload_summary_without_prompt(monkeypatch, caplog) -> None:
+    client = CocoClient(CocoSettings(_env_file=None, coco_jwt_token="token"))
+
+    async def _fake_post(action: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"Task": {"Id": "task-log"}}
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+
+    prompt = "very-secret-prompt-body"
+    with caplog.at_level("INFO"):
+        task_id = asyncio.run(
+            client.send_task(
+                prompt=prompt,
+                mr_url="https://example.com/mr/1",
+                git_url="https://example.com/repo.git",
+            )
+        )
+
+    assert task_id == "task-log"
+    assert "发送 Coco 任务参数" in caplog.text
+    assert "prompt_length'" in caplog.text
+    assert str(len(prompt)) in caplog.text
+    assert prompt not in caplog.text
+
+
 def test_poll_task_returns_completed_task(monkeypatch) -> None:
     client = CocoClient(CocoSettings(_env_file=None, coco_jwt_token="token"))
 
@@ -192,6 +315,25 @@ def test_poll_task_returns_completed_task(monkeypatch) -> None:
     task = asyncio.run(client.poll_task("task-123", timeout=5))
 
     assert task == {"Id": "task-123", "Status": "completed"}
+
+
+def test_poll_task_no_longer_logs_status_details(monkeypatch, caplog) -> None:
+    client = CocoClient(CocoSettings(_env_file=None, coco_jwt_token="token"))
+
+    async def _fake_post(action: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"Task": {"Id": "task-123", "Status": "completed"}}
+
+    async def _fake_collect(task_id: str, timeout: int | None = None) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+    monkeypatch.setattr(client, "_collect_task_messages_via_sse", _fake_collect)
+
+    with caplog.at_level("INFO"):
+        task = asyncio.run(client.poll_task("task-123", timeout=5))
+
+    assert task == {"Id": "task-123", "Status": "completed"}
+    assert "Coco 任务状态" not in caplog.text
 
 
 def test_poll_task_attaches_messages_from_sse_when_completed(monkeypatch) -> None:

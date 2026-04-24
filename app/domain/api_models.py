@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.case_models import QualityReport, TestCase
 from app.domain.document_models import ParsedDocument
@@ -70,7 +70,7 @@ class MRRequestConfig(BaseModel):
     local_path: str = ""
     branch: str = ""
     commit_sha: str = ""
-    use_coco: bool = False
+    use_coco: bool = True
 
 
 class CaseGenerationRequest(BaseModel):
@@ -89,10 +89,14 @@ class CaseGenerationRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    # 主输入 PRD：
+    # - 旧入参：file_id / file_path 传单个 file_id
+    # - 新入参：file_ids 传多个 file_id
     file_id: str = Field(
         ...,
         validation_alias=AliasChoices("file_id", "file_path"),
     )
+    file_ids: list[str] | None = None
     language: str = "zh-CN"
     llm_config: ModelConfigOverride = Field(
         default_factory=ModelConfigOverride,
@@ -111,13 +115,69 @@ class CaseGenerationRequest(BaseModel):
         validation_alias=AliasChoices("reference_xmind_file_id", "reference_xmind_path"),
     )
 
-    # ---- MR 分析字段 ----
-    frontend_mr: MRRequestConfig | None = None
-    backend_mr: MRRequestConfig | None = None
+    # ---- MR 分析字段（支持多个，兼容旧单值） ----
+    frontend_mr: list[MRRequestConfig] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("frontend_mr", "frontend_mrs"),
+    )
+    backend_mr: list[MRRequestConfig] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("backend_mr", "backend_mrs"),
+    )
 
-    @field_validator("file_id", "template_file_id", "reference_xmind_file_id")
+    @field_validator("frontend_mr", "backend_mr", mode="before")
     @classmethod
-    def _validate_file_ids(cls, value: str | None, info):
+    def _coerce_mr_list(cls, value):
+        if value is None or value == "":
+            return None
+        # 兼容旧版：传入单个对象
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, MRRequestConfig):
+            return [value]
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_file_id_list(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        # 新版：仅传 file_ids
+        if not data.get("file_id") and isinstance(data.get("file_ids"), list) and data.get("file_ids"):
+            data["file_id"] = data["file_ids"][0]
+
+        # 兼容：部分调用方可能传 file_id 为列表
+        if isinstance(data.get("file_id"), list) and data.get("file_ids") is None:
+            items = data.get("file_id") or []
+            data["file_ids"] = items
+            data["file_id"] = items[0] if items else ""
+        return data
+
+    @field_validator("file_id")
+    @classmethod
+    def _validate_file_id(cls, value: str):
+        if not FILE_ID_RE.fullmatch(value):
+            raise ValueError("无效的 file_id: 必须是 32 位十六进制 file_id")
+        return value.lower()
+
+    @field_validator("file_ids")
+    @classmethod
+    def _validate_file_ids(cls, value: list[str] | None):
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("无效的 file_ids: 至少需要 1 个 32 位十六进制 file_id")
+        normalized: list[str] = []
+        for item in value:
+            if not FILE_ID_RE.fullmatch(item):
+                raise ValueError("无效的 file_ids: 必须是 32 位十六进制 file_id")
+            normalized.append(item.lower())
+        return normalized
+
+    @field_validator("template_file_id", "reference_xmind_file_id")
+    @classmethod
+    def _validate_optional_file_ids(cls, value: str | None, info):
         if value is None:
             return None
         if not FILE_ID_RE.fullmatch(value):
@@ -137,6 +197,9 @@ class CaseGenerationRun(BaseModel):
     quality_report: QualityReport = Field(default_factory=QualityReport)
     checkpoint_count: int = 0
     artifacts: dict[str, str] = Field(default_factory=dict)
+    # 最终生成的 checklist XMind 文件（写入 SQLite 文件存储后的 file_id）。
+    # 该文件会带有“生成产物”标签，默认不会出现在 /api/v1/files 列表中。
+    checklist_xmind_file_id: str | None = None
     error: ErrorInfo | None = None
     iteration_summary: IterationSummary = Field(default_factory=IterationSummary)
     project_id: str | None = None

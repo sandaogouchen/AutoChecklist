@@ -151,41 +151,15 @@ class CocoClient:
     def __init__(self, settings: Any, llm_client: Any = None):
         self._settings = settings
         self._llm_client = llm_client
-        self._base_url: str = getattr(settings, "coco_api_base_url", "https://codebase-api.byted.org/v2")
+        self._base_url: str = getattr(settings, "coco_api_base_url", "https://codebase-api.byted.org/v2/")
         self._jwt_token: str = getattr(settings, "coco_jwt_token", "")
         self._agent_name: str = getattr(settings, "coco_agent_name", "sandbox")
-        # 与 last_coco_client.py 保持一致：当 settings 不包含 coco_model_name 时，默认 GPT-5.4。
-        # 但若 coco_model_name 显式为空字符串，则视为“不指定模型”，避免覆盖服务端默认。
         self._model_name: str = getattr(settings, "coco_model_name", "GPT-5.4")
-        if self._model_name is None:
-            self._model_name = "GPT-5.4"
-
-        # 兼容/稳健性：配置值可能来自环境变量/文件，避免尾部空白或 / 造成鉴权/拼 URL 异常。
-        self._base_url = (self._base_url or "https://codebase-api.byted.org/v2").strip().rstrip("/")
-        self._jwt_token = (self._jwt_token or "").strip().strip("'\"")
-        self._agent_name = (self._agent_name or "sandbox").strip()
-        self._model_name = self._normalize_model_name((self._model_name or "").strip())
+        self._repo_id: str = getattr(settings, "coco_repo_id", "")
+        self._branch: str = getattr(settings, "coco_branch", "")
         self._timeout: int = getattr(settings, "coco_task_timeout", 300)
         self._poll_start: int = getattr(settings, "coco_poll_interval_start", 5)
         self._poll_max: int = getattr(settings, "coco_poll_interval_max", 20)
-
-    @staticmethod
-    def _normalize_model_name(model_name: str) -> str:
-        """规范化 modelName。
-
-        说明：部分调用方/运行环境可能会把模型名写成小写（如 gpt-5.4）。
-        Coco 侧是否大小写敏感并不总是可控，为避免“模型未命中 → 看起来像降级”，
-        这里对已知模型做大小写纠正；其他自定义模型保持原样。
-        """
-        normalized = (model_name or "").strip()
-        if not normalized:
-            return ""
-
-        canonical_map = {
-            "gpt-5.4": "GPT-5.4",
-        }
-        lowered = normalized.lower()
-        return canonical_map.get(lowered, normalized)
 
     # ------------------------------------------------------------------
     # 内部请求
@@ -193,15 +167,10 @@ class CocoClient:
 
     def _headers(self) -> dict[str, str]:
         """构建 HTTP 请求头。"""
-        headers = {
+        return {
             "Content-Type": "application/json",
+            "X-Code-User-JWT": self._jwt_token,
         }
-
-        # Coco OpenAPI 文档明确指出使用 X-Code-User-JWT
-        if self._jwt_token:
-            headers["X-Code-User-JWT"] = self._jwt_token
-
-        return headers
 
     @staticmethod
     def _parse_http_error(exc: httpx.HTTPStatusError) -> tuple[int, str, str]:
@@ -241,10 +210,9 @@ class CocoClient:
     async def _post(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发送 POST 请求到 Coco API。"""
         url = self._build_action_url(action)
-        headers = self._headers()
-
+        logger.debug("Coco API 请求: %s, payload keys=%s", action, list(payload.keys()))
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = await client.post(url, headers=self._headers(), json=payload)
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -262,28 +230,6 @@ class CocoClient:
         if "Result" not in data:
             raise CocoTaskError(f"Coco API 响应异常: 缺少 Result 字段, action={action}")
         return data["Result"]
-
-    @staticmethod
-    def _summarize_send_task_payload(
-        payload: dict[str, Any],
-        *,
-        prompt: str,
-        mr_url: str,
-        git_url: str,
-    ) -> dict[str, Any]:
-        """生成发送任务时可安全打印的参数摘要。"""
-        message = payload.get("Message", {})
-        parts = message.get("Parts", []) if isinstance(message, dict) else []
-        return {
-            "agent_name": payload.get("AgentName", ""),
-            "model_name": payload.get("modelName", ""),
-            "disable_model_failover": payload.get("disable_model_failover", ""),
-            "message_role": message.get("Role", "") if isinstance(message, dict) else "",
-            "parts_count": len(parts) if isinstance(parts, list) else 0,
-            "prompt_length": len(prompt),
-            "mr_url": mr_url,
-            "git_url": git_url,
-        }
 
     async def _collect_task_messages_via_sse(
         self,
@@ -378,27 +324,19 @@ class CocoClient:
 
         payload = {
             "AgentName": self._resolve_agent_name(agent_name or self._agent_name),
-            "disable_model_failover": "true",
             "Message": {
                 "Id": "",
                 "Role": "user",
                 "Parts": [{"Text": {"Text": prompt}}],
             },
         }
-        # 与 last_coco_client.py 保持一致：仅在 model 非空时才发送 modelName。
-        # 避免发送空字符串导致服务端走默认/触发非预期路由（表象上像“降级”）。
         if self._model_name.strip():
             payload["modelName"] = self._model_name.strip()
-
-        logger.info(
-            "发送 Coco 任务参数: %s",
-            self._summarize_send_task_payload(
-                payload,
-                prompt=prompt,
-                mr_url=mr_url,
-                git_url=git_url,
-            ),
-        )
+        if self._repo_id.strip():
+            payload['repoId'] = self._model_name.strip()
+        if self._branch.strip():
+            payload['branch'] = self._branch.strip()
+        payload['disable_model_failover']='true'
 
         try:
             result = await self._post("SendCopilotTaskMessage", payload)
@@ -413,14 +351,6 @@ class CocoClient:
             if response_text:
                 detail = f"{detail}; response={response_text[:500]}"
             logger.error("Coco 任务发送失败 (HTTP): %s", detail)
-            if exc.response.status_code == 401:
-                raise CocoTaskError(
-                    (
-                        "Coco 任务发送鉴权失败: HTTP 401 Unauthorized；"
-                        "通常表示 COCO_JWT_TOKEN 过期/无效/含空白字符，或鉴权头不被当前网关版本接受；"
-                        f"请刷新 COCO_JWT_TOKEN 后重试。detail={detail}"
-                    )
-                ) from exc
             raise CocoTaskError(f"Coco 任务发送 HTTP 错误: {detail}") from exc
         except httpx.HTTPError as exc:
             logger.error("Coco 任务发送失败 (HTTP): %s", exc)
@@ -489,18 +419,6 @@ class CocoClient:
                     ) from exc
 
                 if 400 <= status_code < 500:
-                    if status_code == 401:
-                        raise CocoTaskError(
-                            (
-                                f"Coco 任务 {task_id} 查询鉴权失败: HTTP 401 Unauthorized"
-                                + (f", code={error_code}" if error_code else "")
-                                + (f", response={response_text}" if response_text else "")
-                                + "；通常表示 COCO_JWT_TOKEN 过期/无效，请刷新后重试"
-                            ),
-                            task_id=task_id,
-                            status="unauthorized",
-                        ) from exc
-
                     raise CocoTaskError(
                         (
                             f"Coco 任务 {task_id} 查询失败: HTTP {status_code}"
@@ -523,6 +441,11 @@ class CocoClient:
             task = result.get("Task", {})
             status = task.get("Status", "")
             elapsed = time.monotonic() - start
+
+            logger.info(
+                "Coco 任务状态: task_id=%s, status=%s, elapsed=%.1fs",
+                task_id, status, elapsed,
+            )
 
             if status == "completed":
                 messages = await self._collect_task_messages_via_sse(

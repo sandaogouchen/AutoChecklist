@@ -123,6 +123,7 @@ def _process_single_batch(
                 )
             for i in range(paired):
                 returned_cases[i].title = batch[i].title
+            # 允许返回数量与叶子数不一致：多余的用例保留 LLM 原标题
             cases = returned_cases
     except Exception:
         had_error = True
@@ -235,6 +236,10 @@ def _generate_reference_leaf_details(
         cases, timing = results_by_index[idx]
         all_cases.extend(cases)
         batch_timings.append(timing)
+
+    # 全局对齐：最终输出用例数不应超过叶子数
+    if len(all_cases) > len(ref_leaves):
+        all_cases = all_cases[: len(ref_leaves)]
 
     overall_elapsed = time.monotonic() - overall_start
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,29 @@ from app.repositories.run_repository import FileRunRepository
 from app.repositories.run_state_repository import RunStateRepository
 from app.services.iteration_controller import IterationController
 from app.services.workflow_service import WorkflowService
+
+
+def _wait_for_run(client: TestClient, run_id: str, *, timeout_seconds: float = 8.0) -> dict:
+    deadline = time.time() + timeout_seconds
+    last: dict | None = None
+    while time.time() < deadline:
+        resp = client.get(f"/api/v1/case-generation/runs/{run_id}")
+        assert resp.status_code == 200
+        last = resp.json()
+        if last.get("status") in ("succeeded", "failed"):
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"run 未在 {timeout_seconds}s 内完成: run_id={run_id}, last={last}")
+
+
+def _upload_fixture_file(client: TestClient, fixture_path: Path) -> str:
+    response = client.post(
+        "/api/v1/files",
+        data={"tag": "file"},
+        files={"file": (fixture_path.name, fixture_path.read_bytes(), "text/markdown")},
+    )
+    assert response.status_code == 201
+    return response.json()["file_id"]
 
 
 def test_evaluation_triggers_retry_on_low_quality(tmp_path, fake_llm_client_low_quality) -> None:
@@ -47,13 +71,16 @@ def test_evaluation_triggers_retry_on_low_quality(tmp_path, fake_llm_client_low_
     )
     client = TestClient(create_app(settings=settings, workflow_service=service))
 
+    file_id = _upload_fixture_file(client, Path("tests/fixtures/sample_prd.md").resolve())
+
     response = client.post(
         "/api/v1/case-generation/runs",
-        json={"file_path": str(Path("tests/fixtures/sample_prd.md").resolve())},
+        json={"file_id": file_id},
     )
 
-    data = response.json()
-    assert response.status_code == 200
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    data = _wait_for_run(client, run_id)
 
     # 系统应该经历了多轮迭代
     summary = data.get("iteration_summary", {})
@@ -97,14 +124,17 @@ def test_failed_run_state_persists_after_max_iterations(
     )
     client = TestClient(create_app(settings=settings, workflow_service=service))
 
+    file_id = _upload_fixture_file(client, Path("tests/fixtures/sample_prd.md").resolve())
+
     # 创建运行
     response = client.post(
         "/api/v1/case-generation/runs",
-        json={"file_path": str(Path("tests/fixtures/sample_prd.md").resolve())},
+        json={"file_id": file_id},
     )
-    data = response.json()
-    run_id = data["run_id"]
-    assert response.status_code == 200
+
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    data = _wait_for_run(client, run_id)
 
     # 验证失败状态持久化
     assert state_repo.run_state_exists(run_id)
@@ -171,13 +201,16 @@ def test_successful_run_persists_all_iteration_artifacts(
     )
     client = TestClient(create_app(settings=settings, workflow_service=service))
 
+    file_id = _upload_fixture_file(client, Path("tests/fixtures/sample_prd.md").resolve())
+
     response = client.post(
         "/api/v1/case-generation/runs",
-        json={"file_path": str(Path("tests/fixtures/sample_prd.md").resolve())},
+        json={"file_id": file_id},
     )
 
-    data = response.json()
-    assert response.status_code == 200
+    assert response.status_code == 202
+    run_id = response.json()["run_id"]
+    data = _wait_for_run(client, run_id)
     assert data["status"] == "succeeded"
 
     # 验证新增工件存在
